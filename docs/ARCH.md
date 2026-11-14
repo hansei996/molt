@@ -1812,6 +1812,67 @@ AstrBot 有个 `core_lifecycle.restart()`（`core_lifecycle.py:435`），最后�
 
 **只允许在 `terminate()` 完成、进程真正退出之后，才允许新壳启动。** 见 §5.2 的顺序铁律。
 
+### 11.3.3 怎么在一台机器上确认「只有一只鱼」—— 以及我在这里犯过的两个错
+
+#### 判据：看端口，不看进程名
+
+`Get-CimInstance Win32_Process … CommandLine -like "*astrbot*"` **认不出 AstrBot**：
+它在 Windows 上是以 `python.exe main.py` 起的，命令行里没有产品名。
+所以"我现在有几只鱼"这个问题只能由**端口**回答：
+
+```powershell
+Get-NetTCPConnection -LocalPort 6199 -State Listen | Select-Object OwningProcess
+```
+
+一个壳里出现两份 `main.py` 时，只有一份能 bind 6199；
+**但"端口只被一个占着"不等于"另一个没在说话"** —— 它可能已经把 QQ 的 websocket 建起来了。
+所以还要再验一层：`astrbot.log` 里 `Websocket session starting` 在这个时间窗内出现了几次。
+
+#### 错一：把「进程还在」当成「它还在干活」的反面，也错
+
+2026-11-15 04:12 那轮出现过两个 `python.exe main.py`，同一秒启动，其中一个的父进程是另一个。
+它们的运行数据差异巨大：
+
+| pid | CPU 时间 | 工作集 | 线程 |
+|---|---|---|---|
+| 20552 | **0 s** | **3 MB** | **1** |
+| 24592 | 47.9 s | 987 MB | 40 |
+
+我据此判断「20552 是尸体」，`Stop-Process -Force` 掉它 —— **结果 24592 也一起没了**：
+20552 是 **Job Object 的持有者**，子进程绑在它的 job 里，杀父即杀子。
+（`Get-NetTCPConnection` 那一列可以证明 20552 自己确实一个 socket 都没有，
+所以"它没在干活"是对的，**错的是"所以可以随便杀它"**。）
+
+> **教训：`0 CPU / 3 MB / 1 thread` 说明它不在干活，不说明它是孤儿。**
+> 一个壳里的进程关系比进程状态更重要 —— 杀之前先看 `ParentProcessId` 和 job 归属。
+
+#### 错二：删掉「已经生效」的假设
+
+同一轮还有个更贵的教训：改完服务端代码、把文件拷上去之后，
+请求 `POST /backup` 报 `请求体不是合法 JSON（HTTP 400, kind=bad_request）`。
+原因不是协议 —— 是**跑着的进程还是旧代码**，路由压根不存在，
+请求落进了 `_read_body()` 的 JSON 分支。
+
+> **把代码拷到机器上，和让机器跑那段代码，是两件事。**
+> 本项目在插件、三个守护进程、warden 上都踩过同一条，见 §5.7.6。
+
+#### 顺带被验证的：误杀之后它能自己回来【实测 04:40】
+
+误杀把 AstrBot 整个带走之后，Windows 侧 agent 在下一轮就发现了：
+
+```
+04:40:34 [idle] 第 15 代我已经落过了
+  第 15 代是我取的，但端口没人听 —— 我去把它拉起来
+  ✓ 已拉起 pid=16744
+04:40:46 [idle] 第 15 代我已经落过了
+  167 秒前刚拉过 AstrBot，它可能还在启动。这一轮先不重复拉（免得两只鱼同时在线）
+04:41:03 [QQOfficial] Websocket session starting.
+```
+
+两件事同时被证明：**自愈真的会动手**（判据是"端口没人听"，不是状态文件），
+**冷却真的会拦住第二只**（`BOOT_COOLDOWN_SECONDS = 180`，AstrBot 冷启动到 bind 要 20–30 秒）。
+那一轮 `[ERROR]` 行数为 0。
+
 ### 11.4 Litestream 能不能用
 
 能，但**只能当备份，不能当主链路**。
