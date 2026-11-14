@@ -584,6 +584,50 @@ def test_shutdown_after_leave_fires_when_generation_goes_elsewhere(tmp_path):
     assert agent.load_state().get("shut_down_for") == 11
 
 
+def test_shutdown_fires_against_the_real_ledger_lease_shape(tmp_path):
+    """账本"没有租约"时给的是一个**非空** dict，不是 `null`。
+
+    真机账本返回的是 `{"holder": null, "state": "no-lease"}`。第一版判据写成
+    `and not lease`，它对这个形状永远是假 —— 于是关机钩子在生产环境从来没触发过，
+    而单测因为夹具写的是 `"lease": None` 一直是绿的（2026-11-15 01:41 真机抓到）。
+    """
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+    cfg = settings(shutdown_after_leave=True, shutdown_delay_seconds=30,
+                   execute=True, power_action="shutdown")
+    st = {
+        "latest_generation": {"generation": 12, "target_shell": "nas-shell",
+                              "consumed_by": "", "pushed_by": "win-shell"},
+        "lease": {"holder": None, "state": "no-lease"},
+    }
+    agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
+                      status_fetcher=lambda: st,
+                      runner=_recorder(calls), port_probe=lambda port: False,
+                      spawner=lambda argv: 1, log=lambda m: None)
+    _decision, steps = agent.run_once()
+    assert [s.name for s in steps] == ["shutdown"]
+    assert calls and calls[-1][:4] == ["shutdown", "/s", "/t", "30"]
+
+
+def test_shutdown_does_not_fire_while_someone_holds_a_lease(tmp_path):
+    """有人持着租约时不关机：那一代正在飞，等它落定再决定。"""
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+    cfg = settings(shutdown_after_leave=True, execute=True, power_action="shutdown")
+    st = {
+        "latest_generation": {"generation": 12, "target_shell": "nas-shell",
+                              "consumed_by": "", "pushed_by": "win-shell"},
+        "lease": {"holder": "nas-shell", "state": "held"},
+    }
+    agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
+                      status_fetcher=lambda: st,
+                      runner=_recorder(calls), port_probe=lambda port: False,
+                      spawner=lambda argv: 1, log=lambda m: None)
+    _decision, steps = agent.run_once()
+    assert steps == []
+    assert calls == []
+
+
 def test_shutdown_after_leave_does_not_fire_for_my_own_generation(tmp_path):
     mod = sys.modules["molt_agent_under_test"]
     calls = []
@@ -667,3 +711,51 @@ def test_unknown_power_action_is_refused_not_guessed(tmp_path):
     assert not [c for c in calls if c and c[0] in ("shutdown", "rundll32.exe", "schtasks")]
 
 
+
+
+# ------------------------------------------------- 崩溃残留的 sidecar
+
+def test_clean_sidecars_removes_shm_and_empty_wal(tmp_path):
+    """断电留下的 `-shm` / 零字节 `-wal` 必须清掉，否则 land 的活目录护栏会一直拒绝。
+
+    2026-11-15 01:48 真机卡了两分钟：机器重启过、AstrBot 一个进程都没有，
+    但断电前那份 `-shm`（32768 B）还在，于是 agent 每 10 秒失败一次。
+    """
+    data = tmp_path / "data"
+    (data / "knowledge_base").mkdir(parents=True)
+    (data / "plugin_data" / "p").mkdir(parents=True)
+
+    (data / "data_v4.db").write_bytes(b"db")
+    (data / "data_v4.db-shm").write_bytes(b"\x00" * 64)
+    (data / "data_v4.db-wal").write_bytes(b"")
+
+    (data / "knowledge_base" / "kb.db").write_bytes(b"db")
+    (data / "knowledge_base" / "kb.db-shm").write_bytes(b"\x00" * 64)
+
+    # 非空 WAL 里有已提交事务，不能当垃圾删
+    (data / "plugin_data" / "p" / "x.db").write_bytes(b"db")
+    (data / "plugin_data" / "p" / "x.db-wal").write_bytes(b"\x01" * 32)
+
+    a, _r, _s, _l = _agent(tmp_path, cfg=settings(data_dir=str(data)), status_fetcher=lambda: ledger())
+    cleaned = a.do_clean_sidecars()
+
+    assert "data_v4.db-shm" in cleaned
+    assert "data_v4.db-wal" in cleaned
+    assert "kb.db-shm" in cleaned
+    assert not (data / "data_v4.db-shm").exists()
+    assert not (data / "knowledge_base" / "kb.db-shm").exists()
+    # 非空 WAL 原地保留
+    assert (data / "plugin_data" / "p" / "x.db-wal").exists()
+    assert "x.db-wal" not in cleaned
+
+
+def test_clean_sidecars_never_touches_backup_dirs(tmp_path):
+    """`.molt-pre-restore-*` 里是上一次落位前的原件，不是这次要清的垃圾。"""
+    data = tmp_path / "data"
+    backup = data / ".molt-pre-restore-20261115T011506"
+    backup.mkdir(parents=True)
+    (backup / "memory_companion.db-shm").write_bytes(b"\x00" * 64)
+
+    a, _r, _s, _l = _agent(tmp_path, cfg=settings(data_dir=str(data)), status_fetcher=lambda: ledger())
+    assert a.do_clean_sidecars() == []
+    assert (backup / "memory_companion.db-shm").exists()

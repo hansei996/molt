@@ -190,6 +190,10 @@ def test_land_argv_is_explicit(tmp_path):
     尤其 `--warden-url` / `--warden-token`：归档在 Warden 的中转区，不在本地磁盘。
     2026-11-15 00:59 真机第一次跑回家，就是漏了这两个，`land` 退出码 2，
     容器被停下来又拉起来，鱼回到了家却是个哑的。
+
+    还要 `--shell`：`land` 只在同时给了 `--generation` 和 `--shell` 时才登记
+    `consumed_by`。漏了它账本永远显示"还没人取走"，NAS 侧的 bounce 就一直 wait
+    （2026-11-15 01:45 真机抓到）。
     """
     h = make_homer(tmp_path)
     assert h.land_argv(8) == [
@@ -197,6 +201,7 @@ def test_land_argv_is_explicit(tmp_path):
         "--generation", "8",
         "--data", "/data",
         "--yes", "--no-color",
+        "--shell", "nas-shell",
         "--warden-url", "http://127.0.0.1:6186",
         "--warden-token", "tok",
     ]
@@ -210,7 +215,17 @@ def test_land_argv_omits_warden_flags_when_not_configured(tmp_path):
         "--generation", "3",
         "--data", "/data",
         "--yes", "--no-color",
+        "--shell", "nas-shell",
     ]
+
+
+def test_land_argv_refuses_to_omit_shell_when_shell_is_empty(tmp_path):
+    """`shell` 没配时宁可不传，也不传一个空串。
+
+    空 `--shell ""` 会让 `land` 觉得"这只壳报了名"，然后拿空字符串去认领这一代。
+    """
+    h = make_homer(tmp_path, cfg=settings(shell=""))
+    assert "--shell" not in h.land_argv(3)
 
 
 def test_switch_argv_points_at_cmd_config(tmp_path):

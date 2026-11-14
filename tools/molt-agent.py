@@ -457,16 +457,52 @@ class Agent:
                           f"{delay} 秒后关机（第 {generation} 代已经交给别人了）")
 
     def do_checkpoint(self) -> StepResult:
-        """停干净之后，把残留的 WAL 合并回主库 —— 不合并 land 会被护栏挡住。"""
+        """停干净之后，把残留的 WAL 合并回主库 —— 不合并 land 会被护栏挡住。
+
+        顺便清掉**崩溃留下的 sidecar**。判据已经由 `do_stop()` 给过了：
+        没有 AstrBot 在跑。`-shm` 是 mmap 出来的共享内存索引，只有活着的连接
+        才有意义；断电/强杀留下的那一份会永远待在那里，让 `land` 的
+        「目标目录还活着」护栏一直拒绝落位 —— 2026-11-15 01:48 真机就卡在
+        这里两分钟：机器明明已经重启过，AstrBot 一个进程都没有，
+        `-shm` 还在，于是 agent 每 10 秒失败一次。
+        """
         report = checkpoint_databases(self.settings.data_dir)
+        cleaned = self.do_clean_sidecars()
         if not report:
-            return StepResult("checkpoint", True, "没有待合并的 WAL")
-        stuck = [(n, a) for n, _b, a in report if a]
-        if stuck:
-            return StepResult("checkpoint", False,
-                              "这些库合不干净：" + "、".join(f"{n} 还剩 {a} 字节" for n, a in stuck))
-        return StepResult("checkpoint", True,
-                          "已合并 " + "、".join(f"{n}（{b} → 0）" for n, b, _a in report))
+            detail = "没有待合并的 WAL"
+        else:
+            stuck = [(n, a) for n, _b, a in report if a]
+            if stuck:
+                return StepResult("checkpoint", False,
+                                  "这些库合不干净：" + "、".join(f"{n} 还剩 {a} 字节" for n, a in stuck))
+            detail = "已合并 " + "、".join(f"{n}（{b} → 0）" for n, b, _a in report)
+        if cleaned:
+            detail += "；清掉崩溃残留 " + "、".join(cleaned)
+        return StepResult("checkpoint", True, detail)
+
+    def do_clean_sidecars(self) -> list:
+        """删掉 `*.db-shm` 与零字节 `*.db-wal`。**只删这两种**。
+
+        `-shm` 没有独立内容，下一个连接会重建它；非空 `-wal` 里有已提交事务，
+        那种必须靠 checkpoint 合并，不能当垃圾删。
+        """
+        out = []
+        root = Path(self.settings.data_dir)
+        if not root.is_dir():
+            return out
+        for pattern in ("*.db-shm", "*.db-wal"):
+            for p in root.rglob(pattern):
+                # 历史备份目录里的是「上一次落位前的原件」，不是这次要清的东西
+                if ".molt-pre-restore-" in str(p):
+                    continue
+                try:
+                    if pattern == "*.db-wal" and p.stat().st_size > 0:
+                        continue
+                    p.unlink()
+                    out.append(p.name)
+                except OSError:
+                    pass
+        return out
 
     def do_land(self, generation: int) -> StepResult:
         return self._run(self.land_argv(generation), timeout=600)
@@ -538,8 +574,13 @@ class Agent:
             target = str(gen.get("target_shell") or "").strip()
             gnum = gen.get("generation")
             lease = status.get("lease") or {}
+            # 判据是「没有人持有租约」，不是「lease 这个对象是空的」。
+            # 账本在没有租约时返回的是 {"holder": null, "state": "no-lease"}——
+            # 一个**非空**的 dict。第一版写的 `not lease` 永远为假，于是关机钩子
+            # 从来没触发过（真机 2026-11-15 01:41 抓到）。
+            holder = (lease or {}).get("holder")
             if (target and target != self.settings.shell
-                    and not lease and state.get("shut_down_for") != gnum):
+                    and not holder and state.get("shut_down_for") != gnum):
                 if not self.settings.execute:
                     self.log(f"  (dry-run) 我会关机：第 {gnum} 代的目標是 {target}")
                     return decision, steps

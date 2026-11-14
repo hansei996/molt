@@ -340,6 +340,13 @@ class Homer:
             "--data", self.settings.data_dir,
             "--yes", "--no-color",
         ]
+        # **必须带 `--shell`**：`land` 只在同时给了 `--generation` 和 `--shell`
+        # 时才向账本登记 `consumed_by`。漏了它，字节明明已经落地、鱼已经在说话，
+        # 账本却永远显示「还没人取走」——而 NAS 侧的 molt-bounce 正是靠
+        # `consumed_by == 我` 来判断"鱼到家了、可以重新推出去"，
+        # 于是它会一直 wait（2026-11-15 01:45 真机抓到）。
+        if self.settings.shell:
+            argv += ["--shell", self.settings.shell]
         if self.settings.warden_url:
             argv += ["--warden-url", self.settings.warden_url]
         if self.settings.warden_token:
