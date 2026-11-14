@@ -188,6 +188,29 @@ molt prune ... --yes                                                       # 真
 
 ---
 
+## 已知限制（诚实版）
+
+这些是**确实没做完**的，不是以后再说的修辞：
+
+1. **只在 AstrBot 4.29.4 上验过。** metadata.yaml 写的是 >=4.24.0，
+   但没在别的版本上跑过。接缝（context.platform_manager、
+egister_web_api）
+   在 4.x 里应该稳定，_inst_map 的内部形状则不一定 —— 如果它变了，
+   drain() 会退化成关不掉，**不会静默成功**（ok 会是 alse）。
+2. **新壳上会缺 51 个运行时包。** AstrBot 把 edge-tts / whisper 之类装进
+   data/site-packages，而那是**平台相关**的（122 个 x86_64-linux .so），
+   不能跨平台搬。现象是语音功能没了、日志里一串 ModuleNotFoundError，
+   **文字对话正常**。manifest.json 里有 
+untime_pip 清单就是为这个留的，
+   但 v0.1 还没有照着清单自动装那一步。
+3. **插件代码不跟着走。** COPY_ARTIFACTS 里没有 plugins/** ——
+   插件被当作壳而不是魂。于是可能出现：记忆库搬过去了，读它的插件没搬过去，
+   **鱼记得的少了，而且不报错**。v0.1 的建议是手动补，见 docs/SELFUSE.md。
+4. **Windows 侧要手写一份配置。** 	ools/molt-agent.json 现在是示例，
+   得自己填路径。理想是 molt setup 交互式生成，还没做。
+5. **断点续传没做。** 一次 PUT 27 MB 没问题；30 MB 以上才值得做。
+6. **没有 30 秒实录。** 这是传播上最大的短板，比任何功能都重要。
+
 ## 一些必须提前说清的话
 
 > **一句必须提前说清的话**：WOL 那次 PASS 只证明了"那一次关机时网卡是 armed 的"，
