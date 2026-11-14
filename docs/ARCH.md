@@ -2,7 +2,7 @@
 
 > **Molt / 蜕壳** —— 让一个数字生命在多台机器之间迁徙，而它的记忆原地不动。
 >
-> 文档状态：Draft v0.12 · 基于真实硬件实测（NAS + Windows 双机）· 所有关键结论标注证据等级
+> 文档状态：Draft v0.13 · 基于真实硬件实测（NAS + Windows 双机）· 所有关键结论标注证据等级
 >
 > **已验证的关卡**（截至 2026-11-14 23:15 —— **两个方向都跑通，两套命令走完，最后一个产品级未知数也回答了**）：
 > ✅ Windows 原生跑 AstrBot（178 包零缺 wheel）· ✅ 记忆跨机往返字节一致 · ✅ AstrBot 消费还原数据并读出人格
@@ -3123,6 +3123,30 @@ bounce: 已启动 pid=7328
 
 
 ---
+
+### 14.1 v0.4 硬化：所有持久化写入必须原子（2026-11-15）
+
+这一版只做一件事：**把「中间态」从系统里消灭掉。**
+
+理由是一句话：**这套系统里最贵的错误全都长得像成功。**
+
+| 看起来像成功的东西 | 实际发生了什么 | 谁会受害 |
+|---|---|---|
+| `archives/gen-000012.tar.gz` 存在 | 打包写到一半被杀，gzip 头是完整的，`tarfile` 能读出前几个成员 | 目标壳把半份快照当成完整快照落位 |
+| 目标 `data/data_v4.db` 存在且大小像样 | 落位复制到第二个文件时失败，第一个文件是新的、第二个是旧的 | 它带着一半新记忆、一半旧记忆醒来 |
+| `molt land` 报了个 `OSError` | 账本写盘满，`state.json` 还是上一版完整内容 | 人以为账本记下了，其实没有 |
+| `manifest.json` 能 `json.loads` | 它少了 `generation` 字段，`int(d["generation"])` 抛 `KeyError` | 排查的人去翻代码，而问题在那份快照上 |
+
+四条修法（都有故障注入测试钉住，见 `docs/FAULTS.md`）：
+
+1. **打包写 `.part` 再 `os.replace`**（`molt/transfer.py::make_archive`）。`.part` 必须与目标**同目录** —— `os.replace` 只在同一文件系统内原子，跨文件系统会退化成"拷贝 + 删除"，那就没有原子性了。这个正确模式 `server.py::_receive_archive` 早就用了，`make_archive` 漏了。
+2. **落位逐文件 `.molt-part` → `os.replace`**，全过程有 `.molt-restore-incomplete` 标记；两个守护进程启动前都读这个标记，读到就不启动。标记**只有被人读到才算数**，所以 `tools/molt-agent.py::do_boot()` 与 `tools/molt-homer.py::do_start()` 各有一道守卫。
+3. **`_atomic_write_json` 把非 `MoltError` 包成 `Fatal`**："目标文件还是上一次的完整内容 —— 这次写入没有落盘。" 账本写不进去时，宁可这次操作失败，也不能让它看起来成功。
+4. **`manifest_problems()` 先验形状再取值**：缺字段 / 类型错 / 空来源 / 未知 `schema_version` 一律 `Fatal` 并点名字段。理由写进了 docstring：直接 `int(d["generation"])` 报的 `KeyError` / `ValueError` **指向"代码写错了"而不是"这份快照有问题"**，于是会被人当成 bug 而不是被当成拒收理由。
+
+`molt land --generation N` 另加一道交叉校验：**manifest 里的代次必须等于 `N`**（`.molt/cli.py`）。否则就是"拿 A 代的出生证明去描述 B 代的内容"，而这两者都对得上各自的一半 —— 只有交叉比对能发现。
+
+一个容易忽略的细节：守护进程**不能** `import molt.transfer`（它们是被 `python tools/xxx.py` 直接跑起来的脚本，`sys.path` 里没有仓库根），所以 `RESTORE_MARKER_NAME` 这个字符串只能复制。**复制的东西必须有测试盯着** —— `test_hardening_restore_guard.py` 把三处常量钉在一起，改一处不改另两处会红。
 
 ## 15. 开放问题（需要决策）
 

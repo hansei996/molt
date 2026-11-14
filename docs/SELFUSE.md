@@ -869,3 +869,48 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dsh-port.ps1
 ✅ HTTP 已连接：deepseek-account / deepseek-flash (version 0.2+ (Typert))
 事件桥：已连接；待授权请求：0
 ```
+
+
+---
+
+## 如果它忽然不肯起来了：`.molt-restore-incomplete`
+
+这是一个**故意的**拦阻。落位（`molt land` / 回家 / 出门）如果在中途断掉
+（断电、盘满、AstrBot 的库被别人占着），目标 `data/` 里会留一个标记文件：
+
+```
+G:\molt-fish\data\.molt-restore-incomplete
+```
+
+只要它还在，agent 和 homer 都**拒绝启动壳**。因为那时候目标目录里可能是
+"一半新、一半旧"—— 让它在那种状态下开口，它会带着半份记忆说话，而且
+没有人看得出来哪里不对。
+
+日志里会写成这样：
+
+```
+上一次落位没有做完（第 13 代，开始于 2026-11-15 06:39:49）：…\.molt-restore-incomplete 还在。
+  现在起 AstrBot 会让它去读半份的库。先重跑一次 `molt land`
+  （或让守护进程再落一次），收尾之后标记会自己消失。
+```
+
+**正确的处理是重跑一次落位**（同一份快照、同一个 `--data`），它会接着收尾，
+收尾成功标记自己就没了。**不要手工删那个标记** —— 删掉等于告诉系统
+"上次那半途而废的落位是完整的"，而它并不知道。
+
+要确认现在是什么状态：
+
+```bash
+molt status                      # 看最近一代是谁取走的
+ls -a <data 目录> | grep molt-   # 看标记还在不在
+```
+
+## 关于"原子"这件事，一句话
+
+打包与落位现在都写 `.part` / `.molt-part`，校验通过才 `os.replace` 换成正式名字。
+所以**中途失败不会留下一个"看着像成功"的文件**：
+
+- 归档：要么完整存在，要么根本不存在（不会有半截的 `gen-000012.tar.gz`）；
+- 落位：目标里每个文件要么没写、要么与快照逐字节相同（不会有截断的库）。
+
+16 个故障场景的实测结果在 [`docs/FAULTS.md`](FAULTS.md)。

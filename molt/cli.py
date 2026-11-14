@@ -1427,9 +1427,16 @@ def cmd_land(args: argparse.Namespace) -> int:
         except ValueError as e:
             bad(str(e))
             return 2
-        if be.kind != "remote":
+        if be.kind != "remote" and not getattr(args, "root", None):
+            # 默认拒绝：不给 --warden-url 也不给 --root 时，`open_backend` 会
+            # 落到"本机默认 Warden 根"，那是个几乎空的目录 —— 于是 `land`
+            # 会报「这一代不存在」，而人会以为自己搞错了代次。
+            #
+            # 但显式给了 `--root` 就是另一回事：那是"Warden 的根就在这台机器
+            # 上这个位置"，同机测试和 NAS 本机上都是真实场景。
             bad("--generation 需要 --warden-url / --warden-token 指向 NAS 上的 Warden")
             dim("  中转区在 Warden 那一侧，不是本地目录。")
+            dim("  如果你确实要在这台机器上从某个 Warden 根目录取，加 --root <那个目录>。")
             return 2
 
     # 归档落到哪里：跟解包目录分开，因为"下载下来的 tar"和"解开之后的
@@ -1529,10 +1536,31 @@ def cmd_land(args: argparse.Namespace) -> int:
         dim(f"  解包目录 {gen_dir} 里没有 manifest.json。")
         return 6
 
-    m = Manifest.load(mpath)
+    try:
+        m = Manifest.load(mpath)
+    except NeedsHuman as e:
+        bad(str(e))
+        return 6
+    except Fatal as e:
+        # manifest 本身不完整 / 不是合法 JSON —— 这是"这份快照有问题"，
+        # 不是"molt 出 bug 了"，所以按拒收处理（退出码 6，与其它校验失败一致）。
+        bad(str(e))
+        return 6
     if m.protocol_version != PROTOCOL_VERSION:
         bad(f"协议版本不匹配：快照 {m.protocol_version}，本机 {PROTOCOL_VERSION}")
         return 5
+
+    # 交叉校验：manifest 说的代次必须和账本里那一代对得上。
+    #
+    # 为什么这条值得单独拦：`--generation N` 的意思是"取下账本里第 N 代"。
+    # 如果归档里的 manifest 说它是第 7 代，那要么账本被换过、要么这个归档
+    # 不是那一代的。两种情况下落位都会让本地库变成"账本说第 N 代，实际是
+    # 第 7 代的内容"——之后每一次 `decide()` 都基于一个错的代次做判断。
+    if generation and int(generation) != m.generation:
+        bad(f"manifest 说的是第 {m.generation} 代，但你要取的是第 {int(generation)} 代")
+        dim("  这两者对不上，说明归档和账本里的那一条不是同一个东西。")
+        dim("  用 --generation N 时，归档必须来自账本里第 N 代；换一个代次，或者查账本。")
+        return 6
 
     print()
     info(f"来源 {m.source_host} ({m.platform}) / AstrBot {m.astrbot_version} / 第 {m.generation} 代")
@@ -2225,6 +2253,10 @@ def build_parser() -> argparse.ArgumentParser:
     # land
     s = add("land", "在目标壳上把归档落进 data 目录（本地文件或从 Warden 取）")
     s.add_argument("--archive", help="本地 .tar.gz（与 --generation 二选一）")
+    s.add_argument(
+        "--root",
+        help="Warden 根目录（本地模式；用 --generation 且 Warden 就在本机时给它）",
+    )
     s.add_argument(
         "--generation",
         type=int,

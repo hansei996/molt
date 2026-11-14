@@ -286,6 +286,61 @@ class Artifact:
         )
 
 
+MANIFEST_SCHEMA_VERSION = 1
+
+# 缺了任何一个，这份快照就说不清"从哪来、第几代、谁交的"。
+# 而说不清来源的快照落位之后，出事时无从追责 —— 所以不是"尽量补默认值"，
+# 而是直接拒绝。
+_REQUIRED_MANIFEST_FIELDS = (
+    ("generation", int, "第几代"),
+    ("created_at", (int, float), "快照生成时刻"),
+    ("source_host", str, "从哪台机器来的"),
+    ("source_root", str, "源 data 目录"),
+    ("protocol_version", int, "协议版本"),
+)
+
+
+def manifest_problems(d: Any) -> List[str]:
+    """检查一份 manifest 字典，返回问题清单（空 = 通过）。
+
+    为什么不在 `from_dict` 里直接 `int(d["generation"])` 了事：
+    那样缺字段报的是 `KeyError: 'generation'`，类型错报的是
+    `ValueError: invalid literal for int()`。**这两种错误都指向"代码写错了"，
+    而不是"这份快照有问题"** —— 于是它会被人当成 bug 而不是被当成拒收理由。
+    """
+    problems: List[str] = []
+    if not isinstance(d, dict):
+        return [f"顶层不是一个 JSON 对象，而是 {type(d).__name__}"]
+
+    for key, kinds, meaning in _REQUIRED_MANIFEST_FIELDS:
+        if key not in d:
+            problems.append(f"缺字段 `{key}`（{meaning}）")
+            continue
+        value = d[key]
+        # bool 是 int 的子类，`True` 不该被当成合法的 generation
+        if isinstance(value, bool) or not isinstance(value, kinds):
+            problems.append(
+                f"字段 `{key}`（{meaning}）类型不对：期望 "
+                f"{' / '.join(k.__name__ for k in (kinds if isinstance(kinds, tuple) else (kinds,)))}，"
+                f"实际 {type(value).__name__}（{value!r}）"
+            )
+
+    for key in ("source_host", "source_root"):
+        if isinstance(d.get(key), str) and not d[key].strip():
+            problems.append(f"字段 `{key}` 是空的 —— 等于没说从哪来")
+
+    if "schema_version" in d:
+        sv = d["schema_version"]
+        if isinstance(sv, bool) or not isinstance(sv, int):
+            problems.append(f"`schema_version` 必须是整数，实际 {type(sv).__name__}")
+        elif sv != MANIFEST_SCHEMA_VERSION:
+            problems.append(
+                f"`schema_version` 是 {sv}，本机只认 {MANIFEST_SCHEMA_VERSION}"
+            )
+
+    return problems
+
+
 @dataclass
 class Manifest:
     """一次迁徙的出生证明。
@@ -331,6 +386,13 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Manifest":
+        problems = manifest_problems(d)
+        if problems:
+            raise Fatal(
+                "这份 manifest 不完整，不能拿它当快照的出生证明：\n"
+                + "\n".join(f"  - {p}" for p in problems)
+                + "\n  一份说不清「从哪来、第几代、谁交的」的快照，落位之后无从追责。"
+            )
         return cls(
             generation=int(d["generation"]),
             created_at=float(d["created_at"]),
@@ -358,7 +420,19 @@ class Manifest:
     def load(cls, path: Path) -> "Manifest":
         if not path.exists():
             raise NeedsHuman(f"manifest 不存在：{path}")
-        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except UnicodeDecodeError as e:
+            raise Fatal(f"manifest 不是 UTF-8 文本：{path}\n  {e}") from e
+        except ValueError as e:
+            raise Fatal(
+                f"manifest 不是合法 JSON：{path}\n"
+                f"  第 {getattr(e, 'lineno', '?')} 行第 {getattr(e, 'colno', '?')} 列："
+                f"{getattr(e, 'msg', e)}\n"
+                "  半份的 manifest 看起来和完整的一样能读出来，但它的含义是"
+                "「上一次写它的时候断电了」。"
+            ) from e
+        return cls.from_dict(payload)
 
     # -- 校验 --
 

@@ -225,14 +225,19 @@ Kleppmann 那篇 `How to do distributed locking`（2016-02-08）里说得最狠�
 
 ### 4.2 版本计划
 
-| 版本 | 目标 | 验收标准 | 预估 | 前置风险 |
+> **2026-11-15 更新**：括号里是实际状态。**v0.1–v0.4 已经全部完成**（v0.4 的
+> 16 个故障场景全过，见 [`docs/FAULTS.md`](FAULTS.md)；证据见 `docs/ARCH.md`
+> 与 `docs/SESSION-STATE.md`）。**下一个版本是 v0.5 通用化**（第二宿主适配器），
+> 任务台账待立。
+
+| 版本 | 目标 | 验收标准 | 预估 | 状态 |
 |---|---|---|---|---|
-| **v0.1** 手工验证 | 证明数据不坏、Windows 能跑 | 手工 checkout/checkin 10 轮，`integrity_check` 全 ok；Windows 上 AstrBot 能收发 QQ | 1–2 周 | ~~Windows 装不上~~ ✅ 已排除 |
-| **v0.2** 租约 | 证明互斥 | Warden + epoch；故意制造 split brain，验证旧 epoch 被拒 | 1 周 | — |
-| **v0.3** 自动化 | 端到端可用 | QQ 一条命令完成迁徙/归巢，全程 < 2 分钟 | 2 周 | ~~WOL 唤不醒~~ ✅ 已排除 |
-| **v0.4** 硬化 | 故障注入 | 断电、断网、时钟漂移、库损坏注入，全部安全失败 | 2 周 | — |
-| **v0.5** 通用化 | 脱离 AstrBot | 第二个 adapter（如 MaiBot / 纯 Python 宿主）跑通 | 3 周 | — |
-| **v1.0** 开源发布 | 别人能用 | 完整文档、Docker 镜像、插件市场上架、CI、迁移日志可视化 | 2 周 | — |
+| **v0.1** 手工验证 | 证明数据不坏、Windows 能跑 | 手工 checkout/checkin 10 轮，`integrity_check` 全 ok；Windows 上 AstrBot 能收发 QQ | 1–2 周 | ✅ 完成 |
+| **v0.2** 租约 | 证明互斥 | Warden + epoch；故意制造 split brain，验证旧 epoch 被拒 | 1 周 | ✅ 完成 |
+| **v0.3** 自动化 | 端到端可用 | QQ 一条命令完成迁徙/归巢，全程 < 2 分钟 | 2 周 | ✅ 完成（真机 20 秒） |
+| **v0.4** 硬化 | 故障注入 | 断电、断网、时钟漂移、库损坏注入，全部安全失败 | 2 周 | ✅ 完成（16 场景全过，见 [`docs/FAULTS.md`](FAULTS.md)） |
+| **v0.5** 通用化 | 脱离 AstrBot | 第二个 adapter（如 MaiBot / 纯 Python 宿主）跑通 | 3 周 | 未开始 |
+| **v1.0** 开源发布 | 别人能用 | 完整文档、Docker 镜像、插件市场上架、CI、迁移日志可视化 | 2 周 | 部分（CI ✅、插件市场已提交待审） |
 
 **两个曾经的最大风险，现在都已实测排除**：
 

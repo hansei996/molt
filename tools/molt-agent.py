@@ -59,6 +59,10 @@ DEFAULT_PORT = 6199
 # 拉起来之后多久之内不再拉第二次。AstrBot 冷启动到 6199 在听实测 20–30 秒，
 # 这里给到 180 秒：宁可多等一轮，也不要一个壳里冒出两只鱼。
 BOOT_COOLDOWN_SECONDS = 180.0
+# `molt land` 落位到一半时留在目标 data 目录里的标记。名字必须与
+# `molt/transfer.py` 的 `RESTORE_MARKER_NAME` 完全一致 ——
+# `molt/tests/test_hardening_atomicity.py` 里有一条测试钉住这件事。
+RESTORE_MARKER_NAME = ".molt-restore-incomplete"
 
 
 # ---------------------------------------------------------------- 配置
@@ -670,6 +674,9 @@ class Agent:
         """起 AstrBot。**不起第二个**——本机已经在跑就什么都不做。"""
         if self._probe_port():
             return StepResult("boot", True, "本机已经在跑（端口在听），不重复起")
+        blocked = self.restore_marker_reason()
+        if blocked:
+            return StepResult("boot", False, blocked)
         if self.spawner is None:
             return StepResult("boot", False, "没有 spawner")
         try:
@@ -677,6 +684,37 @@ class Agent:
         except OSError as exc:
             return StepResult("boot", False, f"起不来：{exc}")
         return StepResult("boot", True, f"已拉起 pid={pid}")
+
+    def restore_marker_reason(self) -> str:
+        """上一次落位没做完吗？没做完就不许起 AstrBot。
+
+        `molt land` 是逐文件写的：每个文件先写 `.molt-part` 再 `os.replace`
+        就位，全部成功才删掉 data 目录里的 `.molt-restore-incomplete` 标记。
+        所以标记还在 = **那份 data/ 里可能有一个半份的库**。
+
+        为什么必须在这里拦：AstrBot 起来之后会自己去打开 `data_v4.db`。
+        读一个半份的库不会崩在启动阶段 —— 它会在某个查询里报
+        `database disk image is malformed`，那时离"为什么坏"已经很远了。
+
+        **标记只有被人读到才算数**，所以这条守卫是这套机制的一半。
+        """
+        marker = Path(self.settings.data_dir) / RESTORE_MARKER_NAME
+        if not marker.exists():
+            return ""
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {"broken": True}
+        if not isinstance(payload, dict):
+            payload = {"broken": True}
+        generation = payload.get("generation")
+        started = payload.get("started_at") or "时间不明"
+        which = f"第 {generation} 代" if generation else "某一代"
+        return (
+            f"上一次落位没有做完（{which}，开始于 {started}）：{marker} 还在。\n"
+            "  现在起 AstrBot 会让它去读半份的库。先重跑一次 `molt land`"
+            "（或让守护进程再落一次），收尾之后标记会自己消失。"
+        )
 
     def do_extras(self) -> list:
         """AstrBot 已经开口之后，把这台壳上"顺手该起来"的东西拉起来。

@@ -54,6 +54,9 @@ STATE_FILENAME = "molt-homer-state.json"
 DEFAULT_INTERVAL = 10.0
 DEFAULT_STOP_TIMEOUT = 90.0
 DEFAULT_TIMEOUT = 60.0
+# 与 `molt/transfer.py` 的 `RESTORE_MARKER_NAME` 必须完全一致
+# （`molt/tests/test_hardening_atomicity.py` 有一条测试钉住这一点）。
+RESTORE_MARKER_NAME = ".molt-restore-incomplete"
 
 
 # ---------------------------------------------------------------- 控制台
@@ -495,6 +498,10 @@ class Homer:
         if self.container_running() is True:
             self.log(f"  容器 {self.settings.container} 已经在跑")
             return True
+        blocked = self.restore_marker_reason()
+        if blocked:
+            self.log(f"  ! {blocked}")
+            return False
         try:
             cp = self.runner(self._docker("start", self.settings.container),
                              timeout=self.settings.timeout)
@@ -506,6 +513,34 @@ class Homer:
             return False
         self.log(f"  ✓ 容器已启动：{cp.stdout.strip()}")
         return True
+
+    def restore_marker_reason(self) -> str:
+        """上一次落位没做完吗？没做完就不许起容器。
+
+        `molt land` 逐文件写：先 `.molt-part` 再 `os.replace`，全部成功才删
+        data 目录里的 `.molt-restore-incomplete`。标记还在 = 那份 data/ 里
+        可能有一个半份的库。
+
+        **容器一启动，AstrBot 就会去开那个库。** 半份的库不会崩在启动阶段，
+        它会在某个查询里报 `database disk image is malformed` —— 那时离
+        "为什么坏"已经很远了，所以必须拦在这一步之前。
+        """
+        marker = Path(self.settings.data_dir) / RESTORE_MARKER_NAME
+        if not marker.exists():
+            return ""
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {"broken": True}
+        if not isinstance(payload, dict):
+            payload = {"broken": True}
+        generation = payload.get("generation")
+        started = payload.get("started_at") or "时间不明"
+        which = f"第 {generation} 代" if generation else "某一代"
+        return (
+            f"上一次落位没有做完（{which}，开始于 {started}）：{marker} 还在。"
+            " 现在起容器会让 AstrBot 去读半份的库；先落一次位把它收尾。"
+        )
 
     # -- 三步
 

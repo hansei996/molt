@@ -290,12 +290,23 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
                     os.close(dfd)
             except OSError:
                 pass
-    except Exception:
+    except Exception as exc:
         try:
             os.unlink(tmp_name)
         except OSError:
             pass
-        raise
+        if isinstance(exc, MoltError):
+            raise
+        # 盘满、权限、配额、被别的进程占住 —— 这些都不该是一个裸 OSError。
+        #
+        # 裸 OSError 冒到命令行就是一段 traceback：人会以为 molt 有 bug，
+        # 而真正的事实是"这次写入没生效、目标文件还是上一次的完整内容"。
+        # 后者是可判断、可重试的，前者只会让人不敢再跑第二条命令。
+        raise Fatal(
+            f"写 {path.name} 失败：{exc}\n"
+            "  目标文件还是上一次的完整内容 —— 这次写入没有落盘。\n"
+            "  账本写不进去的时候，宁可这次操作失败，也不能让它看起来成功。"
+        ) from exc
 
 
 class _InterProcessLock:

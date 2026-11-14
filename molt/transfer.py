@@ -32,8 +32,11 @@ tar 返回 0 不代表完整。磁盘写满时 tar 会在 stderr 抱怨但（某
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import tarfile
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
@@ -129,42 +132,64 @@ def make_archive(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 归档里用正斜杠相对路径，这样 Windows 打的包在 NAS 上也能正确解开。
-    with tarfile.open(out_path, "w:gz", compresslevel=6) as tf:
-        for p in files:
-            rel = p.relative_to(src_dir).as_posix()
-            tf.add(str(p), arcname=rel, recursive=False)
-
-    # 立刻重读整个归档算指纹——这是发现截断的唯一手段。
-    digest = sha256_of(out_path)
-    size = out_path.stat().st_size
-
-    # --- 再验一遍：回读归档，逐个核对成员数与字节数 ---
+    # --- 先写 `.part`，验完才改名 ---
     #
-    # 一开始这里写的是"归档小于 1KB 就报错"，那是个坏检查：它把
-    # "内容真的很大"当成了"归档是对的"，而一个 100MB 的截断归档照样
-    # 能通过。真正的判据是**我写进去的东西能不能原样读出来**。
+    # 直接写最终文件名的话，进程在 `tf.add` 中间被杀掉（断电、盘满、SIGKILL），
+    # 磁盘上就留下一个**截断的 `gen-000012.tar.gz`**。它为什么会骗人：
+    #
+    #   - `list_archives()` 用 `glob("gen-*.tar.gz")` 枚举，它会被列出来
+    #   - `tarfile.open()` 对截断的 gzip 往往能读出前面几个成员，不报错
+    #   - 名字里带着代次，看起来"就是那一代"
+    #
+    # `.part` 和 `out_path` 必须同目录：`os.replace` 只有在同一个文件系统内
+    # 才是原子的，跨文件系统会退化成"拷贝 + 删除"——那就又回到中间态了。
+    part_path = out_path.with_name(out_path.name + ".part")
     try:
-        with tarfile.open(out_path, "r:gz") as tf:
-            got = {m.name: m.size for m in tf.getmembers() if m.isfile()}
-    except tarfile.TarError as e:
-        raise Fatal(
-            f"刚写出的归档已经读不开了（多半是写到一半失败或盘满）：{out_path}\n  {e}"
-        ) from e
+        with tarfile.open(part_path, "w:gz", compresslevel=6) as tf:
+            for p in files:
+                rel = p.relative_to(src_dir).as_posix()
+                tf.add(str(p), arcname=rel, recursive=False)
 
-    expected = {p.relative_to(src_dir).as_posix(): p.stat().st_size for p in files}
-    if got != expected:
-        missing = sorted(set(expected) - set(got))
-        extra = sorted(set(got) - set(expected))
-        wrong = sorted(
-            n for n in set(expected) & set(got) if expected[n] != got[n]
-        )
-        raise Fatal(
-            "归档内容与源目录不一致，拒绝继续。\n"
-            f"  缺失 {missing[:5]}{' …' if len(missing) > 5 else ''}\n"
-            f"  多出 {extra[:5]}{' …' if len(extra) > 5 else ''}\n"
-            f"  大小不符 {wrong[:5]}{' …' if len(wrong) > 5 else ''}"
-        )
+        # 立刻重读整个归档算指纹——这是发现截断的唯一手段。
+        digest = sha256_of(part_path)
+        size = part_path.stat().st_size
+
+        # --- 再验一遍：回读归档，逐个核对成员数与字节数 ---
+        #
+        # 一开始这里写的是"归档小于 1KB 就报错"，那是个坏检查：它把
+        # "内容真的很大"当成了"归档是对的"，而一个 100MB 的截断归档照样
+        # 能通过。真正的判据是**我写进去的东西能不能原样读出来**。
+        try:
+            with tarfile.open(part_path, "r:gz") as tf:
+                got = {m.name: m.size for m in tf.getmembers() if m.isfile()}
+        except tarfile.TarError as e:
+            raise Fatal(
+                f"刚写出的归档已经读不开了（多半是写到一半失败或盘满）：{out_path}\n  {e}"
+            ) from e
+
+        expected = {p.relative_to(src_dir).as_posix(): p.stat().st_size for p in files}
+        if got != expected:
+            missing = sorted(set(expected) - set(got))
+            extra = sorted(set(got) - set(expected))
+            wrong = sorted(
+                n for n in set(expected) & set(got) if expected[n] != got[n]
+            )
+            raise Fatal(
+                "归档内容与源目录不一致，拒绝继续。\n"
+                f"  缺失 {missing[:5]}{' …' if len(missing) > 5 else ''}\n"
+                f"  多出 {extra[:5]}{' …' if len(extra) > 5 else ''}\n"
+                f"  大小不符 {wrong[:5]}{' …' if len(wrong) > 5 else ''}"
+            )
+
+        os.replace(part_path, out_path)
+    finally:
+        # 成功时 `.part` 已经被改名，这里什么都不会发生；失败时必须清掉，
+        # 否则下一轮会看到"一个上一轮留下的半份文件"，而它看起来也像归档。
+        if part_path.exists():
+            try:
+                part_path.unlink()
+            except OSError:  # pragma: no cover - 清理失败不该盖住真正的错误
+                pass
 
     return {
         "path": str(out_path),
@@ -274,6 +299,40 @@ def _sidecar_of(db: Path) -> List[Path]:
     return [Path(str(db) + "-wal"), Path(str(db) + "-shm")]
 
 
+RESTORE_MARKER_NAME = ".molt-restore-incomplete"
+
+
+def incomplete_restore(data_dir: Path) -> Optional[Dict[str, Any]]:
+    """目标 data 目录里有没有"上一次落位没做完"的标记。
+
+    读不到（不存在）返回 `None`。标记存在但内容坏了，返回一个带
+    `{"broken": True}` 的字典 —— **读不出来的标记同样要当成"没做完"**：
+    那说明上一次正好在写标记的时候断电了，而那个时刻本来就在中段。
+    """
+    marker = Path(data_dir) / RESTORE_MARKER_NAME
+    if not marker.exists():
+        return None
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"broken": True}
+    if not isinstance(payload, dict):
+        return {"broken": True}
+    return payload
+
+
+def _write_restore_marker(data_dir: Path, gen_dir: Path, payload: Dict[str, Any]) -> None:
+    marker = data_dir / RESTORE_MARKER_NAME
+    body = {
+        "gen_dir": str(gen_dir),
+        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "generation": payload.get("generation"),
+    }
+    tmp = marker.with_name(marker.name + ".tmp")
+    tmp.write_text(json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, marker)
+
+
 def restore_into(
     gen_dir: Path,
     target_data_dir: Path,
@@ -282,7 +341,7 @@ def restore_into(
 ) -> Dict[str, Any]:
     """把 generation 目录里的工件搬到目标壳的 data 目录里。
 
-    返回 `{restored, backup_dir, skipped}`。
+    返回 `{restored, backup_dir, skipped, sidecars_cleaned}`。
 
     ## 为什么这件事必须这么小心
 
@@ -297,6 +356,17 @@ def restore_into(
       1. 目标库的 `-wal` **非空** → 拒绝落位（有未合并事务，覆盖就是丢数据）
       2. 目标库的 `-wal` 为空、`-shm` 存在 → 一起移进备份目录
       3. 原有文件全部移到 `.molt-pre-restore-<stamp>/`，不删除
+
+    ## 为什么每个文件都要先写 `.molt-part`
+
+    直接 `shutil.copy2` 到 `dst`，中途断电会在目标 `data/` 里留下一个
+    **截断的 `data_v4.db`**：文件名对、位置对、`stat().st_size > 0`。
+    只有 SQLite 真去打开它，才会报 `file is not a database`。
+
+    所以：写 `<dst>.molt-part` → `os.replace` 就位（同一目录内原子）。
+    再加一个 `.molt-restore-incomplete` 标记：落位开始前写、全部完成后删。
+    **标记只有被人读到才算数** —— `tools/molt-agent.py` 与
+    `tools/molt-homer.py` 在启动 AstrBot 之前都查它。
 
     `backup=False` 只给测试用：生产路径上永远要留一份原样。
     """
@@ -332,39 +402,55 @@ def restore_into(
     backup_dir = target_data_dir / f".molt-pre-restore-{stamp}"
     restored: List[str] = []
     skipped: List[str] = []
+    parts: List[Path] = []
 
-    payload = _iter_payload_files(gen_dir)
-    for src_file in payload:
-        rel = src_file.relative_to(gen_dir)
-        if rel.as_posix() == "manifest.json":
-            # manifest 描述的是"这份快照从哪来"，不该进目标机的 data/。
-            # 它留在 generation 目录里，由 Warden 的账本引用。
-            skipped.append(rel.as_posix())
-            continue
+    _write_restore_marker(target_data_dir, gen_dir, {})
 
-        dst = target_data_dir / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        payload = _iter_payload_files(gen_dir)
+        for src_file in payload:
+            rel = src_file.relative_to(gen_dir)
+            if rel.as_posix() == "manifest.json":
+                # manifest 描述的是"这份快照从哪来"，不该进目标机的 data/。
+                # 它留在 generation 目录里，由 Warden 的账本引用。
+                skipped.append(rel.as_posix())
+                continue
 
-        if dst.exists():
-            if backup:
-                bak = backup_dir / rel
-                bak.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(dst), str(bak))
-            else:
-                dst.unlink()
+            dst = target_data_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
 
-        # 顺手清掉目标处的空 WAL / 陈旧 SHM，避免新旧混在一起
-        for side in _sidecar_of(dst):
-            if side.exists():
+            if dst.exists():
                 if backup:
-                    bak = backup_dir / side.name
+                    bak = backup_dir / rel
                     bak.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(side), str(bak))
+                    shutil.move(str(dst), str(bak))
                 else:
-                    side.unlink()
+                    dst.unlink()
 
-        shutil.copy2(src_file, dst)
-        restored.append(rel.as_posix())
+            # 顺手清掉目标处的空 WAL / 陈旧 SHM，避免新旧混在一起
+            for side in _sidecar_of(dst):
+                if side.exists():
+                    if backup:
+                        bak = backup_dir / side.name
+                        bak.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(side), str(bak))
+                    else:
+                        side.unlink()
+
+            # 先写 .molt-part 再改名：中途断电只会留下一个明显的半成品，
+            # 而不是一个"看起来正常的库"。
+            part = dst.with_name(dst.name + ".molt-part")
+            parts.append(part)
+            shutil.copy2(src_file, part)
+            os.replace(part, dst)
+            restored.append(rel.as_posix())
+    finally:
+        for part in parts:
+            if part.exists():
+                try:
+                    part.unlink()
+                except OSError:  # pragma: no cover
+                    pass
 
     # 落位完再收一次尾。
     #
@@ -391,6 +477,14 @@ def restore_into(
                 )
             leftover.append(side.name)
             side.unlink()
+
+    # 走到这里说明所有文件都已经就位 —— 标记才可以删。
+    marker = target_data_dir / RESTORE_MARKER_NAME
+    if marker.exists():
+        try:
+            marker.unlink()
+        except OSError:  # pragma: no cover
+            pass
 
     return {
         "restored": restored,
