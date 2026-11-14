@@ -121,6 +121,10 @@ class Settings:
     #: 容器里必须是 0.0.0.0（容器内监听 loopback 的话，映射出去的端口后面什么都没有）。
     dashboard_host: str = ""
     dashboard_port: int = 0
+    #: 容器起来之后要不要告诉它"你搬家了"。投递失败不影响交接结论。
+    announce: bool = True
+    #: 等 dashboard 应答多久（容器里 AstrBot 从启到 WebUI 能用，实测 15–25 秒）。
+    announce_wait: float = 120.0
 
     @classmethod
     def load(cls, path: Path) -> "Settings":
@@ -531,6 +535,40 @@ class Homer:
 
     # -- 一轮
 
+    def announce_argv(self, generation: int, src: str) -> List[str]:
+        """起来之后告诉它「你搬家了」，让这次迁徙进它的记忆。
+
+        走 `molt announce` 子进程而不是在这里 import：它要用**那只壳自己的**
+        `dashboard.jwt_secret` 现签 token，而那些凭据属于子进程该读的东西，
+        不该让常驻的 homer 长期拿着。
+        """
+        s = self.settings
+        port = s.dashboard_port or 6185
+        return [
+            s.python, "-m", "molt.cli", "announce",
+            "--config", os.path.join(s.data_dir, "cmd_config.json"),
+            "--base", f"http://127.0.0.1:{port}",
+            "--src", src or "",
+            "--dst", s.shell,
+            "--generation", str(generation),
+            "--wait", str(s.announce_wait),
+            "--no-color",
+        ]
+
+    def do_announce(self, generation: int, src: str) -> bool:
+        argv = self.announce_argv(generation, src)
+        try:
+            cp = self.runner(argv, timeout=self.settings.announce_wait + 60, cwd=self.settings.molt_pkg or None)
+        except Exception as exc:  # noqa: BLE001 - 通知失败不该把一轮带走
+            self.log(f"  ! 迁徙通知起不来：{exc}")
+            return False
+        out = ((cp.stdout or "") + (cp.stderr or "")).strip()
+        if cp.returncode != 0:
+            self.log(f"  ! 迁徙通知没送到（退出码 {cp.returncode}）：{out[-400:]}")
+            return False
+        self.log("  ✓ 迁徙通知已投递（这次搬家会进它的记忆）")
+        return True
+
     def run_once(self) -> Dict[str, Any]:
         state = self.load_state()
         try:
@@ -613,6 +651,11 @@ class Homer:
         if started:
             state["needs_start"] = False
             self.save_state(state)
+            # 5) 最后才告诉它「你搬家了」：必须等 WebUI 真能应答，否则消息没处投。
+            #    这一步失败只是"这次它没记住"，**绝不影响交接结论** —— 鱼已经在说话了。
+            if self.settings.announce:
+                src = str((status.get("latest_generation") or {}).get("pushed_by") or "")
+                self.do_announce(generation, src)
         return {"ok": bool(landed and switched and started),
                 "kind": "land", "generation": generation,
                 "switched": switched, "started": started}

@@ -428,7 +428,9 @@ def test_needs_start_is_on_disk_before_landing(tmp_path):
 
     class Spy(FakeRunner):
         def __call__(self, argv, **kwargs):
-            if argv[:1] != ["docker"] and "molt.cli" in " ".join(argv):
+            # 只记 land 那一刻的 state：后面的 announce 会把 needs_start 清掉，
+            # 那不是这条测试想证的事。
+            if "land" in argv and "molt.cli" in " ".join(argv):
                 state_file = tmp_path / homer_mod.STATE_FILENAME
                 if state_file.is_file():
                     seen["state"] = json.loads(state_file.read_text(encoding="utf-8"))
@@ -577,3 +579,67 @@ def test_idle_does_not_stop_when_generation_is_mine(tmp_path):
     result = a.run_once()
     assert result.get("stood_down") is None
     assert not any(c[:2] == ["docker", "kill"] for c in runner.calls)
+
+
+# ---------------------------------------------------------------- 迁徙通知
+
+
+def test_announce_tells_it_which_generation_moved(tmp_path):
+    """起来之后要告诉它「你搬家了」—— 否则这次迁徙永远不进它的记忆。
+
+    真机实测（2026-11-15 02:34）：memories 84 条里提到迁徙的那些，
+    **全是"主人说过的关于搬家的话"，没有一条是"我被搬了"**。
+    """
+    runner = FakeRunner()
+    a = make_homer(tmp_path, runner=runner, cfg=settings(execute=True), status=ledger())
+    a.run_once()
+
+    announce = [c for c in runner.calls if "announce" in c]
+    assert len(announce) == 1, "落位并且起容器之后应该投一条通知"
+    argv = announce[0]
+    assert argv[argv.index("--generation") + 1] == "7"
+    assert argv[argv.index("--dst") + 1] == SHELL
+    assert argv[argv.index("--config") + 1].endswith("cmd_config.json")
+
+
+def test_announce_happens_only_after_the_container_starts(tmp_path):
+    """容器没起来就没有人能收到这条消息 —— 顺序错了等于白发。"""
+    runner = FakeRunner()
+    a = make_homer(tmp_path, runner=runner, cfg=settings(execute=True), status=ledger())
+    a.run_once()
+
+    verbs = []
+    for call in runner.calls:
+        if call[:1] == ["docker"] and len(call) > 1:
+            verbs.append("docker-" + call[1])
+        elif "land" in call:
+            verbs.append("land")
+        elif "platform-switch" in " ".join(call):
+            verbs.append("switch")
+        elif "announce" in call:
+            verbs.append("announce")
+    assert verbs.index("docker-start") < verbs.index("announce")
+
+
+def test_announce_failure_does_not_fail_the_handover(tmp_path):
+    """通知没送到只意味着"这次它没记住"，交接已经成功了。"""
+    class AnnounceFails(FakeRunner):
+        def __call__(self, argv, **kwargs):
+            proc = super().__call__(argv, **kwargs)
+            if "announce" in argv:
+                proc.returncode = 2
+                proc.stdout = "读不到控制凭据"
+            return proc
+
+    runner = AnnounceFails()
+    a = make_homer(tmp_path, runner=runner, cfg=settings(execute=True), status=ledger())
+    result = a.run_once()
+    assert result["ok"] is True
+
+
+def test_announce_can_be_switched_off(tmp_path):
+    runner = FakeRunner()
+    a = make_homer(tmp_path, runner=runner, cfg=settings(execute=True, announce=False),
+                   status=ledger())
+    a.run_once()
+    assert not any("announce" in c for c in runner.calls)

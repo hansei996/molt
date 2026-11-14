@@ -1658,6 +1658,94 @@ def cmd_prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_announce(args: argparse.Namespace) -> int:
+    """告诉刚落地的那只壳：「你搬家了」。
+
+    它补的是一个很具体的空洞：molt 搬的是**魂的数据**，不是**魂的经历**。
+    真机实测（2026-11-15 02:34）—— `memories` 84 条、`timeline` 296 条，提到
+    迁徙的那些**全是"主人说过的关于搬家的话"，没有一条是"我被搬了"**；而
+    drain 到 land 之间它根本不存在，所以那四分半里没有人经历任何事。
+
+    于是这里让 molt 通过 WebChat 投一条通知进去。它会回一句话，这一问一答
+    就是一次真正的对话轮次，`memory_companion` 会照常总结进 `memories`。
+
+    ## 为什么失败不算失败
+
+    通知没送到只意味着"这次它没记住"，而一次**已经成功**的迁徙不该因为写不进
+    记忆被判失败。所以：`wait_for_dashboard` 超时 → 返回 0 并说明"没送到"；
+    投递被拒 → 返回 0 并说明原因；只有**参数或配置错了**才返回 2。
+    """
+    from .notify import (
+        DEFAULT_BASE,
+        DEFAULT_SESSION,
+        DEFAULT_TIMEOUT,
+        announce,
+        build_announcement,
+        wait_for_dashboard,
+    )
+    from .control import read_dashboard_credentials, sign_dashboard_jwt
+
+    message = build_announcement(
+        src=args.src,
+        dst=args.dst,
+        generation=args.generation,
+        seconds=args.seconds,
+        size_bytes=args.size_bytes,
+        extra=args.extra,
+    )
+
+    head("迁徙通知")
+    kv("来源壳", args.src or "（未给）")
+    kv("目标壳", args.dst or "（未给）")
+    if args.generation is not None:
+        kv("generation", str(args.generation))
+    print()
+    for line in message.splitlines():
+        dim(f"  {line}" if line else "")
+    print()
+
+    if args.dry_run:
+        dim("  --dry-run：只拼文案，不投递。")
+        return 0
+
+    base = args.base or DEFAULT_BASE
+    info(f"等 {base} 能应答（最多 {args.wait:.0f} 秒）…")
+    if not wait_for_dashboard(base, timeout=args.wait):
+        warn("那只壳的 dashboard 一直没应答 —— 这条通知没送到。")
+        dim("  交接本身不受影响：这是「没记住」，不是「搬失败」。")
+        return 0
+    ok("它起来了。")
+
+    try:
+        secret, username = read_dashboard_credentials(args.config)
+        token = sign_dashboard_jwt(secret, username, ttl=args.token_ttl)
+    except Exception as e:  # NeedsHuman / Fatal / MoltError
+        bad(f"读不到控制凭据：{e}")
+        return 2
+
+    result = announce(
+        base,
+        token,
+        message,
+        session_id=args.session or DEFAULT_SESSION,
+        timeout=args.timeout or DEFAULT_TIMEOUT,
+    )
+    if not result["ok"]:
+        warn(f"通知没送到：{result['error']}")
+        dim("  交接本身不受影响。")
+        return 0
+
+    ok("通知已投递，它也回话了 —— 这次搬家会进它的记忆。")
+    reply = (result.get("reply") or "").strip()
+    if reply:
+        print()
+        for line in reply.splitlines():
+            dim(f"  {line}")
+    elif args.verbose:
+        dim("  （它没有回正文，但对话轮次已经记下了）")
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """把 Warden 跑成一个 HTTP 服务，等远端的壳来敲门。
 
@@ -1950,6 +2038,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="跳过「目标 data 目录看起来还活着」的检查（确认那个 AstrBot 真的停了再用）",
     )
     s.set_defaults(func=cmd_land)
+
+    # announce
+    s = add("announce", "告诉刚落地的那只壳「你搬家了」，让这次迁徙进它的记忆")
+    s.add_argument("--config", required=True, help="目标壳的 cmd_config.json（用它自己的 jwt_secret 现签 token）")
+    s.add_argument("--base", default="", help="目标壳 dashboard 地址（默认 http://127.0.0.1:6199）")
+    s.add_argument("--src", default="", help="从哪台机器搬过来的（写进文案）")
+    s.add_argument("--dst", default="", help="搬到了哪台机器（写进文案）")
+    s.add_argument("--generation", type=int, default=None, help="第几代（写进文案）")
+    s.add_argument("--seconds", type=float, default=None, help="整件事用了多少秒（写进文案）")
+    s.add_argument("--size-bytes", type=int, default=None, help="快照大小（写进文案）")
+    s.add_argument("--extra", default="", help="附加一句（可留空）")
+    s.add_argument("--session", default="", help="会话 id（默认 molt-migration，同 id 会接着上文）")
+    s.add_argument("--wait", type=float, default=90.0, help="等 dashboard 起来的最长秒数（默认 90）")
+    s.add_argument("--timeout", type=float, default=0.0, help="等它回话的秒数（默认 90）")
+    s.add_argument("--token-ttl", type=int, default=300, help="token 有效期，默认 300 秒")
+    s.add_argument("--dry-run", action="store_true", help="只拼文案，不投递")
+    s.add_argument("--verbose", action="store_true")
+    s.set_defaults(func=cmd_announce)
 
     # doctor
     s = add("doctor", "体检：把能查的都查一遍")

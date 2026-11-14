@@ -301,15 +301,61 @@ def test_happy_path_lands_then_switches_then_boots(tmp_path):
 
     assert decision.kind == "start"
     assert steps and all(s.ok for s in steps)
-    assert len(runner.calls) == 2  # land + platform-switch
+    assert len(runner.calls) == 3  # land + platform-switch + announce
     assert "land" in runner.calls[0][0]
     assert "platform-switch.py" in " ".join(runner.calls[1][0])
+    assert "announce" in runner.calls[2][0]
     assert len(spawned) == 1
 
     state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert state["landed_generation"] == 7
     assert state["needs_start"] is False
     assert "started_at" in state
+
+
+def test_announce_tells_it_which_generation_moved_and_from_where(tmp_path):
+    """通知的文案由 argv 决定，所以这里逐项钉住 —— 说错了它就会记错。"""
+    runner = FakeRunner()
+    a, runner, _, _ = _agent(tmp_path, runner=runner, status_fetcher=lambda: ledger())
+    a.run_once()
+
+    argv = runner.calls[-1][0]
+    assert "announce" in argv
+    assert "--generation" in argv and argv[argv.index("--generation") + 1] == "7"
+    assert argv[argv.index("--dst") + 1] == a.settings.shell
+    assert "--dry-run" not in argv
+    assert argv[argv.index("--config") + 1].endswith("cmd_config.json")
+
+
+def test_announce_failure_does_not_fail_the_handover(tmp_path):
+    """通知没送到只意味着"这次它没记住"，交接已经成功了 —— 不能被它拖成失败。"""
+    class AnnounceFails(FakeRunner):
+        def __call__(self, argv, **kwargs):
+            call = super().__call__(argv, **kwargs)
+            if "announce" in argv:
+                call.returncode = 2
+                call.stdout = "读不到控制凭据"
+            return call
+
+    runner = AnnounceFails()
+    a, runner, spawned, logs = _agent(tmp_path, runner=runner, status_fetcher=lambda: ledger())
+    decision, steps = a.run_once()
+
+    # 交接本身推到了 start 并且起了进程
+    assert decision.kind == "start"
+    assert len(spawned) == 1
+    # 最后一步是通知，它失败了；但它是"失败的一步"，不是"失败的交接"
+    assert steps[-1].ok is False
+    assert "退出码 2" in steps[-1].detail
+
+
+def test_announce_can_be_switched_off(tmp_path):
+    runner = FakeRunner()
+    a, runner, _, _ = _agent(tmp_path, runner=runner, status_fetcher=lambda: ledger())
+    a.settings.announce = False
+    a.run_once()
+
+    assert not any("announce" in argv for argv, _ in runner.calls)
 
 
 def test_land_failure_does_not_advance_state(tmp_path):

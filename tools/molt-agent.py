@@ -91,6 +91,10 @@ class Settings:
     #: AstrBot 起来之后顺手拉起来的东西（形如 `[{"argv": [...], "skip_if": "x.exe"}]`）。
     #: 鱼的身体是 AstrBot；这里放的是"人干活要用的东西"，比如 DSH 自己。
     boot_extra: list = field(default_factory=list)
+    #: 起来之后要不要告诉它"你搬家了"。投递失败不影响交接结论（只影响它记不记得）。
+    announce: bool = True
+    #: 等 dashboard 应答多久（AstrBot 从进程起来到 WebUI 能用，实测 15–25 秒）。
+    announce_wait: float = 90.0
 
     @classmethod
     def load(cls, path: Path) -> "Settings":
@@ -372,6 +376,29 @@ class Agent:
         s = self.settings
         return [s.astrbot_python, s.boot_script, s.data_dir, str(s.port), s.log_path]
 
+    def announce_argv(self, generation: int, src: str) -> list:
+        """告诉它「你搬家了」。走 `molt announce` 子进程，理由和 land 一样：
+
+        ① 它要用那只壳自己的 `dashboard.jwt_secret` 现签 token，而这些凭据
+           属于**子进程该读的东西**，不该让常驻的 agent 长期拿着；
+        ② 通知失败不该污染 agent 自己的状态机 —— 它就是一条独立命令。
+        """
+        s = self.settings
+        argv = [
+            s.python, "-m", "molt.cli", "announce",
+            "--config", os.path.join(s.data_dir, "cmd_config.json"),
+            "--base", f"http://127.0.0.1:{s.port}",
+            "--src", src or "",
+            "--dst", s.shell,
+            "--generation", str(generation),
+            "--wait", str(s.announce_wait),
+            "--no-color",
+        ]
+        return argv
+
+    def do_announce(self, generation: int, src: str) -> StepResult:
+        return self._run(self.announce_argv(generation, src), timeout=self.settings.announce_wait + 60)
+
     def _run(self, argv: list, *, timeout: float) -> StepResult:
         try:
             proc = self.runner(
@@ -643,6 +670,13 @@ class Agent:
             for extra in self.do_extras():
                 steps.append(extra)
                 self.log(f"  {'✓' if extra.ok else '!'} {extra.detail}")
+            # 最后才告诉它「你搬家了」：必须等 WebUI 真能应答，否则消息没处投。
+            # 这一步失败只是"这次它没记住"，**绝不影响交接结论** —— 鱼已经在说话了。
+            if self.settings.announce:
+                src = str((status.get("latest_generation") or {}).get("pushed_by") or "")
+                note = self.do_announce(decision.generation, src)
+                steps.append(note)
+                self.log(f"  {'✓' if note.ok else '!'} 迁徙通知：{note.detail or '已投递'}")
 
         return decision, steps
 
