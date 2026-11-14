@@ -394,6 +394,28 @@ class Homer:
 
     # -- 容器
 
+    def should_stand_down(self, status: dict) -> bool:
+        """鱼已经被对面接走了吗？接走了我就该把自己关掉。
+
+        2026-11-15 01:5x 真机抓到一次公理 0 事故：gen-10 落在我这儿、我起了
+        容器并打开了平台；随后 gen-11 被 Windows 接走，我却还开着 —— 两只鱼
+        同时在线，任何一条消息都会被回两遍。
+
+        判据必须同时满足三条，缺一条都不动：
+          · 最新一代的 target 不是我，而且非空（是明确写给别人的）
+          · 那一代的 consumed_by == target（对方真的接走了，不是还没来取）
+          · 我的容器确实在跑
+
+        只在 `consumed_by` 落地之后才动手，是为了不抢在对方前面死掉 ——
+        先死后生，但"后生"这一半得真的发生过。
+        """
+        g = status.get("latest_generation") or {}
+        target = str(g.get("target_shell") or "")
+        consumed = str(g.get("consumed_by") or "")
+        if not target or target == self.settings.shell:
+            return False
+        return consumed == target
+
     def container_running(self) -> Optional[bool]:
         """`True` 在跑 / `False` 停了 / `None` 问不出来。</summary>"""
         try:
@@ -528,6 +550,18 @@ class Homer:
             return {"ok": False, "reason": decision.reason, "kind": "error"}
         if decision.kind == "idle":
             self.log(f"  [{decision.kind}] {decision.reason}")
+            # 这一代不是给我的、而且已经被别人接走了 → 我不该还在说话。
+            if self.should_stand_down(status):
+                running = self.container_running()
+                if running:
+                    if not self.settings.execute:
+                        self.log("  (dry-run) 我会把容器停掉 —— 鱼已经不在我这儿了")
+                        return {"ok": True, "kind": "idle", "dry_run": True}
+                    self.log("  鱼已经被对面接走了 —— 把我自己关掉，别让两只鱼同时在线")
+                    if not self.do_stop():
+                        self.log("  ! 没能把自己关掉，下一轮再试")
+                        return {"ok": False, "kind": "idle", "reason": "没能停机"}
+                    return {"ok": True, "kind": "idle", "stood_down": True}
             return {"ok": True, "kind": "idle"}
         if decision.kind == "wait":
             self.log(f"  [{decision.kind}] {decision.reason}")

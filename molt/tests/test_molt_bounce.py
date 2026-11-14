@@ -332,3 +332,25 @@ def test_bounce_passes_pythonpath_and_cwd(tmp_path):
     assert kwargs["env"]["PYTHONPATH"] == "/pkg"
     assert kwargs["cwd"] == "/pkg"
     assert kwargs["timeout"] == bounce_mod.DEFAULT_TIMEOUT
+
+
+# ------------------------------------------------- 推出前必须按住自家壳
+
+def test_migrate_argv_passes_control_url_so_the_source_goes_quiet(tmp_path):
+    """不给 --control-url 的话，migrate 会在源壳还说话的时候拍快照，
+    而它拍完就走人 —— 源壳没人按住，目标壳一开口就是两只鱼。"""
+    cfg = settings(control_url="http://127.0.0.1:6185",
+                   control_config="/mnt/dm-0/astrbot/data/cmd_config.json")
+    b = make_bounce(tmp_path, cfg=cfg)
+    argv = b.migrate_argv()
+    assert "--control-url" in argv
+    assert argv[argv.index("--control-url") + 1] == "http://127.0.0.1:6185"
+    assert "--control-config" in argv
+    assert argv[argv.index("--control-config") + 1] == "/mnt/dm-0/astrbot/data/cmd_config.json"
+
+
+def test_migrate_argv_omits_control_flags_when_not_configured(tmp_path):
+    b = make_bounce(tmp_path)
+    argv = b.migrate_argv()
+    assert "--control-url" not in argv
+    assert "--control-config" not in argv

@@ -117,6 +117,10 @@ class Settings:
     target: str = ""
     wake_mac: str = ""
     wake_host: str = ""
+    # 推出之前要先让本机的壳闭嘴 —— 否则它一边被搬走、一边继续回消息，
+    # 而目标壳一开口就是两条鱼同时在线（公理 0）。
+    control_url: str = ""
+    control_config: str = ""
     after_seconds: float = DEFAULT_AFTER
     interval: float = DEFAULT_INTERVAL
     state_file: str = ""
@@ -144,6 +148,8 @@ class Settings:
             target=str(raw.get("target", "") or ""),
             wake_mac=str(raw.get("wake_mac", "") or ""),
             wake_host=str(raw.get("wake_host", "") or ""),
+            control_url=str(raw.get("control_url", "") or ""),
+            control_config=str(raw.get("control_config", "") or ""),
             state_file=str(raw.get("state_file", "") or ""),
         )
         cfg.after_seconds = _as_float(raw, "after_seconds", DEFAULT_AFTER)
@@ -283,6 +289,12 @@ class Bounce:
                 "--warden-url", s.warden_url,
                 "--warden-token", s.warden_token,
                 "--no-color"]
+        # 不给 --control-url 的话，migrate 会在"源壳还在说话"的状态下拍快照；
+        # 而它拍完就走人，源壳没人按住 —— 2026-11-15 真机上因此出现过两只都在说话。
+        if s.control_url:
+            argv += ["--control-url", s.control_url]
+        if s.control_config:
+            argv += ["--control-config", s.control_config]
         if s.wake_mac:
             argv += ["--wake-mac", s.wake_mac]
         if s.wake_host:

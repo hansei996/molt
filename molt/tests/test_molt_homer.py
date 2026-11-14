@@ -545,3 +545,35 @@ def test_land_argv_omits_dashboard_when_not_configured(tmp_path):
     argv = h.land_argv(8)
     assert "--dashboard-host" not in argv
     assert "--dashboard-port" not in argv
+
+
+# ------------------------------------------------- 鱼被别人接走之后，我要闭嘴
+
+def test_should_stand_down_only_when_other_side_really_took_it(tmp_path):
+    a = make_homer(tmp_path)
+    # 目标不是我，但对方还没取 —— 还不能死
+    assert a.should_stand_down(ledger(generation=11, target="win-shell", consumed_by="")) is False
+    assert a.should_stand_down(ledger(generation=11, target="win-shell", consumed_by="win-shell")) is True
+    # 是我的就别停
+    assert a.should_stand_down(ledger(generation=11, target=SHELL, consumed_by=SHELL)) is False
+
+
+def test_idle_stands_down_and_stops_the_container(tmp_path):
+    """2026-11-15 真机事故：gen-11 被 Windows 接走，NAS 容器还在说话。"""
+    runner = FakeRunner(running_at_first=True, running_after_stop=False)
+    a = make_homer(tmp_path, runner=runner, cfg=settings(execute=True),
+                   status=ledger(generation=11, target="win-shell", consumed_by="win-shell"))
+    result = a.run_once()
+    assert result["ok"] is True
+    assert result.get("stood_down") is True
+    assert any(c[:2] == ["docker", "kill"] for c in runner.calls)
+
+
+def test_idle_does_not_stop_when_generation_is_mine(tmp_path):
+    runner = FakeRunner(running_at_first=True)
+    a = make_homer(tmp_path, runner=runner, cfg=settings(execute=True),
+                   state={"landed_generation": 11},
+                   status=ledger(generation=11, target=SHELL, consumed_by=SHELL))
+    result = a.run_once()
+    assert result.get("stood_down") is None
+    assert not any(c[:2] == ["docker", "kill"] for c in runner.calls)
