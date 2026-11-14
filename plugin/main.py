@@ -135,6 +135,8 @@ class MoltControlPlugin(Star):
         #: 账本暂时问不到时重试几次就放弃 —— 网络抖动不该让人等第四次。
         self._arrival_attempts = 0
         self._arrival_said = False
+        # (代, 那句话)：组装好了但还没确认送达。发失败时留着，下一句回复再试。
+        self._arrival_pending = None
         self._register_api_if_available()
 
     # ------------------------------------------------------------------ 生命周期
@@ -304,11 +306,11 @@ class MoltControlPlugin(Star):
             return ""
 
         number = int(arrival["generation"])
-        # 无论说不说，都推到这一代。说过是真的说过，太久也是真的太久 ——
-        # 两种情况都不该让之后的每一条回复再去问一遍账本。
+        # 太久的那一代**当场标记**：本来就不打算说了，没有"等送达"这件事。
+        # 而新鲜的这一代要等 `send()` 返回之后才 mark（见 announce_arrival）。
         stale = bool(arrival.get("stale"))
-        state.mark(number, detail="stale" if stale else "announced")
         if stale:
+            state.mark(number, detail="stale")
             age = arrival.get("age_seconds")
             logger.info(
                 "[Molt] 第 %d 代已经是 %.0f 分钟前的事了，不再自称「刚搬过来」",
@@ -322,7 +324,12 @@ class MoltControlPlugin(Star):
             from_label=str(arrival.get("from_label") or ""),
             from_shell=str(arrival.get("from_shell") or ""),
         ).strip()
-        logger.info("[Molt] 第 %d 代落地播报：%s", number, note)
+        # **先不 mark。** 组装成功不等于送达 —— 这句话要通过平台发出去，
+        # 而平台会不会收下，只有 send() 返回之后才知道。
+        # 2026-11-15 的教训：第一版在这里就 mark 了，发送失败也被记成"说过"，
+        # 于是这一代永远不再播；而失败恰恰是最需要重试的那一次。
+        self._arrival_pending = (number, note)
+        logger.info("[Molt] 第 %d 代落地播报待发：%s", number, note)
         return note
 
     # ------------------------------------------------------------------ 平台操作
@@ -752,17 +759,37 @@ esult_decorate.stage:169 打了「Plugins that depend on the
 
         所以改成在**发请求之前**单独发一条。三个好处：顺序天然在前、与流式无关、
         这句话不会被当成模型自己说的话写进对话历史（它是状态播报，不是记忆）。
+
+        **送达之后才记账。** 组装出这句话只是第一步；`event.send()` 可能被平台
+        挡下来（QQ 官方机器人的主动消息限制、msg_id 复用、网络抖动）。
+        第一版在组装时就写了"这一代已经播报过"，于是一次失败 = 永久沉默。
+        现在失败只记一条 WARNING、保留 pending，下一句话再试一次。
         """
         if self._arrival_said:
             return
-        note = self.arrival_note()
+        # 上一次没送到的那句优先 —— `arrival_note()` 已经被 `_arrival_checked`
+        # 锁住了，重试时它只会返回空串，那句话就再也发不出去了。
+        pending = self._arrival_pending
+        note = pending[1] if pending is not None else self.arrival_note()
         if not note:
             return
-        self._arrival_said = True
+        pending = self._arrival_pending
         try:
             await event.send(event.plain_result(note))
         except Exception as exc:  # noqa: BLE001 - 播报失败不该影响这次对话
-            logger.warning("[Molt] 落地播报没发出去：%s", exc)
+            # **不标记、不清 pending**：下一次开口再试一遍。
+            # 丢一句状态播报的代价，远小于"主人一整晚都没看见它说自己在哪"。
+            logger.warning("[Molt] 落地播报没发出去，下一条回复再试：%s", exc)
+            return
+        self._arrival_said = True
+        if pending is not None:
+            number, _text = pending
+            try:
+                self._arrival_state_obj().mark(number, detail="announced")
+            except Exception as exc:  # pragma: no cover - 防御性
+                logger.warning("[Molt] 播报发出去了，但状态没写进去：%s", exc)
+            logger.info("[Molt] 第 %d 代落地播报已送达", number)
+        self._arrival_pending = None
 
     @filter.after_message_sent()
     async def on_after_message_sent(self, event: AstrMessageEvent):

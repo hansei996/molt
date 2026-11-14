@@ -221,6 +221,7 @@ def _plugin(tmp_path, mover):
     plugin._arrival_checked = False
     plugin._arrival_attempts = 0
     plugin._arrival_said = False
+    plugin._arrival_pending = None
     plugin._arrival_state_path = lambda: tmp_path / arrival.STATE_FILENAME
     return plugin
 
@@ -284,8 +285,13 @@ def test_plugin_without_mover_is_silent(tmp_path):
     assert _run(plugin).sent == []
 
 
-def test_plugin_marks_state_even_when_the_send_fails(tmp_path):
-    """发不出去也不能每分钟重试一次 —— 这一代就这样了。"""
+def test_plugin_does_not_mark_when_the_send_fails_and_retries(tmp_path):
+    """发失败**不能**记成"说过" —— 否则这一代永远不再播。
+
+    第一版的实现（和这里原来的这条测试）恰好反了：组装好就 mark，
+    理由是"免得下一句再试"。代价是平台挡一次，主人就一整晚看不见它在哪 ——
+    而这正是 2026-11-15 用户报「搬家落地后的第一句话没成功」的真实原因。
+    """
 
     class _BoomEvent(_Event):
         async def send(self, payload):
@@ -296,8 +302,32 @@ def test_plugin_marks_state_even_when_the_send_fails(tmp_path):
     import asyncio
 
     asyncio.run(plugin.announce_arrival(_BoomEvent()))
+    assert plugin._arrival_state_obj().announced_generation == 0   # 没被记成说过
+
+    # 下一句话再试：这一次平台收下了
+    event = _run(plugin)
+    assert len(event.sent) == 1
+    assert "我刚从" in event.sent[0]
     assert plugin._arrival_state_obj().announced_generation == 13
+    assert mover.ledger_calls == 1              # 只问过一次账本，pending 复用了
+
+    # 说过之后不再重复
     assert _run(plugin).sent == []
+
+
+def test_plugin_reuses_the_pending_note_without_asking_the_ledger_again(tmp_path):
+    """失败重试不该每句都去问一次账本 —— pending 就是为这个留的。"""
+
+    class _BoomEvent(_Event):
+        async def send(self, payload):
+            raise RuntimeError("发不出去")
+
+    mover = _FakeMover(_status())
+    plugin = _plugin(tmp_path, mover)
+    import asyncio
+
+    for _ in range(3):
+        asyncio.run(plugin.announce_arrival(_BoomEvent()))
     assert mover.ledger_calls == 1
 
 
