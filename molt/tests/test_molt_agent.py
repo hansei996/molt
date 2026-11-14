@@ -1022,3 +1022,107 @@ def test_backup_failure_does_not_advance_the_timer(tmp_path):
 
     a.run_once()
     assert len([c for c in calls if "backup" in c]) == 2
+
+
+# -- DSH 网关端口：判据是"它答得像不像网关"，不是"端口通不通" ----------
+
+
+def test_classify_gateway_recognises_the_rpc_gateway():
+    assert agent.Agent._classify_gateway(
+        '{"type":"server-response","result":{"error":{"code":"gateway/bad-request"}}}'
+    ) == "gateway"
+    assert agent.Agent._classify_gateway("") == "closed"
+    assert agent.Agent._classify_gateway("unauthorized") == "unauthorized"
+    assert agent.Agent._classify_gateway("not found") == "not-found"
+    assert agent.Agent._classify_gateway("<html>hello</html>") == "other"
+
+
+def test_detect_picks_the_port_that_answers_like_a_gateway(tmp_path):
+    a, _, _, _ = _agent(tmp_path)
+    a._probe_gateway_port = lambda port, **kw: "gateway" if port == 3082 else "closed"
+    assert a.detect_dsh_gateway_port() == 3082
+
+
+def test_detect_returns_none_when_nothing_answers(tmp_path):
+    a, _, _, _ = _agent(tmp_path)
+    a._probe_gateway_port = lambda port, **kw: "closed"
+    assert a.detect_dsh_gateway_port() is None
+
+
+def _connector_config(tmp_path, url, *, bom=True):
+    cfg = tmp_path / "data" / "config"
+    cfg.mkdir(parents=True, exist_ok=True)
+    path = cfg / "astrbot_plugin_dsh_connector_config.json"
+    body = json.dumps({"mode": "http", "http_base_url": url}, indent=2) + "\n"
+    path.write_bytes((b"\xef\xbb\xbf" if bom else b"") + body.encode("utf-8"))
+    return path
+
+
+def _port_agent(tmp_path, *, listening=True):
+    a, _, _, logs = _agent(
+        tmp_path,
+        cfg=settings(data_dir=str(tmp_path / "data")),
+        port_probe=lambda: listening,
+        pid_probe=lambda: 111,
+        stopper=lambda pid: True,
+    )
+    a._probe_gateway_port = lambda port, **kw: "gateway" if port == 3082 else "closed"
+    return a, logs
+
+
+def test_fix_rewrites_the_connector_url_and_keeps_the_bom(tmp_path):
+    path = _connector_config(tmp_path, "http://127.0.0.1:3080")
+    a, logs = _port_agent(tmp_path)
+    a.maybe_fix_dsh_port({})
+    raw = path.read_bytes()
+    assert raw[:3] == b"\xef\xbb\xbf"
+    assert json.loads(raw.decode("utf-8-sig"))["http_base_url"] == "http://127.0.0.1:3082"
+    assert any("端口已改成 3082" in line for line in logs)
+
+
+def test_fix_restarts_the_shell_so_the_new_config_is_read(tmp_path):
+    _connector_config(tmp_path, "http://127.0.0.1:3080")
+    a, logs = _port_agent(tmp_path, listening=True)
+    a.maybe_fix_dsh_port({})
+    assert any("下一轮自愈会把它拉起来" in line for line in logs)
+
+
+def test_fix_does_not_stop_a_shell_that_is_not_running(tmp_path):
+    _connector_config(tmp_path, "http://127.0.0.1:3080")
+    a, logs = _port_agent(tmp_path, listening=False)
+    a.maybe_fix_dsh_port({})
+    assert not any("自愈" in line for line in logs)
+
+
+def test_fix_leaves_a_correct_config_alone(tmp_path):
+    path = _connector_config(tmp_path, "http://127.0.0.1:3082")
+    before = path.read_bytes()
+    a, logs = _port_agent(tmp_path)
+    a.maybe_fix_dsh_port({})
+    assert path.read_bytes() == before
+    assert logs == []
+
+
+def test_fix_cools_down_so_it_does_not_flap(tmp_path):
+    path = _connector_config(tmp_path, "http://127.0.0.1:3080")
+    a, _ = _port_agent(tmp_path)
+    state = {}
+    a.maybe_fix_dsh_port(state)
+    assert "3082" in path.read_text(encoding="utf-8-sig")
+    path.write_bytes(b'{"http_base_url": "http://127.0.0.1:3080"}\n')
+    a.maybe_fix_dsh_port(state)          # 600 秒内不该再动
+    assert "3080" in path.read_text(encoding="utf-8")
+
+
+def test_fix_is_skipped_in_dry_run(tmp_path):
+    path = _connector_config(tmp_path, "http://127.0.0.1:3080")
+    a, _ = _port_agent(tmp_path)
+    a.settings.execute = False
+    a.maybe_fix_dsh_port({})
+    assert "3080" in path.read_text(encoding="utf-8-sig")
+
+
+def test_fix_is_skipped_when_the_connector_is_not_installed(tmp_path):
+    a, logs = _port_agent(tmp_path)
+    a.maybe_fix_dsh_port({})             # 没有配置文件，不该炸
+    assert logs == []

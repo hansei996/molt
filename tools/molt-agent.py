@@ -38,6 +38,7 @@ import argparse
 import inspect
 import json
 import os
+import re
 import socket
 import sqlite3
 import subprocess
@@ -509,6 +510,135 @@ class Agent:
         else:
             self.log(f"  ! 备份没推上去：{result.detail}")
 
+    # -- DSH 网关端口 --------------------------------------------------
+    #
+    # 为什么 agent 要管这件事（2026-11-15 06:19 的实测）：
+    # `astrbot_plugin_dsh_connector` 的 `http_base_url` 默认写 `3080`，那是
+    # **独立版 `dsh web --port 3080`** 的端口。桌面版的 DSH 自带 host 服务，
+    # 它绑的是 `0.0.0.0:3082` —— 这个数字在 asar / Preferences / profile /
+    # 命令行里全都搜不到，是运行时决定的，**没有官方开关能固定它**。
+    # 所以能做的两件事：判据要对（"答得像不像 RPC 网关"，不是"端口通不通"），
+    # 以及**它变了要自己改回来**，而不是等人发现"连 3080 被拒"。
+    DSH_GATEWAY_PROBE = {
+        "type": "client-request",
+        "rpcId": "molt-port-probe",
+        "namespace": "session",
+        "method": "list",
+        "payload": {},
+    }
+
+    def dsh_connector_path(self) -> Path:
+        return (
+            Path(self.settings.data_dir)
+            / "config"
+            / "astrbot_plugin_dsh_connector_config.json"
+        )
+
+    @staticmethod
+    def _classify_gateway(reply: str) -> str:
+        """看这个端口答得像什么。
+
+        判据是**它是不是 DSH 的 RPC 网关**，不是"通不通"：Web GUI 的同名路径
+        会回 401，别的服务可能回 200 一段 HTML —— 两者都"通"，但都不是网关。
+        """
+        text = (reply or "").strip()
+        if not text:
+            return "closed"
+        if "gateway/bad-request" in text or '"server-response"' in text:
+            return "gateway"
+        if "unauthorized" in text:
+            return "unauthorized"
+        if text in ("not found", "404 page not found") or "not found" in text:
+            return "not-found"
+        return "other"
+
+    def _probe_gateway_port(self, port: int, *, timeout: float = 0.6) -> str:
+        body = json.dumps(self.DSH_GATEWAY_PROBE).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/session/list",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return self._classify_gateway(resp.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            try:
+                return self._classify_gateway(exc.read().decode("utf-8", "replace"))
+            except Exception:  # noqa: BLE001
+                return "other"
+        except Exception:  # noqa: BLE001 - 端口没开就是这个
+            return "closed"
+
+    def detect_dsh_gateway_port(self, *, span: int = 12) -> Optional[int]:
+        """在 3080 起的 span 个端口里找那个"答得像网关"的。
+
+        为什么扫一个区间而不是问系统要 pid：`Get-CimInstance` 那一套在这里
+        不可靠（AstrBot 自己就被按进程名认错过），而**端口自己会答话**。
+        """
+        for port in range(3080, 3080 + span):
+            if self._probe_gateway_port(port) == "gateway":
+                return port
+        return None
+
+    def maybe_fix_dsh_port(self, state: Dict[str, Any]) -> None:
+        """端口漂了就把插件配置改回来，并让壳重启一次。
+
+        两件不能省的事：
+          · **保留 BOM**：这个文件是 `utf-8-sig`，写回去丢掉 BOM 会让
+            AstrBot 下次读它的时候当成另一个文件（本项目栽过）
+          · **改完必须重启壳**：`AstrBotConfig` 在内存里缓存着，改文件不热生效
+            （真机实测：改完 `/dsh status` 还是报旧端口）
+        """
+        if not self.settings.execute:
+            return
+        cfg_path = self.dsh_connector_path()
+        if not cfg_path.exists():
+            return
+        port = self.detect_dsh_gateway_port()
+        if port is None:
+            return
+        try:
+            raw = cfg_path.read_bytes()
+            had_bom = raw[:3] == b"\xef\xbb\xbf"
+            text = raw.decode("utf-8-sig")
+            data = json.loads(text)
+        except (OSError, ValueError) as exc:
+            self.log(f"  ! dsh_connector 配置读不动：{exc}")
+            return
+        current = str(data.get("http_base_url") or "")
+        if f":{port}" in current:
+            return
+        now = time.time()
+        if now - float(state.get("last_port_fix_at") or 0) < 600:
+            return
+        new_url = f"http://127.0.0.1:{port}"
+        pattern = re.compile(r'("http_base_url"\s*:\s*")[^"]*(")')
+        if not pattern.search(text):
+            self.log("  ! dsh_connector 配置里没有 http_base_url，跳过")
+            return
+        updated = pattern.sub(lambda m: f"{m.group(1)}{new_url}{m.group(2)}", text, count=1)
+        tmp = cfg_path.with_name(cfg_path.name + ".molt-tmp")
+        try:
+            tmp.write_bytes(
+                (b"\xef\xbb\xbf" if had_bom else b"") + updated.encode("utf-8")
+            )
+            tmp.replace(cfg_path)
+        except OSError as exc:
+            self.log(f"  ! dsh_connector 配置写不进去：{exc}")
+            return
+        state["last_port_fix_at"] = now
+        self.save_state(state)
+        self.log(f"  ✓ dsh_connector 端口已改成 {port}（原来写的是 {current}）")
+        if not self._probe_port():
+            return
+        stop = self.do_stop()
+        if stop.ok:
+            self.log("  · 壳已经按新配置停下，下一轮自愈会把它拉起来")
+        else:
+            self.log(f"  ! 改完没能让壳重启：{stop.detail}")
+
     def _run(self, argv: list, *, timeout: float) -> StepResult:
         try:
             proc = self.runner(
@@ -759,6 +889,11 @@ class Agent:
 
         decision = decide(status, shell=self.settings.shell, state=state)
         steps: list = []
+
+        # 先看看 DSH 的网关还在不在原来的端口上。这件事和"这一代是谁的"无关：
+        # 端口漂了，壳起来之后每一条命令都会失败（连 3080 会被拒），而那个
+        # 症状看起来像"服务没启动"。放最前面是因为它最便宜、也最容易被忽略。
+        self.maybe_fix_dsh_port(state)
 
         # 鱼搬走了就关机 —— 这一代的目标不是我，而且没有租约在飞。
         # decide() 对"这一代不是给我的"返回 idle（也有可能是 wait），两种都算鱼走了；
