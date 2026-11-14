@@ -350,6 +350,47 @@ http://<NAS 的地址>:6186/where?token=<warden.token 的内容>
 molt status
 ```
 
+## 每十分钟留一份底：`backup` / `backups` / `recover`
+
+迁徙只在两个时刻发生，而鱼在这中间说了一整晚的话 —— 那些话只写进**当前这台机器**的磁盘。
+如果 Windows 被拔电，能回到的最新状态是「它落地那一刻」。
+
+这三条命令把那段空窗切成十分钟一段。
+
+```
+# 现在就存一份（三个守护进程也会按 backup_interval 自动做，默认 600 秒）
+molt backup --data <这台机器的 data 目录> \
+            --warden-url http://<NAS>:6186 --warden-token <token>
+
+# 看看手上有哪些底
+molt backups --warden-url http://<NAS>:6186 --warden-token <token>
+
+# 回到某一份（它会先下载、校验指纹，然后走和 land 完全相同的落位路径）
+molt recover --backup backup-20261114T204024-desktop-h2kgiao.tar.gz \
+             --data <目标 data 目录> --yes
+```
+
+三个必须知道的事：
+
+1. **备份不是交接。** 它不进 `generations`，不占租约，也不会出现在 `molt status`
+   的迁徙历史里。`molt backups` 里能看到，账本里看不到 —— 这是刻意的：
+   一份"目标是空"的交接记录会让壳侧的 `decide()` 卡住，或者被误当成自己的落位任务，
+   **拿去覆盖它正在写的那个库**。
+2. **默认只留最近 12 份**（约 54 MB）。更旧的会被自动清掉，目录是
+   `<warden-root>/backups/`，每份旁边有一个同名 `.json` 记着字节数、指纹、来自哪个壳。
+3. **`recover` 和 `land` 是同一条路**。它只是多了"下载 + 校验"两步，
+   后面原封不动交给 `land` —— 落位是这套系统里最危险的一次操作，不该有第二种实现。
+
+真机上两份底长这样：
+
+```
+backup-20261114T203912-ugreen-776b-8b7896df.tar.gz   6.9 MB   来自 ugreen-776b-8b7896df
+backup-20261114T204024-desktop-h2kgiao.tar.gz        7.3 MB   来自 desktop-h2kgiao
+一共：2 份 / 14.2 MB
+```
+
+第二份比第一份大 0.5 MB —— 那正是它在 Windows 上落地之后又多说的那些话。
+
 ## 心跳是什么，为什么需要它
 
 账本原来的每个字段回答的都是**过去**："谁取走了第几代"。

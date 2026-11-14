@@ -60,6 +60,9 @@ TOKEN_HEADER = "X-Molt-Token"
 SHA_HEADER = "X-Molt-Sha256"
 DEFAULT_PORT = 6186          # 6185 被 AstrBot dashboard 占了，邻居一位
 ARCHIVE_ROUTE = re.compile(r"^/archive/(\d+)$")
+#: `POST /backup` 上传、`GET /backup/<name>` 下载。分开写而不是一个可选组：
+#: 上传时 URL 里没有名字（名字由服务端按时间戳和壳名生成），下载时必须有。
+BACKUP_NAME_ROUTE = re.compile(r"^/backup/([^/]+)$")
 
 
 
@@ -404,6 +407,29 @@ class WardenServer:
                     )
                 )
 
+            # ---- GET /backups ----
+            # 中途备份的索引。它们不是交接（没有目标壳），所以不走 generations。
+            if head == "backups" and method == "GET":
+                items = self.warden.list_backups()
+                return _ok(
+                    backups=items,
+                    total_bytes=sum(int(x.get("bytes") or 0) for x in items),
+                    backup_dir=str(self.warden.backup_dir()),
+                )
+
+            # ---- POST /backups/prune ----
+            if head == "backups" and method == "POST" and len(parts) == 2 and parts[1] == "prune":
+                try:
+                    keep_recent = int(body.get("keep_recent", 12))
+                except (TypeError, ValueError):
+                    return _err(400, "keep_recent 必须是整数", "bad_request")
+                return _ok(
+                    **self.warden.prune_backups(
+                        keep_recent=keep_recent,
+                        dry_run=bool(body.get("dry_run", True)),
+                    )
+                )
+
         except MoltError as e:
             status, kind = _classify(e)
             return _err(status, str(e), kind)
@@ -440,6 +466,68 @@ class WardenServer:
         return _Response(
             200,
             {"ok": True, "generation": generation, "bytes": path.stat().st_size},
+            stream_path=path,
+        )
+
+    # -- 中途备份的字节传输 ----------------------------------------------
+
+    def accept_backup(self, tmp_path: Path, claimed_sha: str, shell: str, generation: int) -> _Response:
+        """接收壳自己定时推上来的中途备份。
+
+        它和归档走同一套"边收边写盘 → 算哈希 → 原子落位"，但**不碰账本**：
+        备份没有目标壳、不占用 generation、不需要租约。理由写在
+        `Warden.backup_dir()` 的注释里——它一旦进了 `generations`，
+        壳那边的 `decide()` 就会把它当成一次真的交接。
+        """
+        if not tmp_path.is_file():
+            return _err(400, "没有收到备份内容", "bad_request")
+        size = tmp_path.stat().st_size
+        if size == 0:
+            tmp_path.unlink(missing_ok=True)
+            return _err(400, "备份是空的", "bad_request")
+
+        # 与归档同一条顺序：**先算哈希，再收下**。
+        # 声称的和实际不符时，这份字节不能被收进 `backups/` ——
+        # 否则以后取回来的东西和索引上写的不是同一个。
+        digest = hashlib.sha256()
+        with open(tmp_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+        got = digest.hexdigest()
+        if claimed_sha and claimed_sha.lower() != got:
+            tmp_path.unlink(missing_ok=True)
+            return _err(
+                400,
+                f"备份指纹不符：声明 {claimed_sha[:16]}…，实际 {got[:16]}…。"
+                f"这份备份在传输中损坏了，已丢弃。",
+                "checksum_mismatch",
+            )
+
+        try:
+            meta = self.warden.store_backup(
+                tmp_path,
+                shell=shell,
+                generation=generation,
+                sha256=got,
+            )
+        except MoltError as e:
+            tmp_path.unlink(missing_ok=True)
+            status, kind = _classify(e)
+            return _err(status, str(e), kind)
+
+        return _ok(backup=meta)
+
+    def stream_backup(self, name: str) -> _Response:
+        try:
+            path = self.warden.backup_path(name)
+        except MoltError as e:
+            status, kind = _classify(e)
+            return _err(status, str(e), kind)
+        if not path.is_file():
+            return _err(404, f"没有这份备份：{name}", "not_found")
+        return _Response(
+            200,
+            {"ok": True, "name": name, "bytes": path.stat().st_size},
             stream_path=path,
         )
 
@@ -649,6 +737,66 @@ class WardenServer:
                     raise
                 self._send(resp)
 
+            def _receive_backup(self) -> None:
+                """把请求体写进 `backups/` 下的临时文件，再交给 Warden 收下。
+
+                临时文件与最终文件在**同一个目录**里，所以最后一步
+                `os.replace` 是原子的（跨文件系统会被退化成复制+删除）。
+                """
+                length = int(self.headers.get("Content-Length") or 0)
+                if length <= 0:
+                    self._send(_err(400, "没有 Content-Length 或长度为 0", "bad_request"))
+                    return
+                if length > MAX_ARCHIVE_BYTES:
+                    self._send(
+                        _err(
+                            413,
+                            f"备份 {length} 字节超过上限 {MAX_ARCHIVE_BYTES} 字节。",
+                            "too_large",
+                        )
+                    )
+                    return
+
+                backup_dir = server.warden.backup_dir()
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                fd, tmp_name = tempfile.mkstemp(
+                    dir=str(backup_dir), prefix=".backup-", suffix=".part"
+                )
+                tmp_path = Path(tmp_name)
+                try:
+                    remaining = length
+                    with os.fdopen(fd, "wb") as fh:
+                        while remaining > 0:
+                            chunk = self.rfile.read(min(1 << 20, remaining))
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            remaining -= len(chunk)
+                    if remaining != 0:
+                        tmp_path.unlink(missing_ok=True)
+                        self._send(
+                            _err(
+                                400,
+                                f"上传中断：还差 {remaining} 字节没收到。这份备份已丢弃。",
+                                "incomplete",
+                            )
+                        )
+                        return
+                    try:
+                        generation = int(self.headers.get("X-Molt-Generation") or 0)
+                    except (TypeError, ValueError):
+                        generation = 0
+                    resp = server.accept_backup(
+                        tmp_path,
+                        self.headers.get(SHA_HEADER, ""),
+                        str(self.headers.get("X-Molt-Shell") or ""),
+                        generation,
+                    )
+                except Exception:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
+                self._send(resp)
+
             def _handle(self, method: str) -> None:
                 parsed = urlparse(self.path)
                 if not self._authorized():
@@ -670,6 +818,25 @@ class WardenServer:
                     self._send(
                         _err(405, f"归档端点只接受 GET 和 PUT，收到 {method}", "bad_method")
                     )
+                    return
+
+                # 中途备份也是二进制。`/backup`（无名字）只收 POST，
+                # `/backup/<name>` 只收 GET——两个方向都不该允许对方的方法，
+                # 否则"用一个 GET 触发一次写"这种事会变得可能。
+                if parsed.path.rstrip("/") == "/backup":
+                    if method == "POST":
+                        self._receive_backup()
+                        return
+                    self._send(
+                        _err(405, "上传备份请用 POST", "bad_method")
+                    )
+                    return
+                mb = BACKUP_NAME_ROUTE.match(parsed.path)
+                if mb is not None:
+                    if method == "GET":
+                        self._send(server.stream_backup(mb.group(1)))
+                        return
+                    self._send(_err(405, "下载备份请用 GET", "bad_method"))
                     return
 
                 body = self._read_body() if method in ("POST", "PUT") else None

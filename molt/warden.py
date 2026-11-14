@@ -75,12 +75,41 @@ from .errors import (
     ProtocolMismatch,
     SelfHealable,
 )
+from .soul import sha256_of
 from .version import PROTOCOL_VERSION
 
 
 #: 中转区归档的合法文件名。用它来区分"molt 放的"和"别人扔进来的"——
 #: 后者永远不删，因为清理逻辑不该对不认识的文件行使删除权。
 _ARCHIVE_NAME_RE = re.compile(r"^gen-(\d{6})\.tar\.gz$")
+
+#: 中途备份的合法文件名。它会被拼进 URL（`GET /backup/<name>`），
+#: 所以必须是一个**白名单形状**的字符串：只有字母数字、点、下划线、短横线。
+#: 不含斜杠/反斜杠/冒号，因此 `..` 之类的路径穿越拼不出来。
+_BACKUP_NAME_RE = re.compile(r"^backup-[0-9T-]+-[A-Za-z0-9_-]+(-[0-9]+)?\.tar\.gz$")
+
+#: 默认保留多少份中途备份。12 份 × 约 4.5 MB ≈ 54 MB，
+#: 按十分钟一次算是两小时的历史；按一小时一次算就是半天。
+DEFAULT_BACKUP_KEEP = 12
+
+
+def _slugify(text: str) -> str:
+    """把壳名压成一个能进文件名的短串。
+
+    `DESKTOP-H2KGIAO` 留着；空格、路径分隔符、以及**非 ASCII 字符**一律换成 `-`
+    （备份名会进 URL，而 URL 里的非 ASCII 要编码，编码之后又和文件名对不上）。
+    不做"更聪明的"缩写：**文件名里的东西要能被人一眼认出来是哪台机器**。
+    """
+    out = []
+    for ch in str(text or "").strip():
+        if ch.isascii() and (ch.isalnum() or ch in "-_"):
+            out.append(ch)
+        else:
+            out.append("-")
+    slug = "".join(out).strip("-")
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug[:40]
 
 
 def _parse_generation_from_name(name: str) -> Optional[int]:
@@ -982,6 +1011,185 @@ class Warden:
             "freed_bytes": freed,
             "dry_run": dry_run,
             "archive_dir": str(self.archive_dir()),
+        }
+
+    # -------------------------------------------------------------- 定期回推
+    #
+    # ## 为什么需要"中途备份"这件看起来多余的东西
+    #
+    # 迁徙把"最后一句话之前"的全部状态搬过去了。搬完之后，鱼在新壳上继续
+    # 说话、继续记事，而这些**只存在于那台机器的磁盘上**。如果它半夜里
+    # 写着写着，机器被拔了电、被系统更新重启、或者盘坏了，账本上记的仍然
+    # 是"第 N 代在 desktop-h2kgiao 上"，而第 N 代之后的一切都不存在了。
+    # 那时能重建到哪儿，取决于"从落地到出事"这段时间——可能是一整晚。
+    #
+    # ## 为什么它们不进 generations
+    #
+    # `generations` 是**交接的记录**：谁推的、给谁、谁取走了。壳那边
+    # `decide()` 靠它判断"这一代是不是给我的"。中途备份不是交接：它没有
+    # 目标壳，也没有人会来取。把它塞进 `generations` 会让 `decide()` 看到
+    # "最新一代的目标是空"从而卡在那里，或者更糟——被某个壳误当成自己的
+    # 落位任务，拿去覆盖它正在写的库。
+    #
+    # **所以：另一个目录、另一份索引，恢复只能由人显式发起。**
+
+    def backup_dir(self) -> Path:
+        return self.root / "backups"
+
+    def backup_path(self, name: str) -> Path:
+        """把一个备份名解析成路径，并挡住路径穿越。
+
+        备份名会出现在 URL 里（`GET /backup/<name>`），所以它必须是一个
+        白名单形状的字符串，而不是"拼一下看看"。`..`、斜杠、反斜杠一律不认。
+        """
+        if not _BACKUP_NAME_RE.match(name or ""):
+            raise NeedsHuman(f"备份名不合法：{name!r}")
+        return self.backup_dir() / name
+
+    def store_backup(
+        self,
+        source: Path,
+        *,
+        shell: str = "",
+        generation: int = 0,
+        sha256: str = "",
+    ) -> Dict[str, Any]:
+        """把一个已经传到本机的备份文件收进 `backups/`。
+
+        调用方（server 的上传路径）已经把它写成了**同一文件系统里的临时文件**，
+        所以这里最后一步是 `os.replace`——原子的。跨文件系统的 rename 会被
+        退化成"复制 + 删除"，那就没有原子性了。
+        """
+        src = Path(source)
+        if not src.is_file():
+            raise Fatal(f"要收下的备份不存在：{src}")
+
+        d = self.backup_dir()
+        d.mkdir(parents=True, exist_ok=True)
+
+        slug = _slugify(shell) or "unknown"
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        name = f"backup-{stamp}-{slug}.tar.gz"
+        n = 2
+        while (d / name).exists():
+            name = f"backup-{stamp}-{slug}-{n}.tar.gz"
+            n += 1
+        dest = d / name
+
+        digest = sha256_of(src) if not sha256 else sha256
+        if sha256:
+            actual = sha256_of(src)
+            if actual.lower() != sha256.lower():
+                raise Fatal(
+                    f"备份指纹不符：声称 {sha256[:16]}…，实际 {actual[:16]}…。"
+                    f"这份文件已丢弃，没有收进 backups。"
+                )
+            digest = actual
+
+        total = src.stat().st_size
+        os.replace(src, dest)
+
+        meta = {
+            "name": name,
+            "bytes": total,
+            "sha256": digest,
+            "shell": shell or "",
+            "generation": int(generation or 0),
+            "created_at": time.time(),
+            "created_at_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _atomic_write_json(self._backup_meta_path(name), meta)
+        self.append_log(
+            "INFO",
+            f"收下中途备份 {name}（{total} 字节，来自 {shell or '未知壳'}，第 {generation} 代）",
+        )
+        # 收下之后顺手做一次保留清理：只增不减的目录迟早会变成没人敢碰的遗迹。
+        self.prune_backups()
+        return meta
+
+    def _backup_meta_path(self, name: str) -> Path:
+        return self.backup_dir() / (Path(name).stem + ".json")
+
+    def list_backups(self) -> List[Dict[str, Any]]:
+        """列出 `backups/` 里的备份，新的在前。
+
+        索引写在 `.json` 里，但**盘上的文件才是主体**：索引丢了也要能列出
+        文件来（那时 sha256 现算）。反过来，索引在而文件没了，就不列——
+        一条指向空气的记录比没有记录更糟。
+        """
+        d = self.backup_dir()
+        if not d.is_dir():
+            return []
+        out: List[Dict[str, Any]] = []
+        for p in sorted(d.glob("backup-*.tar.gz"), reverse=True):
+            try:
+                total = p.stat().st_size
+            except OSError:
+                continue
+            meta: Dict[str, Any] = {}
+            mp = self._backup_meta_path(p.name)
+            if mp.is_file():
+                try:
+                    meta = json.loads(mp.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    meta = {}
+            out.append(
+                {
+                    "name": p.name,
+                    "bytes": total,
+                    "sha256": str(meta.get("sha256") or ""),
+                    "shell": str(meta.get("shell") or ""),
+                    "generation": int(meta.get("generation") or 0),
+                    "created_at": float(meta.get("created_at") or 0.0),
+                    "created_at_readable": str(
+                        meta.get("created_at_readable")
+                        or time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(p.stat().st_mtime)
+                        )
+                    ),
+                }
+            )
+        return out
+
+    def prune_backups(
+        self, *, keep_recent: int = DEFAULT_BACKUP_KEEP, dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """只保留最近 `keep_recent` 份中途备份。
+
+        与 `prune_archives` 的差别：那些是**交接的归档**，账本里记着的一律
+        不能删；中途备份没有账本记录，所以规则简单——最新的 N 份留着。
+        `dry_run` 默认 **False**（与归档相反）：这里没有"账本里记着"这种
+        额外判据，保留几份是纯粹的空间策略，而每一次 store 之后都该执行。
+        """
+        if keep_recent < 1:
+            raise Fatal(f"keep_recent 至少要 1，现在是 {keep_recent}")
+        items = self.list_backups()          # 已按文件名（时间戳）倒序
+        removed: List[Dict[str, Any]] = []
+        kept: List[Dict[str, Any]] = []
+        freed = 0
+        for i, item in enumerate(items):
+            if i < keep_recent:
+                kept.append(item)
+                continue
+            if dry_run:
+                removed.append(item)
+                freed += item["bytes"]
+                continue
+            try:
+                (self.backup_dir() / item["name"]).unlink()
+                self._backup_meta_path(item["name"]).unlink(missing_ok=True)
+            except OSError:
+                kept.append(item)
+                continue
+            removed.append(item)
+            freed += item["bytes"]
+        return {
+            "removed": removed,
+            "kept": kept,
+            "freed_bytes": freed,
+            "dry_run": dry_run,
+            "keep_recent": keep_recent,
+            "backup_dir": str(self.backup_dir()),
         }
 
     def log_path(self) -> Path:

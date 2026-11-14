@@ -370,6 +370,106 @@ class WardenClient:
     def archives(self) -> list:
         return self._request("GET", "/archives").get("archives", [])
 
+    # -- 中途备份 --------------------------------------------------------
+
+    def upload_backup(
+        self,
+        backup_path: Path,
+        *,
+        shell: str = "",
+        generation: int = 0,
+        expected_sha256: str = "",
+    ) -> Dict[str, Any]:
+        """把一份中途备份 POST 给 Warden。
+
+        与 `upload_archive` 的差别只有三处：路径是 `/backup`、方法用 POST
+        （**没有 generation 可以拼进 URL**，备份不是交接，不占代）、
+        壳名和代走请求头让人在 `backups/` 里看得出哪台机器什么时候推的。
+        """
+        p = Path(backup_path)
+        if not p.is_file():
+            raise Fatal(f"没有这份备份：{p}")
+        url = urljoin(self.base_url + "/", "backup")
+        size = p.stat().st_size
+        headers = {
+            TOKEN_HEADER: self.token,
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(size),
+            "X-Molt-Shell": shell or "",
+            "X-Molt-Generation": str(int(generation or 0)),
+        }
+        if expected_sha256:
+            headers["X-Molt-Sha256"] = expected_sha256
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.retries):
+            try:
+                with open(p, "rb") as fh:
+                    req = urllib.request.Request(url, data=fh, headers=headers, method="POST")
+                    with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                        payload = json.loads(resp.read().decode("utf-8"))
+                        return self._unwrap(payload).get("backup", {})
+            except urllib.error.HTTPError as e:
+                raw = e.read()
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    payload = {"ok": False, "message": raw.decode("utf-8", "replace")}
+                raise self._to_error(payload, e.code) from None
+            except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+                last_exc = e
+                if attempt < self.retries - 1:
+                    time.sleep(RETRY_BACKOFF * (attempt + 1))
+                    continue
+
+        raise Fatal(
+            f"上传备份失败（{url}），试了 {self.retries} 次。最后一处错误：{last_exc}"
+        ) from last_exc
+
+    def download_backup(self, name: str, dest_path: Path) -> Dict[str, Any]:
+        """把一份中途备份取下来。边收边算 sha256，收完写 `.part` 再改名。"""
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        url = urljoin(self.base_url + "/", f"backup/{name}")
+        headers = {TOKEN_HEADER: self.token}
+
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                digest = hashlib.sha256()
+                total = 0
+                with open(part, "wb") as fh:
+                    while True:
+                        chunk = resp.read(1 << 20)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        fh.write(chunk)
+                        total += len(chunk)
+        except urllib.error.HTTPError as e:
+            part.unlink(missing_ok=True)
+            raw = e.read()
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = {"ok": False, "message": raw.decode("utf-8", "replace")}
+            raise self._to_error(payload, e.code) from None
+        except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+            part.unlink(missing_ok=True)
+            raise Fatal(f"下载备份失败（{url}）：{e}") from e
+
+        os.replace(part, dest)
+        return {"path": str(dest), "bytes": total, "sha256": digest.hexdigest()}
+
+    def backups(self) -> list:
+        return self._request("GET", "/backups").get("backups", [])
+
+    def prune_backups(self, *, keep_recent: int = 12, dry_run: bool = True) -> Dict[str, Any]:
+        return self._request(
+            "POST", "/backups/prune", {"keep_recent": keep_recent, "dry_run": dry_run}
+        )
+
     def prune(self, *, keep_recent: int = 2, dry_run: bool = True) -> Dict[str, Any]:
         """让 Warden 清理中转区。
 

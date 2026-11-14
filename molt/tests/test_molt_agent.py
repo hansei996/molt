@@ -14,6 +14,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -815,3 +816,194 @@ def test_self_heal_does_not_boot_twice_in_a_row(tmp_path):
     agent.run_once()
     assert len(boots) == 2, "冷却期过了应该允许再试一次"
 
+
+
+# ------------------------------------------------------- 落地后自动 observe
+
+def _observe_agent(tmp_path, *, listening, rc=0, state=None):
+    """造一个"这一代是我落的地"的 agent。"""
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, rc, "", "boom" if rc else "")
+
+    st = {
+        "latest_generation": {
+            "generation": 13, "target_shell": "win-shell",
+            "consumed_by": "win-shell", "pushed_by": "nas-shell",
+        },
+        "lease": {"holder": None, "state": "no-lease"},
+    }
+    sp = tmp_path / "s.json"
+    if state:
+        sp.write_text(json.dumps(state), encoding="utf-8")
+    a = mod.Agent(settings=settings(), state_path=sp, status_fetcher=lambda: st,
+                  port_probe=lambda port: listening, runner=runner,
+                  spawner=lambda argv, log_path=None: 1,
+                  log=lambda m: None)
+    return mod, a, calls
+
+
+def test_observe_runs_once_when_i_landed_and_it_is_listening(tmp_path):
+    """它起来了，而且这一代是我落的 —— 让它自己记一笔。
+
+    **必须由外部敲**：插件拿不到可靠的循环（`initialize()` 里拿到的那个
+    `loop.call_later` 五秒都不触发），而请求处理器一定跑在服务循环上。
+    """
+    _mod, a, calls = _observe_agent(tmp_path, listening=True)
+    a.run_once()
+
+    observe = [c for c in calls if "observe" in c]
+    assert len(observe) == 1
+    assert observe[0][:3] == ["py", "-m", "molt.cli"]
+    assert "cmd_config.json" in " ".join(observe[0])
+    assert any("6199" in x for x in observe[0])
+    assert a.load_state()["observed_generation"] == 13
+
+
+def test_observe_does_not_repeat_for_the_same_generation(tmp_path):
+    """同一个壳每 10 秒敲一次 observe，就是每 10 秒往记忆库里问一遍同一个问题。"""
+    _mod, a, calls = _observe_agent(tmp_path, listening=True)
+    for _ in range(3):
+        a.run_once()
+    assert len([c for c in calls if "observe" in c]) == 1
+
+
+def test_observe_waits_until_the_port_is_listening(tmp_path):
+    """AstrBot 从开机到 dashboard 在听要二十多秒，刚 spawn 完就敲只会连不上。"""
+    _mod, a, calls = _observe_agent(tmp_path, listening=False)
+    a.run_once()
+    # 端口没在听时它会走自愈去启动（那两个调用是应该有的），
+    # 但**不许**在这一轮去敲 observe —— 那时 WebUI 还没装配完。
+    assert not [c for c in calls if 'observe' in c]
+    assert a.load_state().get("observed_generation") is None
+
+
+def test_observe_failure_does_not_advance_the_marker(tmp_path):
+    """记不住不是交接失败：它已经在说话了，只是少了一行档案。下一轮再试。"""
+    _mod, a, calls = _observe_agent(tmp_path, listening=True, rc=1)
+    a.run_once()
+    assert len([c for c in calls if "observe" in c]) == 1
+    assert a.load_state().get("observed_generation") is None
+
+    a.run_once()
+    assert len([c for c in calls if "observe" in c]) == 2
+
+
+def test_observe_is_skipped_in_dry_run(tmp_path):
+    """`execute=false` 是"什么都别动"，包括这一行档案。"""
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+    st = {"latest_generation": {"generation": 13, "target_shell": "win-shell",
+          "consumed_by": "win-shell"}, "lease": {"holder": None, "state": "no-lease"}}
+    a = mod.Agent(
+        settings=settings(execute=False), state_path=tmp_path / "s.json",
+        status_fetcher=lambda: st, port_probe=lambda port: True,
+        runner=lambda argv, **kw: calls.append(list(argv)),
+        log=lambda m: None,
+    )
+    a.run_once()
+    assert calls == []
+
+
+# ---------------------------------------------------------------- 定时备份
+
+
+def _backup_agent(tmp_path, *, listening=True, rc=0, state=None, **kw):
+    """造一个"鱼在我这儿说话"的 agent，用来测定时热备。"""
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, rc, "", "boom" if rc else "")
+
+    st = {
+        "latest_generation": {
+            "generation": 13, "target_shell": ME,
+            "consumed_by": ME, "pushed_by": "nas-shell",
+        },
+        "lease": {"holder": None, "state": "no-lease"},
+    }
+    sp = tmp_path / "b.json"
+    if state:
+        sp.write_text(json.dumps(state), encoding="utf-8")
+    a = mod.Agent(settings=settings(**kw), state_path=sp, status_fetcher=lambda: st,
+                  port_probe=lambda port: listening, runner=runner,
+                  spawner=lambda argv, log_path=None: 1,
+                  log=lambda m: None)
+    return a, calls
+
+
+def test_backup_runs_when_due_and_i_hold_the_generation(tmp_path):
+    a, calls = _backup_agent(tmp_path)
+    a.run_once()
+
+    backups = [c for c in calls if "backup" in c]
+    assert len(backups) == 1
+    assert backups[0][:3] == ["py", "-m", "molt.cli"]
+    assert "--shell" in backups[0] and ME in backups[0]
+    assert a.load_state().get("last_backup_at")
+
+
+def test_backup_does_not_repeat_within_the_interval(tmp_path):
+    """十分钟是十分钟，不是每十秒。"""
+    a, calls = _backup_agent(tmp_path)
+    for _ in range(3):
+        a.run_once()
+    assert len([c for c in calls if "backup" in c]) == 1
+
+
+def test_backup_runs_again_after_the_interval(tmp_path):
+    a, calls = _backup_agent(
+        tmp_path, state={"last_backup_at": time.time() - 601.0}
+    )
+    a.run_once()
+    assert len([c for c in calls if "backup" in c]) == 1
+
+
+def test_backup_is_skipped_when_the_fish_is_not_mine(tmp_path):
+    """备份别人的数据没意义，而且会在别人正写库的时候去读它。"""
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+    st = {"latest_generation": {"generation": 13, "target_shell": "nas-shell",
+          "consumed_by": "nas-shell"}, "lease": {"holder": None, "state": "no-lease"}}
+    a = mod.Agent(settings=settings(), state_path=tmp_path / "b2.json",
+                  status_fetcher=lambda: st, port_probe=lambda port: True,
+                  runner=lambda argv, **kw: calls.append(list(argv)),
+                  log=lambda m: None)
+    a.run_once()
+    assert not [c for c in calls if "backup" in c]
+
+
+def test_backup_is_skipped_when_the_shell_is_not_talking(tmp_path):
+    """端口没在听 = 数据不会变，推一份一模一样的字节只是浪费。
+
+    这条**只能直接测**：走 `run_once` 时，端口没在听会先命中自愈分支
+    并在那里 `return`，`maybe_backup` 压根到不了 —— 那样测出来的绿
+    是「没走到」，不是「判断对」。变异测试就是这么发现它的。
+    """
+    a, calls = _backup_agent(tmp_path, listening=False)
+    st = a.status_fetcher()
+    a.maybe_backup({}, st)
+    assert not [c for c in calls if "backup" in c]
+    assert not a.load_state().get("last_backup_at")
+
+
+def test_backup_is_off_when_the_interval_is_zero(tmp_path):
+    a, calls = _backup_agent(tmp_path, backup_interval=0)
+    a.run_once()
+    assert not [c for c in calls if "backup" in c]
+
+
+def test_backup_failure_does_not_advance_the_timer(tmp_path):
+    """推失败了下一轮再试，而不是"等下一个十分钟"。"""
+    a, calls = _backup_agent(tmp_path, rc=6)
+    a.run_once()
+    assert len([c for c in calls if "backup" in c]) == 1
+    assert not a.load_state().get("last_backup_at")
+
+    a.run_once()
+    assert len([c for c in calls if "backup" in c]) == 2

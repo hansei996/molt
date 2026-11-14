@@ -598,3 +598,129 @@ def test_homer_never_speaks_on_its_own_behalf(tmp_path):
     assert result["ok"] is True
     assert not any("announce" in c for c in runner.calls)
     assert not hasattr(a, "do_announce")
+
+
+# ------------------------------------------------------ 落地后自动 observe
+
+def _observe_calls(runner):
+    return [c for c in runner.calls if "observe" in c]
+
+
+def test_observe_runs_after_the_container_is_up(tmp_path):
+    """容器起来了，就让壳自己记一笔"我是第几代到这儿来的"。
+
+    `--wait 120` 是必须的：`docker start` 之后容器里要二十多秒 dashboard
+    才装配完，而 `observe` 第一步就是等 WebUI 应答。
+    """
+    r = FakeRunner()
+    h = make_homer(tmp_path, status=ledger(), runner=r)
+    h.run_once()
+
+    calls = _observe_calls(r)
+    assert len(calls) == 1
+    assert "--wait" in calls[0]
+    assert "120" in calls[0]
+    assert any("6185" in x for x in calls[0])
+
+
+def test_observe_does_not_run_when_landing_failed(tmp_path):
+    """落位失败时不该去敲 observe —— 那一代根本没落在这儿。"""
+    r = FakeRunner(land_ok=False)
+    h = make_homer(tmp_path, status=ledger(), runner=r)
+    h.run_once()
+    assert _observe_calls(r) == []
+
+
+def test_observe_failure_does_not_flip_the_landing_result(tmp_path):
+    """记不住一行档案，不该把一次成功的交接判成失败。"""
+    class _ObserveFails(FakeRunner):
+        def __call__(self, argv, **kwargs):
+            if "observe" in list(argv):
+                self.calls.append(list(argv))
+                return FakeProc(2, "", "连不上")
+            return super().__call__(argv, **kwargs)
+
+    r = _ObserveFails()
+    h = make_homer(tmp_path, status=ledger(), runner=r)
+    result = h.run_once()
+    assert len(_observe_calls(r)) == 1
+    assert result["ok"] is True
+
+
+# ------------------------------------------------------ 定时热备回推
+
+def _backup_calls(runner):
+    return [c for c in runner.calls if "backup" in c and "molt.cli" in c]
+
+
+def test_backup_runs_while_the_fish_stays_home(tmp_path):
+    """鱼在家、容器在跑 —— 每十分钟把增量推一份给 Warden。
+
+    备份不是交接：它不进 generations、不占租约、没人会来取，所以可以趁
+    鱼正常说话的时候跑。这是把 RPO 从"一整晚"缩到十分钟的唯一办法。
+    """
+    r = FakeRunner()
+    h = make_homer(tmp_path, status=ledger(consumed_by=SHELL), runner=r,
+                   state={"last_backup_at": 0})
+    h.run_once()
+
+    calls = _backup_calls(r)
+    assert len(calls) == 1
+    assert "--data" in calls[0] and "/data" in calls[0]
+    assert "--shell" in calls[0] and SHELL in calls[0]
+
+
+def test_backup_waits_for_the_interval(tmp_path):
+    import time as _time
+
+    r = FakeRunner()
+    h = make_homer(tmp_path, status=ledger(consumed_by=SHELL), runner=r,
+                   state={"last_backup_at": _time.time() - 60})
+    h.run_once()
+    assert _backup_calls(r) == []
+
+
+def test_backup_skipped_when_the_container_is_down(tmp_path):
+    """容器停着 = 数据不会变，推一份一模一样的字节只是浪费。"""
+    r = FakeRunner(running_at_first=False)
+    h = make_homer(tmp_path, status=ledger(consumed_by=SHELL), runner=r)
+    h.run_once()
+    assert _backup_calls(r) == []
+
+
+def test_backup_skipped_when_the_fish_is_elsewhere(tmp_path):
+    """这一代不是落在我这儿的 —— 备份别人的数据没意义。"""
+    r = FakeRunner()
+    h = make_homer(tmp_path, status=ledger(consumed_by="win-shell"), runner=r)
+    h.run_once()
+    assert _backup_calls(r) == []
+
+
+def test_maybe_backup_refuses_a_generation_that_is_not_mine(tmp_path):
+    """`run_once` 那条路走不到这个守卫（`decide()` 已经先返回 wait 了），
+    所以它只能直接测 —— 而它守的是一件真事：**别人的库不该被我们读**。
+    """
+    r = FakeRunner()
+    h = make_homer(tmp_path, status=ledger(consumed_by="win-shell"), runner=r)
+    h.maybe_backup({}, ledger(consumed_by="win-shell"))
+    assert _backup_calls(r) == []
+
+
+def test_backup_failure_does_not_advance_the_timer(tmp_path):
+    """推失败了下一轮再试，而不是"等下一个十分钟"。"""
+    class _BackupFails(FakeRunner):
+        def __call__(self, argv, **kwargs):
+            if "backup" in list(argv):
+                self.calls.append(list(argv))
+                return FakeProc(6, "", "推不上去")
+            return super().__call__(argv, **kwargs)
+
+    r = _BackupFails()
+    h = make_homer(tmp_path, status=ledger(consumed_by=SHELL), runner=r,
+                   state={"last_backup_at": 0})
+    h.run_once()
+    assert len(_backup_calls(r)) == 1
+    assert not h.load_state().get("last_backup_at")
+
+    h.run_once()
+    assert len(_backup_calls(r)) == 2

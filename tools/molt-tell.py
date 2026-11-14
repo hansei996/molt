@@ -121,12 +121,17 @@ def parse_sse_line(line: str) -> Optional[dict]:
     return obj if isinstance(obj, dict) else None
 
 
-def text_of(event: dict) -> str:
+def text_of(event: dict, *, include_reasoning: bool = False) -> str:
     """从一条事件里取出可读文本；取不到就返回空串。
 
     `chain_type == "reasoning"` 是模型的思考过程，不是它说的话 —— 默认丢掉。
+
+    这个开关必须落在这里，不能只在调用方过滤：早先 `text_of` 无条件丢掉
+    reasoning，于是 `--show-reasoning` 那位先生拿到的是一个**永远空的**过滤器 ——
+    参数被解析、被打印、被传进来，然后什么都没发生。**一个从来不起作用的开关，
+    看起来和"这次它没思考"一模一样。**
     """
-    if event.get("chain_type") == "reasoning":
+    if event.get("chain_type") == "reasoning" and not include_reasoning:
         return ""
     data = event.get("data")
     if isinstance(data, str):
@@ -145,6 +150,7 @@ def iter_reply(lines: Iterable[bytes], *, show_reasoning: bool, verbose: bool) -
     生成器而不是一次性拼接，是为了让调用方可以边收边打 —— 一次迁徙要跑
     二十秒，如果最后才一次性输出，人在终端前会以为它卡住了。
     """
+    emitted = False
     for raw in lines:
         line = raw.decode("utf-8", "replace")
         event = parse_sse_line(line)
@@ -153,13 +159,28 @@ def iter_reply(lines: Iterable[bytes], *, show_reasoning: bool, verbose: bool) -
         kind = event.get("type")
         if verbose:
             _safe_print(f"[event] {kind} chain={event.get('chain_type')}")
-        if kind in ("session_id", "run_started", "user_message_saved", "done"):
+        # 只认两种能装正文的事件：
+        #   plain    —— 流式的一小块，也就是它真说的话
+        #   complete —— 整段汇总，只在一个字都没流过时兜底
+        # 别的类型（tool_call / tool_call_result / agent_stats / message_saved …）
+        # 里也有字符串，但那是工具调用的参数和返回值。把它们当正文打出来，
+        # 人就看见一串 {"name": "memory_companion_recall", "args": …} ——
+        # 工具在内部干活的事，不该冒充它说的话。
+        if kind not in ("plain", "complete"):
             continue
-        if event.get("chain_type") == "reasoning" and not show_reasoning:
+        # reasoning 的取舍在 `text_of` 里（它才是真正产出文本的那个函数）——
+        # 这里再过滤一次不会让 `--show-reasoning` 复活，只会让人以为它坏了两次。
+        piece = text_of(event, include_reasoning=show_reasoning)
+        if not piece:
             continue
-        piece = text_of(event)
-        if piece:
-            yield piece
+        # complete 带的是**整段回答的汇总**，不是又说了什么。
+        # 流式已经一块一块打过了，再打一遍就成了复读机 ——
+        # 但只在真的流过东西时跳过：万一某个壳不发增量只发汇总，
+        # 那它就是唯一的一份正文。
+        if kind == "complete" and emitted:
+            continue
+        emitted = True
+        yield piece
 
 
 # --------------------------------------------------------------------- 入口

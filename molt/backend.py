@@ -49,6 +49,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -163,6 +164,52 @@ class LocalBackend:
     def archives(self) -> list:
         return self.warden.list_archives()
 
+    # -- 中途备份 --------------------------------------------------------
+
+    def upload_backup(
+        self,
+        backup_path: Path,
+        *,
+        shell: str = "",
+        generation: int = 0,
+        expected_sha256: str = "",
+    ) -> Dict[str, Any]:
+        """本地模式：直接把文件收进 `backups/`。
+
+        先拷到 `backups/` 里的一个 `.part` 再让 Warden 用 `os.replace` 收下 ——
+        和远端那条路径（服务端边收边写 `.part`）保持同一个原子性保证。
+        """
+        src = Path(backup_path)
+        if not src.is_file():
+            raise Fatal(f"没有这份备份：{src}")
+        d = self.warden.backup_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        part = d / f".incoming-{int(time.time() * 1000)}.part"
+        shutil.copy2(src, part)
+        try:
+            meta = self.warden.store_backup(
+                part, shell=shell, generation=generation, sha256=expected_sha256
+            )
+        finally:
+            part.unlink(missing_ok=True)
+        return meta
+
+    def download_backup(self, name: str, dest_path: Path) -> Dict[str, Any]:
+        src = self.warden.backup_path(name)
+        if not src.is_file():
+            raise Fatal(f"没有这份备份：{name}")
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if src.resolve() != dest.resolve():
+            shutil.copy2(src, dest)
+        return {"path": str(dest), "bytes": dest.stat().st_size, "sha256": sha256_of(dest)}
+
+    def backups(self) -> list:
+        return self.warden.list_backups()
+
+    def prune_backups(self, *, keep_recent: int = 12, dry_run: bool = True) -> Dict[str, Any]:
+        return self.warden.prune_backups(keep_recent=keep_recent, dry_run=dry_run)
+
     def prune(self, *, keep_recent: int = 2, dry_run: bool = True) -> Dict[str, Any]:
         return self.warden.prune_archives(keep_recent=keep_recent, dry_run=dry_run)
 
@@ -263,6 +310,32 @@ class RemoteBackend:
 
     def prune(self, *, keep_recent: int = 2, dry_run: bool = True) -> Dict[str, Any]:
         return self.client.prune(keep_recent=keep_recent, dry_run=dry_run)
+
+    # -- 中途备份 --------------------------------------------------------
+
+    def upload_backup(
+        self,
+        backup_path: Path,
+        *,
+        shell: str = "",
+        generation: int = 0,
+        expected_sha256: str = "",
+    ) -> Dict[str, Any]:
+        return self.client.upload_backup(
+            Path(backup_path),
+            shell=shell,
+            generation=generation,
+            expected_sha256=expected_sha256,
+        )
+
+    def download_backup(self, name: str, dest_path: Path) -> Dict[str, Any]:
+        return self.client.download_backup(name, Path(dest_path))
+
+    def backups(self) -> list:
+        return self.client.backups()
+
+    def prune_backups(self, *, keep_recent: int = 12, dry_run: bool = True) -> Dict[str, Any]:
+        return self.client.prune_backups(keep_recent=keep_recent, dry_run=dry_run)
 
 
 

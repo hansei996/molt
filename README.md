@@ -196,6 +196,21 @@ molt prune --warden-url http://192.168.1.10:6186 --warden-token <token>   # 先�
 molt prune ... --yes                                                       # 真要删
 ```
 
+**中途也不能全裸着。** 迁徙只在两个时刻发生，这中间它说的每一句话只写进当前这台机器的磁盘——
+如果那台机器被拔电，能回到的最新状态是"它落地那一刻"。所以还有一条独立的路：
+
+```bash
+molt backup  --data <当前 data 目录> --warden-url http://<NAS>:6186 --warden-token <token>
+molt backups --warden-url http://<NAS>:6186 --warden-token <token>
+molt recover --backup <名字> --data <目标 data 目录> --yes
+```
+
+备份**不进 `generations`**、不占租约、不出现在迁徙历史里——这是刻意的：一份"目标是空"的交接记录
+会让壳侧的 `decide()` 卡住，或者被误当成自己的落位任务、**拿去覆盖它正在写的那个库**。
+`recover` 也不是第二条落位实现，它就是 `land` 的一层皮（下载 + 校验指纹，然后原样交给 `land`）。
+
+真机上两份底：NAS 的 6.9 MB、Windows 的 7.3 MB——**多出来的 0.5 MB 正是它在新壳上又多说的那些话**。
+
 剩下没验的只有一件小事：**断点续传**（27.3 MB 一次 PUT 没问题，再大才需要）。
 
 ---

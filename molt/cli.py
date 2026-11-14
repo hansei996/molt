@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import socket
 import sys
 import tempfile
 import time
@@ -338,6 +339,34 @@ def cmd_status(args: argparse.Namespace) -> int:
         print()
         warn(f"租约由 {lease['holder']} 持有，但已过期 {lease['expired_seconds_ago']} 秒")
         dim("  意味着那个壳可能已经死了。新的壳可以接管。")
+
+    head("谁还在")
+    beats = s.get("heartbeats") or {}
+    if not beats:
+        dim("  还没有任何壳上报过心跳 —— 三个守护进程都还没跑起来（或都是旧版）")
+        dim("  这意味着下面这些数字只能说明「账本记到了哪」，不能说明「谁还活着」。")
+    else:
+        for shell_id, beat in sorted(
+            beats.items(), key=lambda kv: kv[1].get("age_seconds", 0)
+        ):
+            age = beat.get("age_readable") or "?"
+            if beat.get("stale"):
+                warn(f"  {C.B}{shell_id}{C.R} 已 {age} 没上报 —— 判断它已经没了")
+            else:
+                ok(f"  {C.B}{shell_id}{C.R} 最后心跳 {age}")
+            note = beat.get("note") or ""
+            if note:
+                dim(f"      它的角色：{note}")
+            if beat.get("generation"):
+                dim(f"      它手里是第 {beat['generation']} 代")
+        stale = [k for k, v in beats.items() if v.get("stale")]
+        live = len(beats) - len(stale)
+        print()
+        if live == 0:
+            warn("  一个在报的都没有 —— 鱼可能真的没了，但账本自己看不出来这一点")
+            dim("  心跳只能证明某个壳在报；它不证明鱼在说话（那要看控制面 /status 的 speaking）")
+        else:
+            info(f"  {live} 个壳在报。心跳证明它还在跑，不证明它在说话。")
 
     head("迁徙历史")
     if s["generation_count"] == 0:
@@ -1008,6 +1037,107 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
 
 
+def _snapshot_payload(
+    *,
+    src: Path,
+    dest_dir: Path,
+    astrbot_src: Optional[str],
+    target: str,
+    generation: int,
+    quiet: bool = False,
+) -> "tuple[int, List[Artifact], Optional[Manifest]]":
+    """把"灵魂"热备进 `dest_dir` 并写好 manifest。
+
+    抽出来是为了让 `migrate`（要分配新一代、要 push 账本）和
+    `backup`（不占代、只上传字节）**走同一条热备逻辑**。两处各写一遍的话，
+    迟早出现"迁徙时抓的是这两个库、备份时抓的是另外两个"这种没法解释的差异。
+    """
+    artifacts: List[Artifact] = []
+
+    for rel in (
+        "data_v4.db",
+        "plugin_data/astrbot_plugin_memory_companion/memory_companion.db",
+    ):
+        src_db = src / rel
+        if not src_db.exists():
+            warn(f"源端没有 {rel}（这个部署可能没装对应插件）")
+            continue
+
+        dst_db = dest_dir / rel
+        try:
+            if not quiet:
+                info(f"热备 {rel} …")
+            payload = hot_backup(src_db, dst_db)
+        except Fatal as e:
+            bad(str(e))
+            return 4, artifacts, None
+
+        if not quiet:
+            print(
+                f"    {C.GRN}{C.S_OK}{C.R} {payload['bytes'] / 1024 / 1024:.1f} MB  "
+                f"{payload['backup_seconds']:.3f}s  "
+                f"{payload['table_count']} 张表  "
+                f"quick_check={payload['quick_check']}  "
+                f"{C.DIM}{payload['sha256'][:16]}…{C.R}"
+            )
+
+        artifacts.append(
+            Artifact(
+                relpath=rel,
+                kind="sqlite",
+                bytes=payload["bytes"],
+                sha256=payload["sha256"],
+                quick_check=payload["quick_check"],
+                table_count=payload["table_count"],
+                backup_seconds=payload["backup_seconds"],
+            )
+        )
+
+    if not artifacts:
+        bad("一个库都没备份到，这次操作没有意义")
+        return 4, artifacts, None
+
+    cfg = src / "cmd_config.json"
+    if cfg.exists():
+        if not quiet:
+            info("复制 cmd_config.json …")
+        dst_cfg = dest_dir / "cmd_config.json"
+        dst_cfg.parent.mkdir(parents=True, exist_ok=True)
+        dst_cfg.write_bytes(cfg.read_bytes())
+        artifacts.append(
+            Artifact(
+                relpath="cmd_config.json",
+                kind="copy",
+                bytes=dst_cfg.stat().st_size,
+                sha256=sha256_of(dst_cfg),
+            )
+        )
+        if not quiet:
+            print(f"    {C.GRN}{C.S_OK}{C.R} {dst_cfg.stat().st_size} B")
+
+    ident = probe_identity(
+        Path(astrbot_src) if astrbot_src else None,
+        data_path=src,
+    )
+    runtime_pip = collect_runtime_pip(src / "site-packages")
+
+    m = Manifest(
+        generation=generation,
+        created_at=time.time(),
+        source_host=ident.hostname,
+        source_root=str(src),
+        protocol_version=PROTOCOL_VERSION,
+        astrbot_version=ident.astrbot_version or "unknown",
+        platform=ident.platform,
+        python_version=ident.python_version,
+        artifacts=artifacts,
+        runtime_pip=runtime_pip,
+        target_shell=target or "",
+    )
+    m.save(dest_dir / "manifest.json")
+    return 0, artifacts, m
+
+
 def _do_checkout(
     *,
     src: Path,
@@ -1024,85 +1154,15 @@ def _do_checkout(
     gen = be.next_generation()
     dest_dir = be.prepare_generation_dir(gen)
 
-    artifacts: List[Artifact] = []
-
-    for rel in (
-        "data_v4.db",
-        "plugin_data/astrbot_plugin_memory_companion/memory_companion.db",
-    ):
-        src_db = src / rel
-        if not src_db.exists():
-            warn(f"源端没有 {rel}（这个部署可能没装对应插件）")
-            continue
-
-        dst_db = dest_dir / rel
-        try:
-            info(f"热备 {rel} …")
-            payload = hot_backup(src_db, dst_db)
-        except Fatal as e:
-            bad(str(e))
-            return 4, gen, dest_dir, None
-
-        print(
-            f"    {C.GRN}{C.S_OK}{C.R} {payload['bytes'] / 1024 / 1024:.1f} MB  "
-            f"{payload['backup_seconds']:.3f}s  "
-            f"{payload['table_count']} 张表  "
-            f"quick_check={payload['quick_check']}  "
-            f"{C.DIM}{payload['sha256'][:16]}…{C.R}"
-        )
-
-        artifacts.append(
-            Artifact(
-                relpath=rel,
-                kind="sqlite",
-                bytes=payload["bytes"],
-                sha256=payload["sha256"],
-                quick_check=payload["quick_check"],
-                table_count=payload["table_count"],
-                backup_seconds=payload["backup_seconds"],
-            )
-        )
-
-    if not artifacts:
-        bad("一个库都没备份到，这次迁徙没有意义")
-        return 4, gen, dest_dir, None
-
-    cfg = src / "cmd_config.json"
-    if cfg.exists():
-        info("复制 cmd_config.json …")
-        dst_cfg = dest_dir / "cmd_config.json"
-        dst_cfg.parent.mkdir(parents=True, exist_ok=True)
-        dst_cfg.write_bytes(cfg.read_bytes())
-        artifacts.append(
-            Artifact(
-                relpath="cmd_config.json",
-                kind="copy",
-                bytes=dst_cfg.stat().st_size,
-                sha256=sha256_of(dst_cfg),
-            )
-        )
-        print(f"    {C.GRN}{C.S_OK}{C.R} {dst_cfg.stat().st_size} B")
-
-    ident = probe_identity(
-        Path(astrbot_src) if astrbot_src else None,
-        data_path=src,
-    )
-    runtime_pip = collect_runtime_pip(src / "site-packages")
-
-    m = Manifest(
+    rc, _artifacts, _manifest = _snapshot_payload(
+        src=src,
+        dest_dir=dest_dir,
+        astrbot_src=astrbot_src,
+        target=target,
         generation=gen,
-        created_at=time.time(),
-        source_host=ident.hostname,
-        source_root=str(src),
-        protocol_version=PROTOCOL_VERSION,
-        astrbot_version=ident.astrbot_version or "unknown",
-        platform=ident.platform,
-        python_version=ident.python_version,
-        artifacts=artifacts,
-        runtime_pip=runtime_pip,
-        target_shell=target or "",
     )
-    m.save(dest_dir / "manifest.json")
+    if rc != 0:
+        return rc, gen, dest_dir, None
 
     archive_info: Optional[Dict[str, Any]] = None
     if want_archive:
@@ -1116,6 +1176,177 @@ def _do_checkout(
         )
 
     return 0, gen, dest_dir, archive_info
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    """把当前状态热备一份、推给 Warden 的 `backups/`。
+
+    ## 它和 `migrate` 的区别只有一句话
+
+    `migrate` 是**交接**：占一代、要租约、有目标壳、有人会来取。
+    `backup` 不是：它没有目标壳，也没人会来取，账本里一个字都不写。
+    恢复只能由人显式发起（`molt recover`）——正因为如此，它可以在鱼
+    正常说话的时候十分钟跑一次，不会和任何状态机打架。
+    """
+    data_dir = Path(args.data).expanduser().resolve()
+    if not data_dir.is_dir():
+        bad(f"data 目录不存在：{data_dir}")
+        return 2
+
+    head("中途备份")
+    kv("源 data", data_dir)
+
+    try:
+        be = _backend(args)
+    except (NeedsHuman, Fatal, ValueError) as e:
+        bad(str(e))
+        return 2
+
+    shell = args.shell or _default_shell_id()
+
+    try:
+        status = be.status()
+    except (NeedsHuman, Fatal, MoltError) as e:
+        bad(f"读不到账本：{e}")
+        return 3
+
+    latest = (status.get("latest_generation") or {}).get("generation") or 0
+    try:
+        latest = int(latest)
+    except (TypeError, ValueError):
+        latest = 0
+
+    gen_dir = Path(tempfile.mkdtemp(prefix="molt-backup-"))
+    rc, _artifacts, manifest = _snapshot_payload(
+        src=data_dir,
+        dest_dir=gen_dir,
+        astrbot_src=args.astrbot_src,
+        target="",
+        generation=latest,
+    )
+    if rc != 0 or manifest is None:
+        return rc or 4
+
+    archive_path = gen_dir.parent / f"backup-{int(time.time())}.tar.gz"
+    info("打包 …")
+    archive = make_archive(gen_dir, archive_path)
+    print(
+        f"    {C.GRN}{C.S_OK}{C.R} {archive['bytes'] / 1024 / 1024:.1f} MB  "
+        f"{archive['file_count']} 个文件  "
+        f"{C.DIM}{archive['sha256'][:16]}…{C.R}"
+    )
+
+    if getattr(args, "dry_run", False):
+        warn("--dry-run：打包完成，但没有上传")
+        dim(f"  归档留在这里：{archive_path}")
+        return 0
+
+    info("上传给 Warden …")
+    try:
+        meta = be.upload_backup(
+            Path(archive["path"]),
+            shell=shell,
+            generation=latest,
+            expected_sha256=archive["sha256"],
+        )
+    except (NeedsHuman, Fatal, MoltError) as e:
+        bad(f"上传失败：{e}")
+        dim(f"  归档还在本地：{archive_path}")
+        return 4
+
+    ok(f"已收进 backups/：{meta.get('name', '?')}")
+    kv("字节", meta.get("bytes", 0))
+    kv("第几代之后", f"第 {latest} 代（这一份是它之后的全部增量）")
+    dim("  它不会出现在 molt status 的迁徙历史里 —— 备份不是交接。")
+    return 0
+
+
+def cmd_backups(args: argparse.Namespace) -> int:
+    """列出 Warden 上现有的中途备份。"""
+    try:
+        be = _backend(args)
+    except (NeedsHuman, Fatal, ValueError) as e:
+        bad(str(e))
+        return 2
+    try:
+        items = be.backups()
+    except (NeedsHuman, Fatal, MoltError) as e:
+        bad(f"读不到备份列表：{e}")
+        return 3
+
+    head("中途备份")
+    if not items:
+        info("一份都没有。")
+        dim("  要让壳定时回推，在 agent 的配置里设 backup_interval（秒）。")
+        return 0
+
+    total = 0
+    for item in items:
+        size = int(item.get("bytes") or 0)
+        total += size
+        print(
+            f"  {C.GRN}{C.S_OK}{C.R} {item.get('name')}  "
+            f"{size / 1024 / 1024:.1f} MB  "
+            f"来自 {item.get('shell') or '未知壳'}  "
+            f"{item.get('created_at_readable') or ''}"
+        )
+    print()
+    kv("一共", f"{len(items)} 份 / {total / 1024 / 1024:.1f} MB")
+    dim(f"  恢复：molt recover --backup <名字> --data <目标 data 目录>")
+    return 0
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    """从一份中途备份恢复。
+
+    ## 为什么它只是 `land` 的一层皮
+
+    恢复要动的文件和落位要动的是同一批，护栏也必须完全相同（活库检查、
+    原子替换、旧数据先备份、机器覆写层）。把那些逻辑再写一遍，等于给
+    "最危险的一次操作"开第二条实现路径——两条路径迟早只有一条是对的。
+
+    所以这里只做三件事：把备份取下来、核对指纹、把参数整理成
+    `land` 认的形状，然后调它。
+    """
+    try:
+        be = _backend(args)
+    except (NeedsHuman, Fatal, ValueError) as e:
+        bad(str(e))
+        return 2
+
+    head("恢复")
+    kv("备份", args.backup)
+
+    staging = Path(tempfile.mkdtemp(prefix="molt-recover-"))
+    dest = staging / "recovered.tar.gz"
+    try:
+        got = be.download_backup(args.backup, dest)
+    except (NeedsHuman, Fatal, MoltError) as e:
+        bad(f"取不下来：{e}")
+        return 4
+
+    ok(f"已取下：{got['bytes'] / 1024 / 1024:.1f} MB")
+    kv("sha256", str(got["sha256"])[:24] + "…")
+
+    ns = argparse.Namespace(**vars(args))
+    ns.archive = str(dest)
+    ns.generation = None
+    ns.sha256 = str(got["sha256"])
+    return cmd_land(ns)
+
+
+def _default_shell_id() -> str:
+    """没显式给壳名时用的默认值：小写主机名。
+
+    为什么小写：账本里的壳名一直是小写的（`desktop-h2kgiao`、
+    `ugreen-776b-8b7896df`），而 `socket.gethostname()` 在 Windows 上
+    是全大写。混着来会让"同一个壳"在 `molt status` 里显示成两个。
+    """
+    try:
+        name = socket.gethostname().strip()
+    except OSError:
+        name = ""
+    return (name or "unknown").lower()
 
 
 def _live_data_dir_reason(data_dir: Path) -> Optional[str]:
@@ -2031,6 +2262,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="跳过「目标 data 目录看起来还活着」的检查（确认那个 AstrBot 真的停了再用）",
     )
     s.set_defaults(func=cmd_land)
+
+    # backup
+    s = add("backup", "把当前状态热备一份推给 Warden（不占代、不是交接）")
+    s.add_argument("--data", required=True, help="源端 data 目录")
+    s.add_argument("--shell", default="", help="这台壳的名字（默认用小写主机名）")
+    s.add_argument("--astrbot-src", default="", help="AstrBot 源码目录（用来读出它的版本）")
+    s.add_argument("--dry-run", action="store_true", help="只打包不上传")
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.set_defaults(func=cmd_backup)
+
+    # backups
+    s = add("backups", "列出 Warden 上现有的中途备份")
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.set_defaults(func=cmd_backups)
+
+    # recover
+    s = add("recover", "从一份中途备份恢复（护栏与 land 完全相同）")
+    s.add_argument("--backup", required=True, help="备份名（molt backups 里看到的那个）")
+    s.add_argument("--data", required=True, help="目标 data 目录")
+    s.add_argument("--sha256", default="", help="（忽略：指纹从下载结果里取）")
+    s.add_argument("--to", help="解包到哪个目录（默认用 mkdtemp 建一个全新的）")
+    s.add_argument("--shell", default="", help="这台壳的 shell_id（写进覆写日志）")
+    s.add_argument("--dashboard-host", default="", help="目标壳的 dashboard 监听地址")
+    s.add_argument("--dashboard-port", type=int, default=None, help="目标壳的 dashboard 端口")
+    s.add_argument("--yes", action="store_true", help="真的落位（不给只做检查）")
+    s.add_argument("--force", action="store_true", help="跳过「目标 data 目录还活着」的检查")
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.set_defaults(func=cmd_recover)
 
     # doctor
     s = add("doctor", "体检：把能查的都查一遍")

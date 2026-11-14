@@ -85,6 +85,10 @@ class Settings:
     warden_token: str = ""
     port: int = DEFAULT_PORT        # AstrBot dashboard 端口，用来判断"在不在跑"
     interval: float = DEFAULT_INTERVAL
+    #: 每隔多少秒把当前状态热备一份推给 Warden（0 = 关掉）。
+    #: 十分钟：**备份不是交接**，它不进 generations、不占租约、没人会来取，
+    #: 所以可以趁鱼正常说话的时候跑，代价只是一次 SQLite 热备的几十毫秒。
+    backup_interval: float = 600.0
     shutdown_after_leave: bool = False
     # "sleep" 只挂起（会话不销毁，回来不用登录）；"shutdown" 真关机（回来必须能自动登录）
     power_action: str = "sleep"
@@ -423,6 +427,73 @@ class Agent:
     def boot_argv(self) -> list:
         s = self.settings
         return [s.astrbot_python, s.boot_script, s.data_dir, str(s.port), s.log_path]
+
+    def observe_argv(self) -> list:
+        """让壳自己把"我搬到了哪儿"记进它自己的记忆。
+
+        **必须是外部敲一下**：插件不能在 `initialize()` 里起后台任务 ——
+        那里拿到的循环不一定是在跑的那个（真机 2026-11-15 03:02 实测：
+        `loop.call_later(5.0, …)` 五秒都不触发，日志一片空白）。
+        而请求处理器一定跑在服务循环上，所以这条路才是可靠的。
+        """
+        s = self.settings
+        return [
+            s.python, "-m", "molt.cli", "observe",
+            "--config", os.path.join(s.data_dir, "cmd_config.json"),
+            "--base", f"http://127.0.0.1:{s.port}",
+            "--no-color",
+        ]
+
+    def do_observe(self) -> StepResult:
+        return self._run(self.observe_argv(), timeout=180)
+
+    def backup_argv(self) -> list:
+        """把当前状态热备一份推给 Warden 的 `backups/`。
+
+        它和 `migrate` 的区别只有一句话：`migrate` 是交接（占一代、要租约、
+        有目标壳），`backup` 不是（不占代、不碰账本、没人来取）。
+        """
+        s = self.settings
+        return [
+            s.python, "-m", "molt.cli", "backup",
+            "--data", str(Path(s.data_dir)),
+            "--shell", s.shell,
+            "--no-color",
+        ]
+
+    def do_backup(self) -> StepResult:
+        return self._run(self.backup_argv(), timeout=300)
+
+    def maybe_backup(self, state: Dict[str, Any], status: Dict[str, Any]) -> None:
+        """到点了就推一份备份。三个前提缺一不可。
+
+          · **这一代确实是我这儿的**（`consumed_by == 我`）：备份别人的数据
+            没有意义，而且会在别人正写库的时候去读它
+          · **壳真的还在说话**（端口在听）：`enabled` 关着或没起来时数据不
+            会变，推一份一模一样的字节只是浪费
+          · **到点了**：`last_backup_at` 记在 state 里，**失败不推进** ——
+            推失败了下一轮再试，而不是"等下一个十分钟"
+
+        失败只记一行日志。备份是锦上添花，它不该让 agent 变成另一个东西。
+        """
+        interval = float(self.settings.backup_interval or 0)
+        if interval <= 0 or not self.settings.execute:
+            return
+        gen = status.get("latest_generation") or {}
+        if str(gen.get("consumed_by") or "").strip() != self.settings.shell:
+            return
+        if not self._probe_port():
+            return
+        now = time.time()
+        if now - float(state.get("last_backup_at") or 0) < interval:
+            return
+        result = self.do_backup()
+        if result.ok:
+            state["last_backup_at"] = now
+            self.save_state(state)
+            self.log("  ✓ 已推一份中途备份（备份不是交接）")
+        else:
+            self.log(f"  ! 备份没推上去：{result.detail}")
 
     def _run(self, argv: list, *, timeout: float) -> StepResult:
         try:
@@ -763,6 +834,39 @@ class Agent:
                         steps.append(extra)
                         self.log(f"  {'✓' if extra.ok else '!'} {extra.detail}")
                 return decision, steps
+
+        # 它起来了，而且这一代是我落的地 —— 让壳自己把"我搬到了哪儿"记一笔。
+        # 放在这里而不是 `start` 块的末尾：AstrBot 从开机到 dashboard 在听要
+        # 二十多秒，刚 spawn 完就去敲只会撞上"连不上"。而且这一条**顺带覆盖了
+        # 断电重启**：agent 自己并不知道上一轮 observe 有没有成功，唯一的判据
+        # 是账本里的 `observed_generation` 有没有到这一代。
+        if (
+            decision.kind == "idle"
+            and not steps
+            and self._probe_port()
+            and self.settings.execute
+        ):
+            gen = status.get("latest_generation") or {}
+            consumed = str(gen.get("consumed_by") or "").strip()
+            gnum = gen.get("generation")
+            if consumed == self.settings.shell and state.get("observed_generation") != gnum:
+                self.log(f"  第 {gnum} 代是我落的地，让它自己记一笔")
+                ob = self.do_observe()
+                steps.append(ob)
+                if ob.ok:
+                    state["observed_generation"] = gnum
+                    self.save_state(state)
+                    self.log("  ✓ 它自己记住了这一代")
+                else:
+                    # 记不住不是交接失败 —— 灵魂已经在说话了，这只是一行档案。
+                    # 下一轮再试（`observed_generation` 没推进）。
+                    self.log(f"  ! 没记住：{ob.detail}")
+
+        # 鱼在说话的时候，顺手把增量推一份给 Warden。
+        # 放在最后（而不是每个分支里各写一遍）：它和"这一轮做了什么决定"
+        # 无关，只和"鱼现在是不是在我这儿说话"有关。
+        if decision.kind in ("idle", "start"):
+            self.maybe_backup(state, status)
 
         return decision, steps
 

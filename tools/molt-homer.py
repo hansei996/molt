@@ -116,6 +116,9 @@ class Settings:
     warden_url: str = "http://127.0.0.1:6186"
     warden_token: str = ""
     interval: float = DEFAULT_INTERVAL
+    #: 每隔多少秒把当前状态热备一份推给 Warden（0 = 关掉）。
+    #: 备份不进 generations、不占租约、没人来取，所以趁鱼正常说话时跑。
+    backup_interval: float = 600.0
     timeout: float = DEFAULT_TIMEOUT
     stop_timeout: float = DEFAULT_STOP_TIMEOUT
     #: 这台壳自己的 dashboard 监听地址/端口。留空 = 保持快照里原样。
@@ -562,7 +565,81 @@ class Homer:
         self.log("  ✓ 平台已打开")
         return True
 
+    def observe_argv(self) -> List[str]:
+        """让容器里的那只壳自己把"我搬到了哪儿"记进它自己的记忆。
+
+        `--wait` 给到 120 秒：`docker start` 之后容器里要跑二十多秒
+        dashboard 才装配完，而 `observe` 的第一步就是等 WebUI 应答
+        （端口通了不算，`/api/auth/setup-status` 应答了才算）。
+        """
+        return [
+            self.settings.python, "-m", "molt.cli", "observe",
+            "--config", self.settings.data_dir.rstrip("/") + "/cmd_config.json",
+            "--base", f"http://127.0.0.1:{self.settings.dashboard_port or 6185}",
+            "--wait", "120",
+            "--no-color",
+        ]
+
+    def do_observe(self) -> bool:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = self.settings.molt_pkg
+        try:
+            cp = self.runner(self.observe_argv(), timeout=240, env=env)
+        except Exception as exc:  # noqa: BLE001 - 记不住一行档案不该影响交接
+            self.log(f"  ! 让它记账时出错：{exc}")
+            return False
+        if cp.returncode != 0:
+            tail = ((cp.stdout or "") + (cp.stderr or "")).strip().splitlines()
+            self.log(f"  ! 没记住这一代（退出码 {cp.returncode}）：{tail[-1] if tail else ''}")
+            return False
+        self.log("  ✓ 它自己记住了这一代")
+        return True
+
     # -- 一轮
+
+    def backup_argv(self) -> List[str]:
+        """把当前状态热备一份推给 Warden 的 `backups/`（不占代、不是交接）。"""
+        return [
+            self.settings.python, "-m", "molt.cli", "backup",
+            "--data", self.settings.data_dir,
+            "--shell", self.settings.shell,
+            "--no-color",
+        ]
+
+    def do_backup(self) -> bool:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = self.settings.molt_pkg
+        try:
+            cp = self.runner(self.backup_argv(), timeout=300, env=env)
+        except Exception as exc:  # noqa: BLE001 - 备份失败不该影响任何交接
+            self.log(f"  ! 备份时出错：{exc}")
+            return False
+        if cp.returncode != 0:
+            tail = ((cp.stdout or "") + (cp.stderr or "")).strip().splitlines()
+            self.log(f"  ! 备份没推上去（退出码 {cp.returncode}）：{tail[-1] if tail else ''}")
+            return False
+        self.log("  ✓ 已推一份中途备份（备份不是交接）")
+        return True
+
+    def maybe_backup(self, state: Dict[str, Any], status: Dict[str, Any]) -> None:
+        """到点了就推一份备份。三个前提缺一不可。
+        （和 `molt-agent.py` 里那份是同一条理由：不是给我这一代的、鱼没在
+        说话的、没到点的，都不该备份。）
+        """
+        interval = float(getattr(self.settings, "backup_interval", 0) or 0)
+        if interval <= 0 or not self.settings.execute:
+            return
+        gen = status.get("latest_generation") or {}
+        if str(gen.get("consumed_by") or "").strip() != self.settings.shell:
+            return
+        if not self.container_running():
+            return
+        now = time.time()
+        if now - float(state.get("last_backup_at") or 0) < interval:
+            return
+        if self.do_backup():
+            state["last_backup_at"] = now
+            self.save_state(state)
 
     def run_once(self) -> Dict[str, Any]:
         state = self.load_state()
@@ -595,6 +672,7 @@ class Homer:
                         self.log("  ! 没能把自己关掉，下一轮再试")
                         return {"ok": False, "kind": "idle", "reason": "没能停机"}
                     return {"ok": True, "kind": "idle", "stood_down": True}
+            self.maybe_backup(state, status)
             return {"ok": True, "kind": "idle"}
         if decision.kind == "wait":
             self.log(f"  [{decision.kind}] {decision.reason}")
@@ -646,6 +724,10 @@ class Homer:
         if started:
             state["needs_start"] = False
             self.save_state(state)
+            # 4.5) 让它自己记一笔"我是第几代到这儿来的"。
+            #      它失败**不影响交接结论** —— 鱼已经在说话了，少的只是一行档案。
+            self.do_observe()
+            self.maybe_backup(state, status)
         return {"ok": bool(landed and switched and started),
                 "kind": "land", "generation": generation,
                 "switched": switched, "started": started}
