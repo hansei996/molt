@@ -79,6 +79,10 @@ class Settings:
     warden_token: str = ""
     port: int = DEFAULT_PORT        # AstrBot dashboard 端口，用来判断"在不在跑"
     interval: float = DEFAULT_INTERVAL
+    shutdown_after_leave: bool = False
+    # "sleep" 只挂起（会话不销毁，回来不用登录）；"shutdown" 真关机（回来必须能自动登录）
+    power_action: str = "sleep"
+    shutdown_delay_seconds: int = 60
     timeout: float = DEFAULT_TIMEOUT
     #: 这台壳自己的 dashboard 监听地址/端口。留空 = 保持快照里原样。
     dashboard_host: str = "127.0.0.1"
@@ -412,6 +416,44 @@ class Agent:
             return StepResult("stop", False, f"pid {pid} 没有在超时内退出")
         return StepResult("stop", True, f"已让它优雅退出（pid {pid}）")
 
+    def do_shutdown(self, generation) -> StepResult:
+        """鱼已经搬走了 —— 这台机器可以睡了。
+
+        只在「账本里出现了一代，目标不是我」时触发：那说明这只鱼已经在
+        另一台机器上落位了，我这边既没有鱼、也不该继续占着电。
+        """
+        action = (self.settings.power_action or "sleep").strip().lower()
+        if action not in ("sleep", "shutdown"):
+            return StepResult("shutdown", False, f"power_action 只认 sleep / shutdown，收到 {action!r}")
+        if action == "sleep":
+            # 睡眠：会话不销毁，唤醒后一切照旧 —— 这是**不需要开机密码**的那条路。
+            # 关机和睡眠的区别不是省不省电，是"回来的时候要不要有人在键盘前"。
+            argv = ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"]
+            try:
+                proc = self.runner(argv, capture_output=True, text=True, timeout=20)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return StepResult("shutdown", False, f"起不来：{exc}")
+            code = getattr(proc, "returncode", 0)
+            if code != 0:
+                return StepResult("shutdown", False, f"退出码 {code}")
+            return StepResult("shutdown", True,
+                              f"机器睡着了（第 {generation} 代已经交给别人；唤醒靠魔术封包）")
+        delay = int(self.settings.shutdown_delay_seconds)
+        if delay < 0:
+            delay = 0
+        argv = ["shutdown", "/s", "/t", str(delay),
+                "/c", "molt: 鱼已经搬走了，这台机器休息"]
+        try:
+            proc = self.runner(argv, capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return StepResult("shutdown", False, f"起不来：{exc}")
+        code = getattr(proc, "returncode", 0)
+        if code != 0:
+            err = (getattr(proc, "stderr", "") or "").strip()
+            return StepResult("shutdown", False, f"退出码 {code}：{err}")
+        return StepResult("shutdown", True,
+                          f"{delay} 秒后关机（第 {generation} 代已经交给别人了）")
+
     def do_checkpoint(self) -> StepResult:
         """停干净之后，把残留的 WAL 合并回主库 —— 不合并 land 会被护栏挡住。"""
         report = checkpoint_databases(self.settings.data_dir)
@@ -485,6 +527,29 @@ class Agent:
 
         decision = decide(status, shell=self.settings.shell, state=state)
         steps: list = []
+
+        # 鱼搬走了就关机 —— 这一代的目标不是我，而且没有租约在飞。
+        # decide() 对"这一代不是给我的"返回 idle（也有可能是 wait），两种都算鱼走了；
+        # 真正的判据是下面那几个字段，不是这个 kind。
+        if self.settings.shutdown_after_leave and decision.kind in ("wait", "idle"):
+            gen = status.get("latest_generation") or {}
+            target = str(gen.get("target_shell") or "").strip()
+            gnum = gen.get("generation")
+            lease = status.get("lease") or {}
+            if (target and target != self.settings.shell
+                    and not lease and state.get("shut_down_for") != gnum):
+                if not self.settings.execute:
+                    self.log(f"  (dry-run) 我会关机：第 {gnum} 代的目標是 {target}")
+                    return decision, steps
+                sd = self.do_shutdown(gnum)
+                steps.append(sd)
+                if sd.ok:
+                    state["shut_down_for"] = gnum
+                    self.save_state(state)
+                    self.log(f"  ✓ {sd.detail}")
+                else:
+                    self.log(f"  ✗ 关不掉：{sd.detail}")
+                return decision, steps
 
         if decision.kind == "land":
             if not self.settings.execute:

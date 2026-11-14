@@ -554,3 +554,79 @@ def test_stop_is_a_noop_when_nothing_is_running(tmp_path):
     a.do_boot = lambda: agent.StepResult("boot", True, "")
     a.run_once()
     assert order == ["land"]
+
+
+def _recorder(calls):
+    class _P:
+        returncode = 0
+        stderr = ""
+    def _run(argv, **kw):
+        calls.append(list(argv))
+        return _P()
+    return _run
+
+
+def test_shutdown_after_leave_fires_when_generation_goes_elsewhere(tmp_path):
+    cfg = settings(shutdown_after_leave=True, shutdown_delay_seconds=120, execute=True, power_action="shutdown")
+    # 直接用 Agent 本体
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+    st = {"latest_generation": {"generation": 11, "target_shell": "nas-shell",
+          "consumed_by": None, "pushed_by": "win-shell"}, "lease": None}
+    agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
+                      status_fetcher=lambda: st,
+                      runner=_recorder(calls), port_probe=lambda port: False,
+                      spawner=lambda argv: 1, log=lambda m: None)
+    decision, steps = agent.run_once()
+    assert [s.name for s in steps] == ["shutdown"]
+    assert steps[0].ok is True
+    assert calls and calls[-1][:3] == ["shutdown", "/s", "/t"]
+    assert agent.load_state().get("shut_down_for") == 11
+
+
+def test_shutdown_after_leave_does_not_fire_for_my_own_generation(tmp_path):
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+    cfg = settings(shutdown_after_leave=True)
+    st = {"latest_generation": {"generation": 11, "target_shell": "win-shell",
+          "consumed_by": "win-shell", "pushed_by": "nas-shell"}, "lease": None}
+    agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
+                      status_fetcher=lambda: st,
+                      runner=_recorder(calls), port_probe=lambda port: False,
+                      spawner=lambda argv: 1, log=lambda m: None)
+    agent.run_once()
+    assert not [c for c in calls if c and c[0] == "shutdown"]
+
+
+def test_leave_sleeps_instead_of_shutdown_when_power_action_is_sleep(tmp_path):
+    """睡眠这条路不需要开机密码 —— 会话不销毁，醒来一切照旧。"""
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+    cfg = settings(shutdown_after_leave=True, execute=True, power_action="sleep")
+    st = {"latest_generation": {"generation": 12, "target_shell": "nas-shell",
+          "consumed_by": None, "pushed_by": "win-shell"}, "lease": None}
+    agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
+                      status_fetcher=lambda: st,
+                      runner=_recorder(calls), port_probe=lambda port: False,
+                      spawner=lambda argv: 1, log=lambda m: None)
+    _d, steps = agent.run_once()
+    assert [s.name for s in steps] == ["shutdown"]
+    assert steps[0].ok is True
+    assert calls and calls[-1][0] == "rundll32.exe"
+    assert "SetSuspendState" in calls[-1][1]
+
+
+def test_unknown_power_action_is_refused_not_guessed(tmp_path):
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+    cfg = settings(shutdown_after_leave=True, execute=True, power_action="reboot")
+    st = {"latest_generation": {"generation": 13, "target_shell": "nas-shell",
+          "consumed_by": None, "pushed_by": "win-shell"}, "lease": None}
+    agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
+                      status_fetcher=lambda: st,
+                      runner=_recorder(calls), port_probe=lambda port: False,
+                      spawner=lambda argv: 1, log=lambda m: None)
+    _d, steps = agent.run_once()
+    assert steps and steps[-1].ok is False
+    assert "只认 sleep / shutdown" in steps[-1].detail
+    assert not [c for c in calls if c and c[0] in ("shutdown", "rundll32.exe")]
