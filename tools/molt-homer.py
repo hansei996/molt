@@ -178,6 +178,31 @@ class Warden:
         self.token = token
         self.timeout = timeout
 
+    def heartbeat(self, shell_id: str, *, generation: int = 0, note: str = "") -> bool:
+        """告诉账本「我还在」。
+
+        为什么需要：账本其它字段都只记「谁取走了第几代」，没有一处回答
+        「现在谁还在跑」。于是鱼被拔电之后，`molt status` 看起来一切正常 ——
+        它分不清「鱼死了」和「鱼闲着」。
+        失败只返回 False，**绝不抛**：一次心跳丢了不影响任何交接。
+        """
+        if not shell_id:
+            return False
+        body = json.dumps(
+            {"shell_id": shell_id, "generation": int(generation), "note": note}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base}/heartbeat",
+            data=body,
+            headers={"X-Molt-Token": self.token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return 200 <= resp.status < 300
+        except Exception:  # noqa: BLE001 - 心跳永远不该把守护进程弄死
+            return False
+
     def status(self) -> Dict[str, Any]:
         req = urllib.request.Request(
             f"{self.base}/status",
@@ -619,6 +644,12 @@ class Homer:
 
     def run_forever(self, *, once: bool = False) -> None:
         while True:
+            try:
+                Warden(self.settings.warden_url, self.settings.warden_token).heartbeat(
+                    self.settings.shell, note="homer"
+                )
+            except Exception:  # noqa: BLE001 - 心跳失败不该拦住这一轮
+                pass
             try:
                 self.run_once()
             except Exception as exc:      # noqa: BLE001 - 守护进程不能因为一轮出错就死

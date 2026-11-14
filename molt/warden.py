@@ -50,6 +50,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# 心跳超过这么久没更新就算哑了。10 分钟：agent 每 10 秒一跳，
+# 留这么宽的余量是为了不把一次 GC、一次休眠唤醒误报成鱼死了。
+HEARTBEAT_STALE_SECONDS = 600
+
+
 from .epoch import (
     DEFAULT_LEASE_TTL_SECONDS,
     FencedState,
@@ -352,6 +357,18 @@ def _try_lock(fh) -> None:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+def _human_age(seconds: float) -> str:
+    """多久以前的人话版本。"""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{int(seconds)} 秒前"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} 分钟前"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)} 小时前"
+    return f"{int(seconds // 86400)} 天前"
+
+
 def _unlock(fh) -> None:
     if sys.platform == "win32":
         import msvcrt
@@ -387,6 +404,9 @@ class Warden:
         self.logs_dir = self.root / "logs"
         self._state = FencedState()
         self._generations: List[GenerationRecord] = []
+        # 心跳：谁在什么时候还活着。这是账本唯一一处'谁说自己在跑'的地方 ——
+        # 账本的其它字段记的是'谁取走了快照'，不是'谁现在还在'。
+        self._heartbeats: Dict[str, Dict[str, Any]] = {}
         self._loaded = False
 
     def _lock(self, timeout: float = 30.0) -> "_InterProcessLock":
@@ -410,6 +430,7 @@ class Warden:
         if not self.state_path.exists():
             self._state = FencedState()
             self._generations = []
+            self._heartbeats = {}
             self._loaded = True
             return
 
@@ -433,6 +454,9 @@ class Warden:
         self._generations = [
             GenerationRecord.from_dict(g) for g in raw.get("generations", [])
         ]
+        self._heartbeats = {
+            str(k): dict(v) for k, v in (raw.get("heartbeats") or {}).items()
+        }
         self._loaded = True
 
     def _ensure_loaded(self) -> None:
@@ -449,6 +473,7 @@ class Warden:
             "saved_by": socket.gethostname(),
             "fenced_state": self._state.to_dict(),
             "generations": [g.to_dict() for g in self._generations],
+            "heartbeats": self._heartbeats,
         }
 
     def save(self) -> None:
@@ -510,7 +535,56 @@ class Warden:
                 self._generations[-1].to_dict() if self._generations else None
             ),
             "checked_at": now,
+            "heartbeats": self._heartbeat_view(now),
         }
+
+    # ---------------------------------------------------------------- 心跳
+
+    def record_heartbeat(
+        self, shell_id: str, *, generation: int = 0, note: str = ""
+    ) -> Dict[str, Any]:
+        """记一次「我还在」。
+
+        为什么需要它：账本原来的每个字段回答的都是**过去**（谁取走了第几代），
+        没有任何东西回答「现在谁还在跑」。于是鱼被拔电之后 `molt status`
+        看起来一切正常 —— 它分不清「鱼死了」和「鱼闲着」。
+        """
+        if not shell_id:
+            raise NeedsHuman("心跳必须带 shell_id")
+        with self._lock():
+            self._reload_locked()
+            now = time.time()
+            self._heartbeats[shell_id] = {
+                "last_seen": now,
+                "last_seen_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "generation": int(generation),
+                "note": str(note)[:200],
+            }
+            # 只留最近 8 个壳。这是「当前状态」不是「历史」：留太多会让
+            # `molt status` 里混进一堆早就没了的机器。
+            if len(self._heartbeats) > 8:
+                oldest = sorted(
+                    self._heartbeats.items(), key=lambda kv: kv[1].get("last_seen", 0)
+                )
+                for key, _ in oldest[: len(self._heartbeats) - 8]:
+                    self._heartbeats.pop(key, None)
+            self.save()
+        return self._heartbeat_view(now)[shell_id]
+
+    def _heartbeat_view(self, now: float) -> Dict[str, Dict[str, Any]]:
+        """每个壳多久没说话了。"""
+        out: Dict[str, Dict[str, Any]] = {}
+        for shell_id, beat in self._heartbeats.items():
+            age = round(now - float(beat.get("last_seen", 0) or 0), 1)
+            out[shell_id] = {
+                "age_seconds": age,
+                "age_readable": _human_age(age),
+                "generation": beat.get("generation", 0),
+                "last_seen_readable": beat.get("last_seen_readable", ""),
+                "note": beat.get("note", ""),
+                "stale": age > HEARTBEAT_STALE_SECONDS,
+            }
+        return out
 
     # ---------------------------------------------------------------- 租约
 

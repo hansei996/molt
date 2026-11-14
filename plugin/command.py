@@ -303,6 +303,47 @@ class MoltMover:
         status = payload.get("status")
         return status if isinstance(status, dict) else None
 
+    def _self_label(self) -> str:
+        """这台壳叫什么。与 `host_label.txt` 同一套规矩（BOM、只取第一行）。"""
+        side = self.plugin_dir / "host_label.txt"
+        try:
+            if side.is_file():
+                raw = side.read_text(encoding="utf-8-sig").strip()
+                first = raw.splitlines()[0].strip() if raw else ""
+                if first:
+                    return first
+        except OSError:
+            pass
+        try:
+            import socket as _socket
+
+            return _socket.gethostname() or "unknown"
+        except OSError:
+            return "unknown"
+
+    def _where_lines(self, st: Dict[str, Any]) -> List[str]:
+        """「鱼现在在哪」——不用问它，看一眼就知道。"""
+        me = self._self_label()
+        beats = st.get("heartbeats")
+        lines = [f"我现在在 **{me}**。"]
+        if not isinstance(beats, dict) or not beats:
+            lines.append("其它壳还没有上报过心跳，所以只知道我自己在哪。")
+            return lines
+        others = []
+        for shell_id, beat in sorted(
+            beats.items(), key=lambda kv: kv[1].get("age_seconds", 0)
+        ):
+            if not isinstance(beat, dict):
+                continue
+            age = beat.get("age_readable") or ""
+            state = "哑了" if beat.get("stale") else "在跑"
+            mark = "（就是我）" if str(shell_id) == me else ""
+            others.append(f"· {shell_id}{mark}：{state}，最后心跳 {age}")
+        if others:
+            lines.append("")
+            lines.extend(others)
+        return lines
+
     def _status_text(self, cfg: Settings) -> str:
         if not cfg.enabled:
             return (
@@ -313,12 +354,18 @@ class MoltMover:
         if st is None:
             return f"问不到账本：{cfg.warden_url or '（warden_url 没配）'}\n它可能没在跑，也可能这台壳够不到它。"
         lease = st.get("lease") or None
-        lines = [
+        lines = self._where_lines(st)
+        lines += [
+            "",
             f"账本 epoch {st.get('current_epoch', '?')}，已登记 {st.get('generation_count', '?')} 代。",
         ]
-        if isinstance(lease, dict) and lease.get("shell_id"):
+        # 账本的租约视图用的是 `holder`（没有租约时是 {"state": "no-lease"}）。
+        # 早先这里读的是 `shell_id`，于是永远走 else 分支、永远说"没有租约" ——
+        # 一个从来不成立的判断，看起来和"真的没有租约"一模一样。
+        holder = lease.get("holder") if isinstance(lease, dict) else None
+        if holder:
             lines.append(
-                f"现在持租约的是 **{lease.get('shell_id')}**（epoch {lease.get('epoch')}）。有别人在，我不搬。"
+                f"现在持租约的是 **{holder}**（epoch {lease.get('epoch')}）。有别人在，我不搬。"
             )
         else:
             lines.append("现在没有租约——没有任何壳在搬家的路上。")

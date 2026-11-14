@@ -518,7 +518,7 @@ def test_ledger_status_returns_none_on_bad_payload(plugin_dir, pkg_dir):
 def test_status_text_reports_lease(plugin_dir, pkg_dir):
     write_cfg(plugin_dir, molt_pkg=str(pkg_dir))
     ledger = FakeLedger(
-        {"status": {"current_epoch": 9, "lease": {"shell_id": "win", "epoch": 9}}}
+        {"status": {"current_epoch": 9, "lease": {"holder": "win", "state": "active", "epoch": 9}}}
     )
     text = mover(plugin_dir, opener=ledger).handle("status").text
     assert "win" in text

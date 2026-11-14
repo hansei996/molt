@@ -653,7 +653,10 @@ def test_shutdown_after_leave_does_not_fire_for_my_own_generation(tmp_path):
           "consumed_by": "win-shell", "pushed_by": "nas-shell"}, "lease": None}
     agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
                       status_fetcher=lambda: st,
-                      runner=_recorder(calls), port_probe=lambda port: False,
+                      # 端口在听 = 这一刻它确实在跑。写成 False 的话会命中
+                      # "我是当前这一代但端口没人听 → 自愈拉起"那条分支，
+                      # 而这条用例想测的是"我自己这一代不该关机"。
+                      runner=_recorder(calls), port_probe=lambda port: True,
                       spawner=lambda argv: 1, log=lambda m: None)
     agent.run_once()
     assert not [c for c in calls if c and c[0] == "shutdown"]
@@ -776,3 +779,39 @@ def test_clean_sidecars_never_touches_backup_dirs(tmp_path):
     a, _r, _s, _l = _agent(tmp_path, cfg=settings(data_dir=str(data)), status_fetcher=lambda: ledger())
     assert a.do_clean_sidecars() == []
     assert (backup / "memory_companion.db-shm").exists()
+
+def test_self_heal_does_not_boot_twice_in_a_row(tmp_path):
+    """断电重启后自愈只该拉一次。
+
+    真机 03:41 上的事故：AstrBot 从启动到 6199 在听要 20 多秒，而 agent 每 10 秒
+    一轮，于是它在"端口还没人听"的窗口里又拉了一份 —— 同一个壳里出现了两个
+    AstrBot 实例。**两只鱼同时在线是这个项目唯一的硬红线**，所以这条必须钉住。
+    """
+    mod = sys.modules["molt_agent_under_test"]
+    boots = []
+    cfg = settings(execute=True)
+    st = {"latest_generation": {"generation": 13, "target_shell": "win-shell",
+          "consumed_by": "win-shell", "pushed_by": "nas-shell"}, "lease": None}
+
+    def spawner(argv, log_path=None):
+        boots.append(argv)
+        return 1000 + len(boots)
+
+    agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
+                      status_fetcher=lambda: st,
+                      # 端口一直没人听：模拟"刚拉起来、还在启动"的那 20 多秒
+                      port_probe=lambda port: False,
+                      spawner=spawner, log=lambda m: None)
+    agent.run_once()
+    assert len(boots) == 1, "第一次该拉起来"
+
+    agent.run_once()
+    assert len(boots) == 1, "冷却期内不许再拉第二个 —— 那会是两只鱼同时在线"
+
+    # 冷却过了（把状态里的时间往回拨），才允许再拉
+    state = agent.load_state()
+    state["last_boot_at"] = 0.0
+    agent.save_state(state)
+    agent.run_once()
+    assert len(boots) == 2, "冷却期过了应该允许再试一次"
+

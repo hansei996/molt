@@ -49,7 +49,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .errors import Fatal, MoltError, NeedsHuman
 from .version import PROTOCOL_VERSION, __version__
@@ -83,11 +83,93 @@ class _Response:
         *,
         stream_path: Optional[Path] = None,
         stream_sha256: str = "",
+        html: Optional[str] = None,
     ) -> None:
         self.status = status
         self.payload = payload
         self.stream_path = stream_path
         self.stream_sha256 = stream_sha256
+        self.html = html
+
+
+def _where_html(status: Dict[str, Any]) -> str:
+    """「鱼现在在哪」的一页纸。
+
+    只用内联样式、零外部资源：这个页面会被人在手机上、在别的机器上打开，
+    任何一次外部请求失败都会让"它到底在哪"变成一张白屏。
+    """
+    beats = status.get("heartbeats") or {}
+    latest = status.get("latest_generation") or {}
+    lease = status.get("lease") or {}
+
+    def esc(text: Any) -> str:
+        import html as _html
+
+        return _html.escape(str(text if text is not None else ""))
+
+    rows = []
+    for shell_id, beat in sorted(beats.items(), key=lambda kv: kv[1].get("age_seconds", 0)):
+        stale = beat.get("stale")
+        color = "#b42318" if stale else "#067647"
+        word = "哑了" if stale else "在跑"
+        rows.append(
+            "<tr>"
+            f"<td><b>{esc(shell_id)}</b></td>"
+            f'<td style="color:{color};font-weight:600">{word}</td>'
+            f"<td>{esc(beat.get('age_readable', ''))}</td>"
+            f"<td>{esc(beat.get('generation', ''))}</td>"
+            f"<td>{esc(beat.get('note', ''))}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append('<tr><td colspan="5" style="color:#667085">还没有任何壳发过心跳</td></tr>')
+
+    lease_text = (
+        f"被 <b>{esc(lease.get('holder'))}</b> 持有（还剩 {esc(lease.get('remaining_seconds'))} 秒）"
+        if lease.get("state") == "active"
+        else "没有租约 —— 没有任何壳在搬家"
+    )
+    gen_text = (
+        f"第 <b>{esc(latest.get('generation'))}</b> 代 · 目标壳 "
+        f"<b>{esc(latest.get('target_shell') or '?')}</b> · 取走的是 "
+        f"<b>{esc(latest.get('consumed_by') or '还没人取')}</b>"
+        if latest
+        else "账本里还没有任何一代"
+    )
+
+    return f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>鱼现在在哪</title>
+<style>
+ body{{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+      margin:0;padding:24px;background:#f9fafb;color:#101828}}
+ .card{{max-width:760px;margin:0 auto;background:#fff;border:1px solid #eaecf0;
+        border-radius:12px;padding:20px 24px}}
+ h1{{font-size:20px;margin:0 0 4px}}
+ p.sub{{color:#667085;font-size:13px;margin:0 0 18px}}
+ table{{width:100%;border-collapse:collapse;font-size:14px}}
+ th{{text-align:left;color:#667085;font-weight:500;font-size:13px;
+     border-bottom:1px solid #eaecf0;padding:8px 6px}}
+ td{{border-bottom:1px solid #f2f4f7;padding:10px 6px}}
+ .meta{{font-size:14px;line-height:1.9;color:#344054;margin-top:16px}}
+ .meta b{{color:#101828}}
+</style></head><body>
+<div class="card">
+  <h1>鱼现在在哪</h1>
+  <p class="sub">数据来自各个壳自己上报的心跳。心跳超过 10 分钟没更新就算「哑了」。</p>
+  <table>
+    <thead><tr><th>壳</th><th>状态</th><th>最后心跳</th><th>代</th><th>说明</th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+  <div class="meta">
+    <div>账本：{gen_text}</div>
+    <div>租约：{lease_text}</div>
+    <div>当前 epoch：<b>{esc(status.get('current_epoch'))}</b> ·
+         已登记 <b>{esc(status.get('generation_count'))}</b> 代</div>
+  </div>
+</div>
+</body></html>"""
 
 
 def _ok(**fields: Any) -> _Response:
@@ -191,6 +273,30 @@ class WardenServer:
             # ---- GET /status ----
             if head == "status" and method == "GET":
                 return _ok(status=self.warden.status())
+
+            # ---- POST /heartbeat ----
+            if head == "heartbeat" and method == "POST":
+                shell_id = str(body.get("shell_id") or "").strip()
+                if not shell_id:
+                    return _err(400, "缺少 shell_id", "bad_request")
+                try:
+                    generation = int(body.get("generation") or 0)
+                except (TypeError, ValueError):
+                    generation = 0
+                beat = self.warden.record_heartbeat(
+                    shell_id,
+                    generation=generation,
+                    note=str(body.get("note") or ""),
+                )
+                return _ok(heartbeat=beat)
+
+            # ---- GET /where ----
+            # 一个给人看的页面，不是给机器用的。它回答的是「鱼现在在哪」，
+            # 而这个问题的答案以前只能靠「问它」。
+            if head == "where" and method == "GET":
+                return _Response(
+                    200, {"ok": True}, html=_where_html(self.warden.status())
+                )
 
             # ---- POST /acquire ----
             if head == "acquire" and method == "POST":
@@ -404,7 +510,17 @@ class WardenServer:
 
             def _authorized(self) -> bool:
                 got = self.headers.get(TOKEN_HEADER, "")
-                return secrets.compare_digest(got, server.token)
+                if secrets.compare_digest(got, server.token):
+                    return True
+                # `/where` 是给人用手机浏览器打开的一页纸，而浏览器没法加自定义头。
+                # 只给它一个人开后门：token 走查询串，并且**只认这一个路径**。
+                # 理由：一个能读账本、能改租约的 token 出现在 URL 里会被记进
+                # 浏览历史、被转发、被截图，所以这个口子必须窄到只剩一个只读页面。
+                parsed = urlparse(self.path)
+                if parsed.path.rstrip("/").endswith("/where"):
+                    given = (parse_qs(parsed.query).get("token") or [""])[0]
+                    return secrets.compare_digest(given, server.token)
+                return False
 
             def _read_body(self) -> Optional[Dict[str, Any]]:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -442,6 +558,15 @@ class WardenServer:
                         # 服务端的错，但也不该让异常爬到 serve_forever 里
                         # 打出一整段 traceback 淹掉日志。
                         return
+                    return
+
+                if resp.html is not None:
+                    raw = resp.html.encode("utf-8")
+                    self.send_response(resp.status)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
                     return
 
                 payload = dict(resp.payload)

@@ -35,6 +35,7 @@ fencing 在 Warden 那侧（epoch 单调、存储端拒绝倒退写入）。这�
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import sqlite3
@@ -54,6 +55,9 @@ SLEEP_TASK_NAME = "Molt-Sleep"
 DEFAULT_INTERVAL = 10.0
 DEFAULT_TIMEOUT = 15.0
 DEFAULT_PORT = 6199
+# 拉起来之后多久之内不再拉第二次。AstrBot 冷启动到 6199 在听实测 20–30 秒，
+# 这里给到 180 秒：宁可多等一轮，也不要一个壳里冒出两只鱼。
+BOOT_COOLDOWN_SECONDS = 180.0
 
 
 # ---------------------------------------------------------------- 配置
@@ -150,6 +154,31 @@ class Warden:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+
+    def heartbeat(self, shell_id: str, *, generation: int = 0, note: str = "") -> bool:
+        """告诉账本「我还在」。
+
+        为什么需要：账本其它字段都只记「谁取走了第几代」，没有一处回答
+        「现在谁还在跑」。于是鱼被拔电之后，`molt status` 看起来一切正常 ——
+        它分不清「鱼死了」和「鱼闲着」。
+        失败只返回 False，**绝不抛**：一次心跳丢了不影响任何交接。
+        """
+        if not shell_id:
+            return False
+        body = json.dumps(
+            {"shell_id": shell_id, "generation": int(generation), "note": note}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/heartbeat",
+            data=body,
+            headers={"X-Molt-Token": self.token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return 200 <= resp.status < 300
+        except Exception:  # noqa: BLE001 - 心跳永远不该把守护进程弄死
+            return False
 
     def status(self) -> Dict[str, Any]:
         """拿账本状态。拿不到就抛——**调用方不许把 None 当成"没有新快照"**。"""
@@ -315,7 +344,10 @@ class Agent:
     state_path: Path
     runner: Runner = subprocess.run
     status_fetcher: Optional[Callable[[], Dict[str, Any]]] = None
-    port_probe: Optional[Callable[[], bool]] = None
+    # 可选：往账本报「我还在」。不注入就什么都不做（测试与 dry-run 用）。
+    heartbeat_sender: Optional[Callable[..., bool]] = None
+    port_probe: Optional[Callable[..., bool]] = None
+    _probe_takes_port: Optional[bool] = None
     spawner: Optional[Callable[[list, str], int]] = None
     #: 本机 AstrBot 的 pid（落位前要先让它停下来）。None = 本机没在跑。
     pid_probe: Optional[Callable[[], Optional[int]]] = None
@@ -324,6 +356,18 @@ class Agent:
     log: Callable[[str], None] = field(default=_log_line)
 
     # -- 状态 ------------------------------------------------------
+    def _send_heartbeat(self) -> None:
+        if self.heartbeat_sender is None:
+            return
+        try:
+            self.heartbeat_sender(
+                self.settings.shell,
+                generation=int((self.load_state() or {}).get("landed_generation") or 0),
+                note="agent",
+            )
+        except Exception:  # noqa: BLE001 - 心跳永远不该把守护进程弄死
+            pass
+
     def load_state(self) -> Dict[str, Any]:
         try:
             raw = self.state_path.read_text(encoding="utf-8")
@@ -510,9 +554,32 @@ class Agent:
     def do_switch_on(self) -> StepResult:
         return self._run(self.switch_argv(), timeout=120)
 
+    def _probe_port(self) -> bool:
+        """端口上有没有人在听。
+
+        注入的探针有两种签名（`lambda: bool` 和 `lambda port: bool`），
+        用签名判断该传几个参数 —— 比"先试一次、抛 TypeError 再试一次"干净：
+        那种写法会把探针内部的真 TypeError 也吞成"换个签名再试"。
+        """
+        raw = self.port_probe
+        if raw is None:
+            return False
+        if self._probe_takes_port is None:
+            try:
+                params = [
+                    x for x in inspect.signature(raw).parameters.values()
+                    if x.kind in (x.POSITIONAL_ONLY, x.POSITIONAL_OR_KEYWORD)
+                ]
+            except (TypeError, ValueError):
+                params = []
+            self._probe_takes_port = len(params) >= 1
+        if self._probe_takes_port:
+            return bool(raw(self.settings.port))
+        return bool(raw())
+
     def do_boot(self) -> StepResult:
         """起 AstrBot。**不起第二个**——本机已经在跑就什么都不做。"""
-        if self.port_probe is not None and self.port_probe():
+        if self._probe_port():
             return StepResult("boot", True, "本机已经在跑（端口在听），不重复起")
         if self.spawner is None:
             return StepResult("boot", False, "没有 spawner")
@@ -633,7 +700,9 @@ class Agent:
                 return decision, steps
             boot = self.do_boot()
             steps.append(boot)
+            state["last_boot_at"] = time.time()
             if not boot.ok:
+                self.save_state(state)
                 self.log(f"  ✗ 启动失败：{boot.detail}")
                 return decision, steps
             state["needs_start"] = False
@@ -644,10 +713,55 @@ class Agent:
                 steps.append(extra)
                 self.log(f"  {'✓' if extra.ok else '!'} {extra.detail}")
 
+        # 自愈：这一代确实是我取走的，但端口上没有人听 —— 那就是"我被断电/被杀掉了"。
+        # 不看 `needs_start`：那个欠账只在**我这次落位**时置真，管不到"本来跑得好好的、
+        # 被拔了电、重启之后照旧是我"这种情况（真机 2026-11-15 03:29 查出来）。
+        # 判据是"现在到底有没有在听"，不是"我以为自己该不该在跑"。
+        if decision.kind == "idle" and not steps:
+            gen = status.get("latest_generation") or {}
+            consumed = str(gen.get("consumed_by") or "").strip()
+            gnum = gen.get("generation")
+            listening = self._probe_port()
+            # 刚拉起来的那一次还没开始听（AstrBot 从开机到 6199 在听要 20 多秒），
+            # 如果不设冷却，每 10 秒就再拉一个 —— 真机 03:41 上真的拉出了两个实例。
+            # **两只鱼同时在线是本项目唯一的硬红线**，所以这里的冷却必须存在，
+            # 而且要比最慢的一次冷启动还长。
+            since_boot = time.time() - float(state.get("last_boot_at") or 0)
+            cooling = since_boot < BOOT_COOLDOWN_SECONDS
+            if consumed == self.settings.shell and not listening and cooling:
+                self.log(
+                    f"  {int(BOOT_COOLDOWN_SECONDS - since_boot)} 秒前刚拉过 AstrBot，"
+                    f"它可能还在启动。这一轮先不重复拉（免得两只鱼同时在线）"
+                )
+            if consumed == self.settings.shell and not listening and not cooling:
+                if not self.settings.execute:
+                    self.log(f"  (dry-run) 第 {gnum} 代是我取的，但端口没人听 —— 我会把它拉起来")
+                    return decision, steps
+                self.log(f"  第 {gnum} 代是我取的，但端口没人听 —— 我去把它拉起来")
+                state["last_boot_at"] = time.time()
+                self.save_state(state)
+                sw = self.do_switch_on()
+                steps.append(sw)
+                if not sw.ok:
+                    self.log(f"  ✗ 打开平台失败：{sw.detail}")
+                    return decision, steps
+                boot = self.do_boot()
+                steps.append(boot)
+                self.log(f"  {'✓' if boot.ok else '✗'} {boot.detail}")
+                if boot.ok:
+                    state["started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    self.save_state(state)
+                    for extra in self.do_extras():
+                        steps.append(extra)
+                        self.log(f"  {'✓' if extra.ok else '!'} {extra.detail}")
+                return decision, steps
+
         return decision, steps
 
     def run_forever(self, *, once: bool = False) -> int:
         while True:
+            # 每轮先报一次「我还在」。它失败也不影响这一轮做什么。
+            self._send_heartbeat()
             try:
                 decision, _ = self.run_once()
             except ConfigError as exc:
@@ -936,7 +1050,8 @@ def main(argv: Optional[list] = None) -> int:
         settings=settings,
         state_path=cfg_path.parent / STATE_FILENAME,
         status_fetcher=warden.status,
-        port_probe=lambda: _port_open("127.0.0.1", settings.port),
+        heartbeat_sender=warden.heartbeat,
+        port_probe=lambda port: _port_open("127.0.0.1", port),
         spawner=_default_spawn,
         pid_probe=lambda: _listening_pid(settings.port),
         stopper=lambda pid: _send_ctrl_c(pid, timeout=settings.timeout * 2),

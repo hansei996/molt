@@ -531,3 +531,54 @@ def test_append_log_writes_readable_lines(tmp_path: Path):
     assert "迁徙开始" in text
     assert "[ERROR]" in text
     assert "[INFO ]" in text
+
+def test_record_heartbeat_is_visible_in_status(tmp_path):
+    w = Warden(tmp_path / "w")
+    w.record_heartbeat("win-shell", generation=13, note="agent")
+    beats = w.status()["heartbeats"]
+    assert "win-shell" in beats
+    beat = beats["win-shell"]
+    assert beat["generation"] == 13
+    assert beat["note"] == "agent"
+    assert beat["stale"] is False
+    assert beat["age_seconds"] >= 0
+
+
+def test_heartbeat_goes_stale_after_the_threshold(tmp_path, monkeypatch):
+    w = Warden(tmp_path / "w")
+    w.record_heartbeat("win-shell")
+    # 直接把"现在"往后拨，比 sleep 十分钟可靠得多。
+    import molt.warden as mod
+
+    real_time = mod.time.time
+    monkeypatch.setattr(mod.time, "time", lambda: real_time() + 700)
+    beats = w.status()["heartbeats"]
+    assert beats["win-shell"]["stale"] is True
+    assert "分钟前" in beats["win-shell"]["age_readable"]
+
+
+def test_heartbeat_keeps_only_the_eight_newest(tmp_path):
+    w = Warden(tmp_path / "w")
+    for i in range(10):
+        w.record_heartbeat(f"shell-{i}")
+        w._heartbeats[f"shell-{i}"]["last_seen"] = 1000 + i
+    w.save()
+    w.record_heartbeat("newest")
+    beats = w.status()["heartbeats"]
+    assert len(beats) <= 8
+    assert "newest" in beats
+    assert "shell-0" not in beats
+
+
+def test_heartbeat_requires_a_shell_id(tmp_path):
+    w = Warden(tmp_path / "w")
+    with pytest.raises(NeedsHuman):
+        w.record_heartbeat("")
+
+
+def test_heartbeat_survives_a_reload(tmp_path):
+    w = Warden(tmp_path / "w")
+    w.record_heartbeat("win-shell", generation=3)
+    again = Warden(tmp_path / "w")
+    assert "win-shell" in again.status()["heartbeats"]
+
