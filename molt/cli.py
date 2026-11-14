@@ -1404,7 +1404,7 @@ def cmd_land(args: argparse.Namespace) -> int:
                 patched, notes = overlay_for_windows(
                     base_cfg,
                     shell_id=args.shell or "windows",
-                    port=args.dashboard_port,
+                    port=args.dashboard_port or DEFAULT_DASHBOARD_PORT,
                 )
                 save_config(patched, cfg_path)
                 head("机器覆写层（Windows）")
@@ -1415,13 +1415,18 @@ def cmd_land(args: argparse.Namespace) -> int:
             else:
                 # 非 Windows：dashboard 端口不猜（猜错会让它监听在别人能访问的
                 # 地址上），但平台适配器这一条与平台无关，必须关。
+                # dashboard 是**壳自己的事**：Windows 上该是 127.0.0.1（不对外），
+                # 容器里该是 0.0.0.0（容器网络本身隔离，且外面还要端口映射进来）。
+                # 2026-11-15 01:02 真机踩到：从 Windows 回家的快照带着 127.0.0.1:6199，
+                # 落在 NAS 容器里之后 WebUI 谁都连不上 —— 容器里监听 loopback，
+                # 映射出去的端口后面什么都没有。所以这一条必须由目标壳自己说。
                 patched, notes = apply_overlay(
                     base_cfg,
                     shell_id=args.shell or platform.system().lower(),
                     platform=platform.system().lower(),
                     drop_provider_sources=[],
-                    dashboard_host=None,
-                    dashboard_port=None,
+                    dashboard_host=args.dashboard_host or None,
+                    dashboard_port=args.dashboard_port,
                     rotate_jwt=False,
                     disable_platforms=True,
                 )
@@ -1429,9 +1434,13 @@ def cmd_land(args: argparse.Namespace) -> int:
                 head("机器覆写层（非 Windows：只做与平台无关的那几条）")
                 for ch in notes["changes"]:
                     print(f"    {C.GRN}{C.S_OK}{C.R} {ch}")
-                warn("这是一台非 Windows 壳，dashboard 与 provider 地址没有自动改")
-                dim("  请确认 dashboard.host/port 与本机 provider 地址是否符合预期。")
-                dim("  （不猜是刻意的：猜错会让它监听在别人能访问的地址上。）")
+                if args.dashboard_host:
+                    ok(f"dashboard 已按这台壳的要求改成 {args.dashboard_host}"
+                       f"{':' + str(args.dashboard_port) if args.dashboard_port else ''}")
+                else:
+                    warn("这是一台非 Windows 壳，dashboard 地址没有自动改")
+                    dim("  请确认 dashboard.host/port 与本机 provider 地址是否符合预期。")
+                    dim("  （不猜是刻意的：猜错会让它监听在别人能访问的地址上。）")
         except (Fatal, NeedsHuman) as e:
             bad(str(e))
             dim("  落位本身已完成，但配置没能自动调整。请手动检查 dashboard 段。")
@@ -1918,10 +1927,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--to", help="解包到哪个目录（默认用 mkdtemp 建一个全新的）")
     s.add_argument("--shell", default="", help="这台壳的 shell_id（写进覆写日志）")
     s.add_argument(
+        "--dashboard-host",
+        default="",
+        help="目标壳自己的 dashboard 监听地址（Windows 用 127.0.0.1、NAS 容器用 0.0.0.0）。"
+             "不给就保持快照里原样 —— 但那份配置是从**另一台机器**搬来的。",
+    )
+    s.add_argument(
         "--dashboard-port",
         type=int,
-        default=DEFAULT_DASHBOARD_PORT,
-        help=f"Windows 上 dashboard 监听端口（默认 {DEFAULT_DASHBOARD_PORT}）",
+        default=None,
+        help=f"目标壳自己的 dashboard 端口（Windows 默认 {DEFAULT_DASHBOARD_PORT}）。"
+             "不给就保持快照里原样。",
     )
     s.add_argument(
         "--yes",

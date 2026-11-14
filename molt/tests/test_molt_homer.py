@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -184,10 +185,29 @@ def test_decide_is_idle_when_state_already_matches_but_ledger_has_not_caught_up(
 
 
 def test_land_argv_is_explicit(tmp_path):
+    """`land` 的参数必须逐项写死，不能靠默认值。
+
+    尤其 `--warden-url` / `--warden-token`：归档在 Warden 的中转区，不在本地磁盘。
+    2026-11-15 00:59 真机第一次跑回家，就是漏了这两个，`land` 退出码 2，
+    容器被停下来又拉起来，鱼回到了家却是个哑的。
+    """
     h = make_homer(tmp_path)
     assert h.land_argv(8) == [
         "python3", "-m", "molt.cli", "land",
         "--generation", "8",
+        "--data", "/data",
+        "--yes", "--no-color",
+        "--warden-url", "http://127.0.0.1:6186",
+        "--warden-token", "tok",
+    ]
+
+
+def test_land_argv_omits_warden_flags_when_not_configured(tmp_path):
+    """没配 Warden 时不塞空参数：`--warden-url ""` 会让 land 以为要走远端。"""
+    h = make_homer(tmp_path, cfg=settings(warden_url="", warden_token=""))
+    assert h.land_argv(3) == [
+        "python3", "-m", "molt.cli", "land",
+        "--generation", "3",
         "--data", "/data",
         "--yes", "--no-color",
     ]
@@ -404,3 +424,109 @@ def test_needs_start_is_on_disk_before_landing(tmp_path):
 
     assert seen.get("state", {}).get("needs_start") is True, \
         "落位开始的时候，needs_start 必须已经在磁盘上了"
+
+
+# ---------------------------------------------------------------- WAL checkpoint
+
+
+def _make_wal_db(path: Path):
+    """造一个"主库是旧的、WAL 里躺着已提交事务"的现场，并返回那个活着的写者。"""
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.execute("INSERT INTO t VALUES (1)")
+    conn.commit()
+    return conn
+
+
+def test_checkpoint_merges_wal_into_the_main_file(tmp_path):
+    """WAL 里留着已提交事务时，checkpoint 必须把它合回主库。
+
+    真机 2026-11-15 01:05：`memory_companion.db-wal` 有 20,632 字节，
+    容器明明已经优雅停机，`land` 却因为"看到非空 -wal"拒绝落位 —— 鱼回家卡在这一步。
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    db = data / "x.db"
+    writer = _make_wal_db(db)
+    try:
+        wal = data / "x.db-wal"
+        assert wal.exists() and wal.stat().st_size > 0, "造出来的现场得真的有 WAL"
+        report = homer_mod.checkpoint_databases(str(data))
+        assert len(report) == 1
+        name, before, after = report[0]
+        assert name == "x.db"
+        assert before > 0
+        assert after == 0
+        assert (wal.stat().st_size if wal.exists() else 0) == 0
+    finally:
+        writer.close()
+
+
+def test_checkpoint_skips_databases_without_wal(tmp_path):
+    """没有 WAL 的库不该被碰（也不必出现在报告里）。"""
+    data = tmp_path / "data"
+    data.mkdir()
+    conn = sqlite3.connect(str(data / "y.db"))
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+    conn.close()
+    assert homer_mod.checkpoint_databases(str(data)) == []
+
+
+def test_checkpoint_happens_after_stop_and_before_land(tmp_path, monkeypatch):
+    """顺序：停容器 → 合并 WAL → 落位。
+
+    少了中间这一步，`land` 一定被自己的护栏挡住；
+    而如果放在停容器之前，就等于"在有人写的时候合并"，那才是危险的。
+    """
+    order = []
+
+    def fake_checkpoint(data_dir):
+        order.append("checkpoint")
+        return []
+
+    monkeypatch.setattr(homer_mod, "checkpoint_databases", fake_checkpoint)
+    h = make_homer(tmp_path, status=ledger(target=SHELL), state={})
+    h.do_stop = lambda: order.append("stop") or True
+    h.do_land = lambda gen: order.append("land") or True
+    h.do_switch_on = lambda: order.append("switch") or True
+    h.do_start = lambda: order.append("start") or True
+    result = h.run_once()
+    assert result["ok"] is True
+    assert order == ["stop", "checkpoint", "land", "switch", "start"]
+
+
+def test_checkpoint_failure_restarts_container_and_skips_landing(tmp_path, monkeypatch):
+    """WAL 合不干净时不许落位，但必须把容器拉起来 —— 别让它两边都不在。"""
+    order = []
+    monkeypatch.setattr(homer_mod, "checkpoint_databases",
+                        lambda data_dir: [("x.db", 100, 40)])
+    h = make_homer(tmp_path, status=ledger(target=SHELL), state={})
+    h.do_stop = lambda: order.append("stop") or True
+    h.do_land = lambda gen: order.append("land") or True
+    h.do_start = lambda: order.append("start") or True
+    result = h.run_once()
+    assert result["ok"] is False
+    assert "WAL" in result["reason"]
+    assert order == ["stop", "start"]
+
+
+def test_land_argv_carries_this_shells_dashboard(tmp_path):
+    """dashboard 的地址必须由**目标壳**说，不能跟着快照走。
+
+    2026-11-15 01:02 真机：从 Windows 回家的快照带着 `127.0.0.1:6199`，
+    落进容器之后 WebUI 谁都连不上 —— 容器里监听 loopback，映射出去的端口
+    后面什么都没有。鱼活着、在 QQ 上说话，但管理页面死了。
+    """
+    h = make_homer(tmp_path, cfg=settings(dashboard_host="0.0.0.0", dashboard_port=6185))
+    argv = h.land_argv(8)
+    assert "--dashboard-host" in argv and "0.0.0.0" in argv
+    assert "--dashboard-port" in argv and "6185" in argv
+
+
+def test_land_argv_omits_dashboard_when_not_configured(tmp_path):
+    h = make_homer(tmp_path, cfg=settings(dashboard_host="", dashboard_port=0))
+    argv = h.land_argv(8)
+    assert "--dashboard-host" not in argv
+    assert "--dashboard-port" not in argv

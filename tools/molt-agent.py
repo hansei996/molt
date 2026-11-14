@@ -79,6 +79,9 @@ class Settings:
     port: int = DEFAULT_PORT        # AstrBot dashboard 端口，用来判断"在不在跑"
     interval: float = DEFAULT_INTERVAL
     timeout: float = DEFAULT_TIMEOUT
+    #: 这台壳自己的 dashboard 监听地址/端口。留空 = 保持快照里原样。
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = DEFAULT_PORT
 
     @classmethod
     def load(cls, path: Path) -> "Settings":
@@ -338,7 +341,11 @@ class Agent:
             "--shell", s.shell,
             "--yes",
             "--no-color",
-        ]
+        ] + (
+            ["--dashboard-host", s.dashboard_host] if s.dashboard_host else []
+        ) + (
+            ["--dashboard-port", str(s.dashboard_port)] if s.dashboard_port else []
+        )
 
     def switch_argv(self) -> list:
         s = self.settings

@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -44,7 +45,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 ENCODING = "utf-8-sig"
 CONFIG_FILENAME = "molt-homer.json"
@@ -116,6 +117,10 @@ class Settings:
     interval: float = DEFAULT_INTERVAL
     timeout: float = DEFAULT_TIMEOUT
     stop_timeout: float = DEFAULT_STOP_TIMEOUT
+    #: 这台壳自己的 dashboard 监听地址/端口。留空 = 保持快照里原样。
+    #: 容器里必须是 0.0.0.0（容器内监听 loopback 的话，映射出去的端口后面什么都没有）。
+    dashboard_host: str = ""
+    dashboard_port: int = 0
 
     @classmethod
     def load(cls, path: Path) -> "Settings":
@@ -266,6 +271,51 @@ def _run(argv: List[str], *, cwd: Optional[str] = None, timeout: float = DEFAULT
     )
 
 
+def checkpoint_databases(data_dir: str) -> List[Tuple[str, int, int]]:
+    """把 data 目录下每个 `.db` 的 WAL 合回主库，返回 [(相对路径, 合并前字节, 合并后字节)]。
+
+    为什么需要它：第三方插件（比如 memory_companion）用自己的 SQLite 连接，
+    它不会跟着 AstrBot 的优雅停机一起 checkpoint。于是 `-wal` 里留着已提交的事务，
+    而 `molt land` 看到非空 `-wal` 必然拒绝落位 —— 那个护栏是对的，它分不清
+    「有进程正在写」和「只是没合并」。
+
+    容器停干净之后这里没有写者，`wal_checkpoint(TRUNCATE)` 是安全的，
+    而且正是让快照能落地的前提。**只允许在容器确实停了之后调用。**
+
+    2026-11-15 01:05 真机：memory_companion.db-wal 留着 20,632 字节，
+    容器明明已经优雅停机，`land` 却因此拒绝落位，鱼回家卡在这里。
+    """
+    out: List[Tuple[str, int, int]] = []
+    root = Path(data_dir)
+    if not root.is_dir():
+        return out
+    for db in sorted(root.rglob("*.db")):
+        if not db.is_file():
+            continue
+        side = db.with_name(db.name + "-wal")
+        try:
+            before = side.stat().st_size if side.exists() else 0
+        except OSError:
+            before = 0
+        if before == 0:
+            continue
+        try:
+            conn = sqlite3.connect(str(db), timeout=10.0)
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+        try:
+            after = side.stat().st_size if side.exists() else 0
+        except OSError:
+            after = 0
+        out.append((str(db.relative_to(root)), before, after))
+    return out
+
+
 @dataclass
 class Homer:
     settings: Settings
@@ -277,12 +327,30 @@ class Homer:
     # -- 路径与 argv
 
     def land_argv(self, generation: int) -> List[str]:
-        return [
+        """`land --generation N` 的参数。
+
+        **必须带上 `--warden-url` / `--warden-token`**：归档不在本地磁盘上，
+        它在 Warden 的中转区里。第一次真机跑（2026-11-15 00:59）就是漏了这两个，
+        `land` 直接退出码 2 ——「✗ --generation 需要 --warden-url / --warden-token」，
+        于是容器被停下来、落位失败、又被拉起来，鱼回到了家里却是个哑的。
+        """
+        argv = [
             self.settings.python, "-m", "molt.cli", "land",
             "--generation", str(generation),
             "--data", self.settings.data_dir,
             "--yes", "--no-color",
         ]
+        if self.settings.warden_url:
+            argv += ["--warden-url", self.settings.warden_url]
+        if self.settings.warden_token:
+            argv += ["--warden-token", self.settings.warden_token]
+        # dashboard 是壳自己的事：从 Windows 回来的快照带着 127.0.0.1:6199，
+        # 落进容器之后 WebUI 谁都连不上（2026-11-15 01:02 真机踩过）。
+        if self.settings.dashboard_host:
+            argv += ["--dashboard-host", self.settings.dashboard_host]
+        if self.settings.dashboard_port:
+            argv += ["--dashboard-port", str(self.settings.dashboard_port)]
+        return argv
 
     def switch_argv(self) -> List[str]:
         # 这里**不能**用 `Path(...) / "cmd_config.json"`：这个脚本跑在 NAS（POSIX）上，
@@ -376,6 +444,27 @@ class Homer:
 
     # -- 三步
 
+    def do_checkpoint(self) -> bool:
+        """容器停干净之后，把残留的 WAL 合并回主库。
+
+        不做这一步，"优雅停机"之后的 `land` 仍然会被自己的护栏挡住 ——
+        因为第三方插件的 WAL 不会跟着 AstrBot 一起 checkpoint。
+        """
+        report = checkpoint_databases(self.settings.data_dir)
+        if not report:
+            self.log("  目标库里没有待合并的 WAL")
+            return True
+        stuck: List[str] = []
+        for name, before, after in report:
+            if after:
+                stuck.append(f"{name} 还剩 {after} 字节")
+            else:
+                self.log(f"  ✓ 合并 WAL：{name}（{before} → 0）")
+        if stuck:
+            self.log("  ! 这些库的 WAL 合不干净：" + "、".join(stuck))
+            return False
+        return True
+
     def do_land(self, generation: int) -> bool:
         argv = self.land_argv(generation)
         env = dict(os.environ)
@@ -449,6 +538,14 @@ class Homer:
         if not self.do_stop():
             self.log("  ! 容器没停下来，这一轮不落位")
             return {"ok": False, "reason": "容器没停下来"}
+
+        # 1.5) 停干净了，把残留的 WAL 合回主库。第三方插件的连接不会跟着
+        #      AstrBot 的优雅停机一起 checkpoint，不合并的话 `land` 会拒绝落位。
+        if not self.do_checkpoint():
+            self.log("  ! WAL 合不干净，这一轮不落位 —— 先把它拉起来")
+            if self.do_start():
+                pass
+            return {"ok": False, "reason": "WAL 合不干净"}
 
         # 2) **先记账，再冒险**：把"我要起来"写进文件，然后才去动数据。
         #    2026-11-14 真机上就是这一步救了一次 —— agent 在"已经落位、还没启动"
