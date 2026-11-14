@@ -1,0 +1,18 @@
+# 统一换行：源码与文档按 LF 存进库，检出时也不做转换。
+#
+# 为什么写死：这个项目是 Windows 上开发、NAS（Linux）上运行的。
+# 让 git 在检出时按平台改写换行，会让同一份文件在两台机器上
+# 算出不同的 sha256——而 sha256 正是本项目判断「字节有没有搬家成功」
+# 的唯一凭据。工具链的便利不能污染这个凭据。
+* text=auto eol=lf
+
+# 二进制：这些交给 git 原样存
+*.tar binary
+*.tar.gz binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary
+
+# 归档文本 diff 没意义，按行看即可
+*.py text diff=python

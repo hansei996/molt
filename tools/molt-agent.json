@@ -1,0 +1,16 @@
+{
+  "execute": true,
+  "shell": "win-shell",
+  "data_dir": "G:\\molt-fish\\data",
+  "molt_pkg": "C:\\Users\\13553\\Downloads\\DSH_workspace\\molt",
+  "python": "C:\\Users\\13553\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+  "boot_script": "C:\\Users\\13553\\Downloads\\DSH_workspace\\molt\\tools\\boot-keepalive.py",
+  "astrbot_python": "G:\\molt-p0\\venv313\\Scripts\\python.exe",
+  "log_path": "G:\\molt-fish\\logs\\astrbot.log",
+  "platform_switch": "C:\\Users\\13553\\Downloads\\DSH_workspace\\molt\\tools\\platform-switch.py",
+  "warden_url": "http://192.168.1.10:6186",
+  "warden_token": "molt-dev-token-CHANGEME",
+  "port": 6199,
+  "interval": 10.0,
+  "timeout": 15.0
+}

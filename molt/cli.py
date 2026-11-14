@@ -1,0 +1,2029 @@
+"""molt 命令行。
+
+## 为什么先做 CLI 而不是 API
+
+因为 v0.1 的目标是**证明这条路能走通**，不是"提供服务"。
+CLI 是验证成本最低的形态：
+
+  - 不用起服务、不用配端口、不用担心防火墙
+  - 每一步的输出都能被人直接看见（这比日志好看得多）
+  - 出问题时人可以手动重跑那一条命令
+
+API 在 v0.2 做（Warden 需要一个 HTTP 面给远端壳调用）。
+
+## 命令设计的核心原则
+
+**所有权衡都显式化。** 这个项目里所有"看起来可以默认处理"的地方，
+都刻意做成需要明确输入：
+
+  - `checkout` 不给目标就报错，不会"猜一个"
+  - `preflight` 发现 arm 丢失时不会自动修，而是明确告诉你该跑什么
+  - `push` 校验不过就拒绝，不提供 `--force`
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import platform
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from . import __version__
+from .backend import LocalBackend, RemoteBackend, open_backend
+from .epoch import DEFAULT_LEASE_TTL_SECONDS
+from .errors import (
+    EpochAhead,
+    EpochStale,
+    Fatal,
+    LeaseExpired,
+    LeaseHeld,
+    MoltError,
+    NeedsHuman,
+    ProtocolMismatch,
+    SelfHealable,
+)
+from .shell import (
+    Capabilities,
+    ShellIdentity,
+    preflight,
+    probe_capabilities,
+    probe_identity,
+)
+from .soul import (
+    Artifact,
+    Manifest,
+    collect_runtime_pip,
+    hot_backup,
+    sha256_of,
+    sqlite_check,
+)
+from .transfer import extract_archive, make_archive, restore_into
+from .overlay import (
+    DEFAULT_DASHBOARD_PORT,
+    apply_overlay,
+    load_config,
+    overlay_for_windows,
+    save_config,
+)
+from .warden import DEFAULT_ROOT, Warden
+from .server import DEFAULT_PORT
+from .version import PROTOCOL_VERSION
+from . import wake as W
+from .control import AstrBotControl, CONTROL_PREFIX
+
+
+# --------------------------------------------------------------------------
+# 输出小工具
+# --------------------------------------------------------------------------
+
+
+class C:
+    """ANSI 颜色 + 一组在编码受限的控制台上会自动降级的符号。
+
+    ## 为什么要做降级（这是开源项目的必修课）
+
+    Windows 中文版的默认控制台代码页是 **GBK (cp936)**。`print("✓")`
+    在这种终端上直接抛 `UnicodeEncodeError: 'gbk' codec can't encode
+    character '\\u2713'`。
+
+    也就是说：一个中文用户在中文 Windows 上双击第一次运行 molt，
+    看到的是一串 traceback。这不能接受。
+
+    解法分两层：
+      1. 先把 stdout/stderr 切到 UTF-8（Python 3.7+ 的 reconfigure）；
+         现代 Windows Terminal 与 conhost 都支持，切完就正常了。
+      2. 切不动（老终端、被重定向到文件、CI 的奇怪环境）就把符号
+         全部换成 ASCII 等价物。**能看懂比好看重要。**
+    """
+
+    R = "\033[0m"
+    B = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GRN = "\033[32m"
+    YEL = "\033[33m"
+    BLU = "\033[34m"
+    MAG = "\033[35m"
+    CYA = "\033[36m"
+
+    # 符号（可能被降级成 ASCII）
+    S_OK = "✓"
+    S_BAD = "✗"
+    S_WARN = "!"
+    S_INFO = "·"
+    S_LINE = "─"
+    S_BULLET = "·"
+
+    @classmethod
+    def off(cls) -> None:
+        for k in ("R", "B", "DIM", "RED", "GRN", "YEL", "BLU", "MAG", "CYA"):
+            setattr(cls, k, "")
+
+    @classmethod
+    def ascii_mode(cls) -> None:
+        """把符号换成 ASCII 等价物。"""
+        cls.S_OK = "[OK]"
+        cls.S_BAD = "[X]"
+        cls.S_WARN = "[!]"
+        cls.S_INFO = "-"
+        cls.S_LINE = "-"
+        cls.S_BULLET = "*"
+
+
+def _setup_console() -> None:
+    """把控制台切到 UTF-8；切不动就降级成 ASCII 符号。
+
+    这一步必须在任何输出之前调用。它决定这个程序在
+    "中文 Windows + cmd.exe" 这种最常见的首次使用场景下
+    是正常显示还是一屏 traceback。
+    """
+    encodable = False
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+    # 切完之后实测一下到底能不能编码这几个符号——
+    # 不要靠猜平台，要靠实际编码能力。
+    probe = C.S_OK + C.S_BAD + C.S_LINE + C.S_BULLET
+    try:
+        target = sys.stdout.encoding or "ascii"
+        probe.encode(target)
+        encodable = True
+    except (UnicodeEncodeError, LookupError):
+        encodable = False
+
+    if not encodable:
+        C.ascii_mode()
+
+
+def _no_color() -> bool:
+    return bool(
+        sys.platform == "win32" and not sys.stdout.isatty()
+    ) or not sys.stdout.isatty()
+
+
+def ok(msg: str) -> None:
+    print(f"{C.GRN}{C.S_OK}{C.R} {msg}")
+
+
+def warn(msg: str) -> None:
+    print(f"{C.YEL}{C.S_WARN}{C.R} {msg}")
+
+
+def bad(msg: str) -> None:
+    print(f"{C.RED}{C.S_BAD}{C.R} {msg}")
+
+
+def info(msg: str) -> None:
+    print(f"{C.BLU}{C.S_INFO}{C.R} {msg}")
+
+
+def dim(msg: str) -> None:
+    print(f"{C.DIM}{msg}{C.R}")
+
+
+def head(title: str) -> None:
+    print()
+    print(f"{C.B}{title}{C.R}")
+    print(f"{C.DIM}{C.S_LINE * min(len(title) * 2, 60)}{C.R}")
+
+
+def kv(k: str, v: Any, width: int = 22) -> None:
+    print(f"  {k:<{width}} {v}")
+
+
+# --------------------------------------------------------------------------
+# 各命令
+# --------------------------------------------------------------------------
+
+
+def cmd_shell(args: argparse.Namespace) -> int:
+    """自述这台壳是谁、能做什么、能不能开始迁徙。"""
+    src = Path(args.astrbot_src).expanduser() if args.astrbot_src else None
+    data = Path(args.data).expanduser() if args.data else None
+    check_wol = Path(args.check_wol).expanduser() if args.check_wol else None
+
+    ident = probe_identity(src, data_path=data)
+    caps = probe_capabilities(ident, data_path=data, check_wol_script=check_wol)
+    pf = preflight(ident, caps)
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "identity": ident.to_dict(),
+                    "capabilities": caps.to_dict(),
+                    "preflight": pf.to_dict(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0 if pf.ok else 1
+
+    head("这台壳")
+    kv("shell_id", f"{C.CYA}{ident.shell_id}{C.R}")
+    kv("hostname", ident.hostname)
+    kv("platform", ident.platform)
+    kv("python", f"{ident.python_version}  {C.DIM}{ident.python_executable}{C.R}")
+    kv("容器内", "是" if ident.is_container else "否")
+    kv("ASTRBOT_ROOT", ident.astrbot_root or f"{C.YEL}未设置{C.R}")
+    kv("AstrBot 版本", ident.astrbot_version or f"{C.YEL}未探测到{C.R}")
+
+    head("能做什么")
+    for name, flag in (
+        ("soul.read（热备库）", caps.soul_read),
+        ("soul.write（收快照）", caps.soul_write),
+        ("shell.identity（自述身份）", caps.shell_identity),
+    ):
+        (ok if flag else bad)(name)
+
+    print()
+    optional = [
+        ("发魔术封包", caps.can_send_magic_packet),
+        ("能被 WOL 叫醒", caps.can_be_woken),
+        ("网卡已 arm", caps.wake_armed),
+        ("有交互式桌面", caps.has_interactive_desktop),
+        ("有 GPU", caps.has_gpu),
+    ]
+    for name, flag in optional:
+        if flag is None:
+            dim(f"  ?  {name}：未知（探测不到，不猜）")
+        elif flag:
+            ok(f"  {name}")
+        else:
+            warn(f"  {name}")
+
+    if caps.notes:
+        head("备注")
+        for n in caps.notes:
+            dim(f"  {C.S_BULLET} {n}")
+
+    head("迁徙前判决")
+    color = {"proceed": C.GRN, "self_heal": C.YEL, "block": C.RED}[pf.action]
+    label = {
+        "proceed": "可以开始",
+        "self_heal": "需要先自愈（可以自动修）",
+        "block": "阻塞（需要人介入）",
+    }[pf.action]
+    print(f"  {color}{C.B}{pf.action.upper()}{C.R} —— {label}")
+    for r in pf.reasons:
+        print(f"    {C.DIM}{C.S_BULLET}{C.R} {r}")
+    if pf.blocking:
+        print()
+        for b in pf.blocking:
+            print(f"    {C.RED}{C.S_BAD}{C.R} {b}")
+
+    return 0 if pf.ok else 1
+
+
+def _backend(args: argparse.Namespace):
+    """按命令行参数打开本地或远端 Warden。"""
+    return open_backend(
+        root=getattr(args, "root", None),
+        url=getattr(args, "warden_url", None),
+        token=getattr(args, "warden_token", None),
+        staging=getattr(args, "staging", None),
+    )
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """现在是谁在线、第几代、心跳多久前。"""
+    try:
+        be = _backend(args)
+    except ValueError as e:
+        bad(str(e))
+        return 2
+
+    try:
+        s = be.status()
+    except Fatal as e:
+        bad(str(e))
+        return 2
+
+    if args.json:
+        print(json.dumps(s, ensure_ascii=False, indent=2))
+        return 0
+
+    head("Warden 状态")
+    kv("位置", be.where())
+    kv("根目录", s["root"])
+    kv("当前 epoch", f"{C.B}{s['current_epoch']}{C.R}")
+    kv("最后接受的 epoch", s["last_accepted_epoch"])
+    kv("被拒绝的写入次数", s["rejected_write_count"])
+
+    lease = s["lease"]
+    state = lease["state"]
+    if state == "no-lease":
+        print()
+        info("没有租约 —— 现在没有任何壳在线，可以开始迁徙")
+    elif state == "active":
+        print()
+        ok(f"租约持有者：{C.B}{lease['holder']}{C.R}")
+        kv("  epoch", lease["epoch"])
+        kv("  剩余", f"{lease['remaining_seconds']} 秒 / TTL {lease['ttl_seconds']} 秒")
+        dim("  （公理 0：任意时刻只能有一个存在在线）")
+    else:
+        print()
+        warn(f"租约由 {lease['holder']} 持有，但已过期 {lease['expired_seconds_ago']} 秒")
+        dim("  意味着那个壳可能已经死了。新的壳可以接管。")
+
+    head("迁徙历史")
+    if s["generation_count"] == 0:
+        dim("  还没有任何一次迁徙")
+    else:
+        kv("已完成迁徙次数", s["generation_count"])
+        latest = s["latest_generation"]
+        kv("最新 generation", latest["generation"])
+        kv("  时间", latest["created_at_readable"])
+        kv("  来源", latest["source_host"])
+        kv("  提交者", latest["pushed_by"])
+        if latest.get("target_shell"):
+            kv("  目标壳", latest["target_shell"])
+        # `target_shell` 是"打算交给谁"，只有 `consumed_by` 是"真的取走了"。
+        # 账本没记消费时如实说"还没人取走"，不拿 target_shell 冒充事实——
+        # 目标壳可能一直没开机，猜错会让人以为灵魂已经搬家了。
+        if latest.get("consumed_by"):
+            kv("  消费方", latest["consumed_by"])
+            kv("  消费时间", latest.get("consumed_at_readable") or "（账本缺时间）")
+        else:
+            kv("  消费方", "还没人取走")
+        kv("  数据量", f"{latest['artifact_bytes'] / 1024 / 1024:.1f} MB")
+
+    return 0
+
+
+def cmd_checkout(args: argparse.Namespace) -> int:
+    """从源端 data/ 做一次热备，产出一个 generation 目录。
+
+    这是去程的第一步。它**只读**源库，不需要停 AstrBot。
+    """
+    if not args.data:
+        bad("必须用 --data 指定源端 data 目录（不猜）")
+        return 2
+
+    src = Path(args.data).expanduser().resolve()
+    if not src.is_dir():
+        bad(f"源目录不存在：{src}")
+        return 2
+
+    root = Path(args.root).expanduser() if args.root else DEFAULT_ROOT
+    try:
+        be = _backend(args)
+    except ValueError as e:
+        bad(str(e))
+        return 2
+
+    try:
+        epoch = be.acquire(args.shell)
+    except LeaseHeld as e:
+        bad(str(e))
+        return 3
+    except MoltError as e:
+        bad(f"{type(e).__name__}: {e}")
+        return 3
+
+    head(f"热备 {src}")
+    info(f"shell_id={args.shell}  epoch={epoch}  裁决者={be.where()}")
+    print()
+
+    gen = be.next_generation()
+    dest_dir = be.prepare_generation_dir(gen)
+
+    artifacts: List[Artifact] = []
+
+    # --- 两个必带的库 ---
+    for rel in (
+        "data_v4.db",
+        "plugin_data/astrbot_plugin_memory_companion/memory_companion.db",
+    ):
+        src_db = src / rel
+        if not src_db.exists():
+            warn(f"源端没有 {rel}（这个部署可能没装对应插件）")
+            continue
+
+        dst_db = dest_dir / rel
+        try:
+            info(f"热备 {rel} …")
+            payload = hot_backup(src_db, dst_db)
+        except Fatal as e:
+            bad(str(e))
+            be.release(args.shell, epoch)
+            return 4
+
+        print(
+            f"    {C.GRN}{C.S_OK}{C.R} {payload['bytes'] / 1024 / 1024:.1f} MB  "
+            f"{payload['backup_seconds']:.3f}s  "
+            f"{payload['table_count']} 张表  "
+            f"quick_check={payload['quick_check']}  "
+            f"{C.DIM}{payload['sha256'][:16]}…{C.R}"
+        )
+
+        artifacts.append(
+            Artifact(
+                relpath=rel,
+                kind="sqlite",
+                bytes=payload["bytes"],
+                sha256=payload["sha256"],
+                quick_check=payload["quick_check"],
+                table_count=payload["table_count"],
+                backup_seconds=payload["backup_seconds"],
+            )
+        )
+
+    if not artifacts:
+        bad("一个库都没备份到，这次迁徙没有意义")
+        be.release(args.shell, epoch)
+        return 4
+
+    # --- 配置文件 ---
+    cfg = src / "cmd_config.json"
+    if cfg.exists():
+        info("复制 cmd_config.json …")
+        dst_cfg = dest_dir / "cmd_config.json"
+        dst_cfg.parent.mkdir(parents=True, exist_ok=True)
+        dst_cfg.write_bytes(cfg.read_bytes())
+        artifacts.append(
+            Artifact(
+                relpath="cmd_config.json",
+                kind="copy",
+                bytes=dst_cfg.stat().st_size,
+                sha256=sha256_of(dst_cfg),
+            )
+        )
+        print(f"    {C.GRN}{C.S_OK}{C.R} {dst_cfg.stat().st_size} B")
+
+    # --- manifest ---
+    # data 必须传进去：NAS 上源码在容器里，宿主机只有 data/，
+    # 版本信息只能从 data/cmd_config.json 读。不传就永远是 unknown。
+    ident = probe_identity(
+        Path(args.astrbot_src) if args.astrbot_src else None,
+        data_path=src,
+    )
+    site_pkgs = src / "site-packages"
+    runtime_pip = collect_runtime_pip(site_pkgs)
+
+    m = Manifest(
+        generation=gen,
+        created_at=time.time(),
+        source_host=ident.hostname,
+        source_root=str(src),
+        protocol_version=PROTOCOL_VERSION,
+        astrbot_version=ident.astrbot_version or "unknown",
+        platform=ident.platform,
+        python_version=ident.python_version,
+        artifacts=artifacts,
+        runtime_pip=runtime_pip,
+        target_shell=getattr(args, "target", "") or "",
+    )
+    m.save(dest_dir / "manifest.json")
+
+    head("结论")
+    total = sum(a.bytes for a in artifacts)
+    kv("generation", gen)
+    kv("产出目录", dest_dir)
+    kv("总字节", f"{total / 1024 / 1024:.1f} MB")
+    kv("工件数", len(artifacts))
+    if runtime_pip:
+        kv("需在新壳重装", f"{len(runtime_pip)} 个运行时包")
+        dim(f"  {', '.join(runtime_pip[:6])}" + (" …" if len(runtime_pip) > 6 else ""))
+    print()
+    ok(f"热备完成。租约仍由 {args.shell} 持有（epoch={epoch}）")
+    dim("  下一步：把整个 generation 目录传给目标壳，然后 push")
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """验证一个 generation 目录是否完整可用。"""
+    if not args.dir:
+        bad("必须用 --dir 指定 generation 目录")
+        return 2
+
+    gdir = Path(args.dir).expanduser().resolve()
+    mpath = gdir / "manifest.json"
+    if not mpath.exists():
+        bad(f"没有 manifest.json：{gdir}")
+        return 2
+
+    m = Manifest.load(mpath)
+
+    head(f"验证 generation {m.generation}")
+    kv("来源", f"{m.source_host}  ({m.platform})")
+    kv("产出时间", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.created_at)))
+    kv("AstrBot", m.astrbot_version)
+    kv("协议版本", m.protocol_version)
+    if m.protocol_version != PROTOCOL_VERSION:
+        bad(f"协议版本不匹配：快照 {m.protocol_version}，本机 {PROTOCOL_VERSION}")
+        return 5
+
+    print()
+    problems = m.verify_against(gdir)
+    for a in m.artifacts:
+        if a.kind == "sqlite":
+            print(f"  {C.GRN}{C.S_OK}{C.R} {a.relpath}")
+            print(
+                f"      {a.bytes / 1024 / 1024:.1f} MB  {a.table_count} 张表  "
+                f"{C.DIM}{a.sha256[:16]}…{C.R}"
+            )
+        else:
+            print(f"  {C.GRN}{C.S_OK}{C.R} {a.relpath}  {a.bytes} B")
+
+    print()
+    if problems:
+        bad(f"{len(problems)} 个问题：")
+        for p in problems:
+            print(f"    {C.RED}{C.S_BULLET}{C.R} {p}")
+        return 6
+
+    ok("全部通过。这份快照可以交给目标壳。")
+    return 0
+
+
+def cmd_push(args: argparse.Namespace) -> int:
+    """把一份已验证的快照登记到 Warden（= 正式把灵魂交给新壳）。
+
+    这是整个流程里唯一会改变"谁持有灵魂"的地方。
+    校验不过就拒绝，没有 --force。
+    """
+    if not args.dir:
+        bad("必须用 --dir 指定 generation 目录")
+        return 2
+    if not args.shell:
+        bad("必须用 --shell 指定要交给谁")
+        return 2
+
+    gdir = Path(args.dir).expanduser().resolve()
+    mpath = gdir / "manifest.json"
+    if not mpath.exists():
+        bad(f"没有 manifest.json：{gdir}")
+        return 2
+
+    m = Manifest.load(mpath)
+
+    head(f"登记 generation {m.generation} → {args.shell}")
+
+    # 先本地验一遍，省得把坏东西推上去再被拒
+    problems = m.verify_against(gdir)
+    if problems:
+        bad("快照本身有问题，拒绝登记：")
+        for p in problems:
+            print(f"    {C.RED}{C.S_BULLET}{C.R} {p}")
+        return 6
+    ok("快照完整性校验通过")
+
+    if m.protocol_version != PROTOCOL_VERSION:
+        bad(
+            f"协议版本不匹配：快照 {m.protocol_version}，本机 {PROTOCOL_VERSION}"
+        )
+        return 5
+
+    try:
+        be = _backend(args)
+    except ValueError as e:
+        bad(str(e))
+        return 2
+
+    try:
+        record = be.push(args.shell, args.epoch, m.to_dict())
+    except EpochStale as e:
+        bad(f"epoch 已过期：{e}")
+        dim("  说明你手里的租约被回收了——可能另一个壳已经接管。")
+        return 7
+    except EpochAhead as e:
+        bad(f"epoch 超前：{e}")
+        dim("  说明这个 epoch 根本不属于你。")
+        return 7
+    except LeaseExpired as e:
+        bad(f"租约已过期：{e}")
+        dim("  TTL 到了。重新 acquire 拿一个新 epoch。")
+        return 7
+    except NeedsHuman as e:
+        bad(f"被拒绝：{e}")
+        return 7
+    except ProtocolMismatch as e:
+        bad(f"协议不匹配：{e}")
+        return 5
+    except MoltError as e:
+        bad(f"{type(e).__name__}: {e}")
+        return 7
+
+    head("已登记")
+    kv("generation", record["generation"])
+    kv("提交者", record["pushed_by"])
+    if record.get("target_shell"):
+        kv("目标壳", record["target_shell"])
+    kv("epoch", record["epoch"])
+    kv("数据量", f"{record['artifact_bytes'] / 1024 / 1024:.1f} MB")
+    kv("来源", record["source_host"])
+    kv("裁决者", be.where())
+    print()
+    ok("这份快照已经登记，目标壳现在可以取走它了。")
+    dim("  注意：登记 ≠ 交接完成。提交者（现在是它）必须先终止，")
+    dim("  新壳才能 acquire 拿到更大的 epoch 并接管。这就是「先死后生」。")
+    return 0
+
+
+def cmd_release(args: argparse.Namespace) -> int:
+    """交还租约（正常的收尾动作）。"""
+    try:
+        be = _backend(args)
+    except ValueError as e:
+        bad(str(e))
+        return 2
+    try:
+        be.release(args.shell, args.epoch)
+    except EpochStale as e:
+        bad(str(e))
+        return 3
+    except MoltError as e:
+        bad(f"{type(e).__name__}: {e}")
+        return 3
+    ok(f"{args.shell} 已交还租约（{be.where()}）")
+    return 0
+
+
+def _control_client(args: argparse.Namespace) -> Optional[AstrBotControl]:
+    """按命令行参数建一个控制面客户端；没给 `--control-url` 就返回 None。
+
+    ## 为什么地址必须由人显式给，而不是从配置里推
+
+    AstrBot 的 dashboard 可能监听 `127.0.0.1`、`0.0.0.0`、或者容器映射出来的
+    某个端口上。猜错的后果不是"连不上"，而是**连上了另一台机器上的 AstrBot**
+    —— 那会让我们把别人的鱼按住。所以这里不猜。
+    """
+    url = (getattr(args, "control_url", "") or "").strip()
+    if not url:
+        return None
+
+    cfg = (getattr(args, "control_config", "") or "").strip()
+    if cfg:
+        # 推荐这条路：从它自己的 cmd_config.json 里取 username + jwt_secret
+        # 现签一个短命 token。人不需要另外保存一份密码。
+        return AstrBotControl.from_config(url, cfg)
+
+    token = (getattr(args, "control_token", "") or "").strip()
+    if not token:
+        raise NeedsHuman(
+            "给了 --control-url 但没给凭据。二选一：\n"
+            "  --control-config <那台壳的 cmd_config.json>（推荐，会自己签 token）\n"
+            "  --control-token <直接给一个 JWT>"
+        )
+    return AstrBotControl(url, token)
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    """一条命令走完整个迁徙：热备 → 打包 → 登记。
+
+    ## 为什么要有这个命令
+
+    前面那四个命令（`checkout` / 打包 / 传 / `push`）各自都是对的，
+    但它们把**一次不可中断的动作**拆成了四段人肉步骤。手工做的后果
+    在 v0.1 实测里已经看到了：中间任何一步忘了顺序，就会得到
+    "快照有了但没登记"或"登记了但目标机根本没拿到字节"这两种
+    都需要人工判断的中间态。
+
+    更麻烦的是**租约的 TTL 是 90 秒**。热备很快（0.27s + 0.29s），
+    但人手工打包再传再 push，中间去泡杯茶就过期了，于是 push 被
+    拒——而人看到的现象是"我明明备份成功了却推不上去"。
+
+    ## 它的边界
+
+    `--transport` 现在有两种：
+
+      * `local`  —— 归档留在源端的 staging 里，人自己传（默认）
+      * `warden` —— 把归档 PUT 给 Warden 的中转区，目标壳 `molt land`
+                   会自己 GET 下来。**两边都只跟已经认证过的 Warden
+                    说话，不需要第三套凭据（SMB 账号/SSH 密钥）。**
+
+    之所以保留 `local`：同机（Warden 就跑在这台机器上）时多一次 HTTP
+    往返是没有意义的，而且某些环境（Warden 只监听 127.0.0.1）根本走不通。
+    默认值按后端类型自动选——远端后端用 `warden`，本地后端用 `local`。
+    """
+    if not args.data:
+        bad("必须用 --data 指定源端 data 目录（不猜）")
+        return 2
+
+    src = Path(args.data).expanduser().resolve()
+    if not src.is_dir():
+        bad(f"源目录不存在：{src}")
+        return 2
+
+    try:
+        be = _backend(args)
+    except ValueError as e:
+        bad(str(e))
+        return 2
+
+    # transport 的默认值取决于后端：远端后端默认把归档交上去，
+    # 本地后端默认留在本地（多一次无意义的 HTTP 往返还不如直接拷）。
+    transport = getattr(args, "transport", None) or (
+        "warden" if be.kind == "remote" else "local"
+    )
+    if transport not in ("local", "warden"):
+        bad(f"--transport 只支持 local 或 warden，收到 {transport!r}")
+        return 2
+    if transport == "warden" and be.kind == "local":
+        bad("--transport warden 只对远端后端有意义（本地就是同一台机器）")
+        dim("  去掉 --transport，或者改用 --warden-url 指向 NAS。")
+        return 2
+
+    head(f"迁徙：{args.shell}")
+    kv("源目录", src)
+    kv("裁决者", be.where())
+    kv("传输", transport)
+
+    # --- 第 -1 步：如果给了 --wake-mac，先把目标叫醒 ---
+    #
+    # **这一步必须在 acquire 之前。** 顺序不是随便定的：
+    # 租约 TTL 只有 90 秒，而叫醒一台 S5 的机器实测要 23.1 秒（网络恢复）
+    # 到几十秒（服务能监听）。如果在拿到租约之后才去叫醒，那这 90 秒
+    # 有一部分花在等 BIOS POST 上，热备+打包+上传的余量就被吃掉了。
+    # 更要命的是：叫醒失败（网卡没 arm）会让租约白占 90 秒。
+    #
+    # 另外这条顺序也符合语义：**你不可能把一个还没开机的壳"交接"出去**。
+    wake_mac = getattr(args, "wake_mac", None)
+    if wake_mac:
+        wake_host = getattr(args, "wake_host", "") or ""
+        print()
+        info(f"先叫醒目标 {W.format_mac(wake_mac)}（{wake_host or '全网广播'}）")
+        try:
+            wr = W.wake(
+                wake_mac,
+                host=wake_host,
+                prefix_len=getattr(args, "wake_prefix", 24),
+                count=getattr(args, "wake_count", W.DEFAULT_COUNT),
+                interval=getattr(args, "wake_interval", W.DEFAULT_INTERVAL),
+                quiet=True,
+            )
+        except Fatal as e:
+            bad(str(e))
+            return 4
+        if not wr["any_sent"]:
+            bad("封包一个都没发出去——是本机网络的问题，不是目标机。")
+            for r in wr["rounds"][0]["results"]:
+                dim(f"    {r['target']}: {r['error']}")
+            return 4
+        kv("发包", f"{wr['rounds_ok']}/{wr['rounds_sent']} 轮，路径 {' / '.join(wr['targets'])}")
+
+        if wake_host and not getattr(args, "no_wait_wake", False):
+            wait_port = getattr(args, "wake_port_check", 0) or None
+            # 没有 ping 又没指定 TCP 端口时**不等**，而不是假装等。
+            # 「探测不了」不等于「叫不醒」——真机上（容器里没有 ping）
+            # 这两件事长得一模一样，而给出后者会让人去查 BIOS。
+            if wait_port is None and not W.can_probe_icmp():
+                warn("这台机器上没有 ping，ICMP 判据用不了——不等待了。")
+                dim("  包已经发出去了；目标机真醒了就会自己来账本取快照。")
+                dim("  想确认它起来了，给 --wake-port-check <端口>（走 TCP 判据）。")
+            else:
+                try:
+                    r = W.wait_online(
+                        wake_host,
+                        port=wait_port,
+                        timeout=getattr(args, "wake_timeout", 180.0),
+                        interval=2.0,
+                    )
+                    ok(f"目标起来了：{r['seconds']} 秒（{r['criterion']}）")
+                except NeedsHuman as e:
+                    # 叫不醒就不该继续：接下来的 checkout 会把灵魂搬给一台
+                    # 永远不会开机的机器，而账本里会留下一条"已交接"的记录。
+                    bad(str(e))
+                    dim("  不继续了：账本里不该出现一条指向一台没开机的机器的记录。")
+                    return 5
+        else:
+            dim("  没等它起来（不判断是否真的开机了）")
+        print()
+
+    # --- 第 0 步：先看能不能开始，别做完备份才发现进不去 ---
+    #
+    # 顺序很重要：acquire 会占住租约，如果备份做了一半失败，租约要还回去。
+    # 所以先 try/except 包住整个"拿了就得还"的区间。
+    try:
+        epoch = be.acquire(args.shell)
+    except LeaseHeld as e:
+        bad(str(e))
+        dim("  公理 0：现在有另一个壳在线。等它下线，或者先让它 release。")
+        return 3
+    except MoltError as e:
+        bad(f"{type(e).__name__}: {e}")
+        return 3
+
+    info(f"拿到租约 epoch={epoch}")
+    print()
+
+    # --- 第 0.5 步：按住源壳，让它先闭嘴 ---
+    #
+    # ## 为什么必须在 acquire 之后、checkout 之前
+    #
+    # **之后**：如果先按嘴再拿租约，而租约被别人占着，那只鱼就白白安静了一场
+    # —— 它不会自己醒过来，用户会以为"我跑了个命令，机器人就哑了"。
+    # 拿到租约之后才按，前提就成立："我现在是唯一有资格说话的那个，
+    # 而我要把自己关掉，把资格交出去。"
+    #
+    # **之前**：热备是即时一致的，但按嘴之后到热备之间不会再有新消息进来
+    # —— 快照因此是"它说过的最后一句话"为止的完整状态，而不是"还差几条"。
+    #
+    # 没有 --control-url 时这一步整个跳过：插件可能还没装（v0.1 第一次
+    # 迁移就是这种情况），那就只能靠人自己先停掉源壳。但我们必须说出来。
+    drained = False
+    control = None
+    try:
+        control = _control_client(args)
+    except (Fatal, NeedsHuman) as e:
+        bad(str(e))
+        try:
+            be.release(args.shell, epoch)
+        except MoltError:
+            pass
+        return 2
+
+    if control is None:
+        warn("没有给 --control-url：这次迁徙不会让源壳停下来。")
+        dim("  源壳会继续跟 QQ 说话。目标壳一起来就是两条鱼同时在线（公理 0）。")
+        dim("  要么现在人工停掉源壳，要么下次加上：")
+        dim("    --control-url http://127.0.0.1:6185 --control-config <源壳的 cmd_config.json>")
+        print()
+    else:
+        info(f"按住源壳 {control.where()} …")
+        try:
+            dr = control.drain_and_verify()
+        except (Fatal, NeedsHuman, MoltError) as e:
+            # 按不住就不能继续。继续的后果是目标壳起来时源壳还在说话，
+            # 而那个场面在日志里看不出来——只有用户会发现机器人回了两遍。
+            bad(f"按住源壳失败：{e}")
+            dim("  不继续了。现在启动目标壳就会是两条鱼同时在线（公理 0）。")
+            dim("  源壳没有被动过（drain 没成功就等于没 drain）。")
+            try:
+                be.release(args.shell, epoch)
+                dim("  已交还租约。")
+            except MoltError:
+                dim("  交还租约也失败了，90 秒后会自动过期。")
+            return 8
+        drained = True
+        kv("已关闭的平台", ", ".join(dr.get("drained") or []) or "（本来就没连着）")
+        kv("仍在对外说话", "否（已复核）" if dr.get("verified_silent") else "**是**")
+        print()
+
+    # 从这里开始，任何失败都必须把租约还回去——否则那 90 秒里
+    # 谁都不能接管，而原因只是一次失败的备份。
+
+    def _resume_source(reason: str) -> None:
+        """迁徙没成，把源壳放回"能说话"的状态。
+
+        ## 为什么失败时要主动 resume
+
+        因为**哑着比坏了更不容易被发现**。一只不再回消息的机器人，用户会以为
+        是网络问题、QQ 掉线、或者自己在忙；而一只明确报错的机器人，用户立刻
+        会去看日志。drain 是我们主动造成的静默，所以失败时也该由我们撤销它。
+
+        但撤销也失败时不假装成功：那是"我们把它弄哑了却没本事弄回来"，
+        必须说成人话。
+        """
+        if not drained or control is None:
+            return
+        print()
+        warn(f"迁徙没完成（{reason}）。把源壳放回来说话的状态 …")
+        try:
+            r = control.resume()
+        except (Fatal, NeedsHuman, MoltError) as e:
+            bad(f"恢复源壳失败：{e}")
+            dim("  ⚠️ **源壳现在是哑的**。在它恢复之前不要再启动任何别的壳。")
+            dim("  它的 plugin 还在跑，重启那个 AstrBot 进程也会让它重新连上。")
+            return
+        if r.get("resumed"):
+            ok(f"源壳已恢复：{', '.join(r['resumed'])}")
+        else:
+            warn("resume 没有恢复任何平台——它现在仍然是哑的。")
+            dim("  原因见上面：要么配置里 enable=false（那是护栏，不是故障），")
+            dim("  要么它本来就没连过任何东西。")
+        print()
+
+    try:
+        rc, gen, gen_dir, archive_info = _do_checkout(
+            src=src,
+            be=be,
+            shell=args.shell,
+            astrbot_src=getattr(args, "astrbot_src", None),
+            target=args.target,
+            want_archive=not args.no_archive,
+        )
+        if rc != 0:
+            _resume_source("热备或打包失败")
+            be.release(args.shell, epoch)
+            warn("已交还租约（这次迁徙没有完成）")
+            return rc
+
+        # --- 上传（可选） ---
+        #
+        # 上传放在 push 之前：先让字节到位，再让账本承认这件事。
+        # 反过来的话，一旦上传失败，账本里就有了一条"登记了但取不到字节"
+        # 的记录——那正是最难处理的中间态。
+        if archive_info and transport == "warden":
+            up = be.upload_archive(
+                gen, Path(archive_info["path"]),
+                expected_sha256=archive_info["sha256"],
+            )
+            info(
+                f"已上传到中转区：gen-{gen:06d} "
+                f"{up['bytes'] / 1024 / 1024:.1f} MB"
+            )
+
+        # --- 登记 ---
+        m = Manifest.load(gen_dir / "manifest.json")
+        record = be.push(args.shell, epoch, m.to_dict())
+
+        head("迁徙完成")
+        kv("generation", record["generation"])
+        kv("快照目录", gen_dir)
+        if archive_info:
+            kv("归档", archive_info["path"])
+            kv("归档大小", f"{archive_info['bytes'] / 1024 / 1024:.1f} MB")
+            kv("归档 sha256", archive_info["sha256"])
+            if transport == "warden":
+                kv("中转区", "已上传，目标壳可直接取")
+        kv("数据量", f"{record['artifact_bytes'] / 1024 / 1024:.1f} MB")
+        print()
+        ok("已登记。快照现在归新壳管了。")
+
+    except Fatal as e:
+        bad(str(e))
+        _resume_source("迁徙中止")
+        try:
+            be.release(args.shell, epoch)
+            warn("已交还租约")
+        except MoltError:
+            warn("交还租约也失败了——它会在 90 秒后自动过期")
+        return 4
+    except MoltError as e:
+        bad(f"{type(e).__name__}: {e}")
+        _resume_source("迁徙被拒")
+        try:
+            be.release(args.shell, epoch)
+        except MoltError:
+            pass
+        return 7
+
+    # --- 下一步提示 ---
+    print()
+    if drained:
+        # 这句话必须显眼：用户跑完一条命令之后，机器人就不回消息了。
+        # 不说清楚，他会以为是自己搞坏了什么。
+        dim("  源壳现在是哑的（这是我们按的，不是它坏了）。")
+        dim("  目标壳起来接管之前，它不会回任何人的消息。")
+    if archive_info and not args.keep_lease:
+        dim("  下一步：")
+        if transport == "warden":
+            dim("    1. 在目标壳：molt land --generation "
+                f"{gen} --data <目标 data>")
+            dim("       （归档已经在 Warden 的中转区，它会自己取）")
+            dim(f"    2. 目标壳接管：molt migrate --shell <新壳 id> ...")
+        else:
+            dim(f"    1. 把 {Path(archive_info['path']).name} 传到目标壳")
+            dim("    2. 在那边：molt land --archive <文件> --data <目标 data>")
+        dim("  （传输这一环现在也不用人手了，但租约的生死顺序还得你自己掌握。）")
+    else:
+        dim("  租约还握在你手里。目标壳必须先等你 release 才能接管。")
+
+    if not args.keep_lease:
+        # 默认走"先死后生"的生死边界：这次迁徙做完就把租约放掉，
+        # 让目标壳能接管。`--keep-lease` 留给"我还要再拍一份"的场景。
+        try:
+            be.release(args.shell, epoch)
+            ok("已交还租约——目标壳现在可以接管了")
+        except MoltError as e:
+            warn(f"交还租约失败：{e}")
+            dim("  90 秒后会自动过期，不用慌。")
+
+    return 0
+
+
+
+def _do_checkout(
+    *,
+    src: Path,
+    be,
+    shell: str,
+    astrbot_src: Optional[str],
+    target: str,
+    want_archive: bool,
+) -> "tuple[int, int, Path, Optional[Dict[str, Any]]]":
+    """热备 + 打包。拆出来是为了让 `migrate` 的租约管理保持扁平。
+
+    返回 `(rc, generation, gen_dir, archive_info)`；`rc != 0` 表示失败。
+    """
+    gen = be.next_generation()
+    dest_dir = be.prepare_generation_dir(gen)
+
+    artifacts: List[Artifact] = []
+
+    for rel in (
+        "data_v4.db",
+        "plugin_data/astrbot_plugin_memory_companion/memory_companion.db",
+    ):
+        src_db = src / rel
+        if not src_db.exists():
+            warn(f"源端没有 {rel}（这个部署可能没装对应插件）")
+            continue
+
+        dst_db = dest_dir / rel
+        try:
+            info(f"热备 {rel} …")
+            payload = hot_backup(src_db, dst_db)
+        except Fatal as e:
+            bad(str(e))
+            return 4, gen, dest_dir, None
+
+        print(
+            f"    {C.GRN}{C.S_OK}{C.R} {payload['bytes'] / 1024 / 1024:.1f} MB  "
+            f"{payload['backup_seconds']:.3f}s  "
+            f"{payload['table_count']} 张表  "
+            f"quick_check={payload['quick_check']}  "
+            f"{C.DIM}{payload['sha256'][:16]}…{C.R}"
+        )
+
+        artifacts.append(
+            Artifact(
+                relpath=rel,
+                kind="sqlite",
+                bytes=payload["bytes"],
+                sha256=payload["sha256"],
+                quick_check=payload["quick_check"],
+                table_count=payload["table_count"],
+                backup_seconds=payload["backup_seconds"],
+            )
+        )
+
+    if not artifacts:
+        bad("一个库都没备份到，这次迁徙没有意义")
+        return 4, gen, dest_dir, None
+
+    cfg = src / "cmd_config.json"
+    if cfg.exists():
+        info("复制 cmd_config.json …")
+        dst_cfg = dest_dir / "cmd_config.json"
+        dst_cfg.parent.mkdir(parents=True, exist_ok=True)
+        dst_cfg.write_bytes(cfg.read_bytes())
+        artifacts.append(
+            Artifact(
+                relpath="cmd_config.json",
+                kind="copy",
+                bytes=dst_cfg.stat().st_size,
+                sha256=sha256_of(dst_cfg),
+            )
+        )
+        print(f"    {C.GRN}{C.S_OK}{C.R} {dst_cfg.stat().st_size} B")
+
+    ident = probe_identity(
+        Path(astrbot_src) if astrbot_src else None,
+        data_path=src,
+    )
+    runtime_pip = collect_runtime_pip(src / "site-packages")
+
+    m = Manifest(
+        generation=gen,
+        created_at=time.time(),
+        source_host=ident.hostname,
+        source_root=str(src),
+        protocol_version=PROTOCOL_VERSION,
+        astrbot_version=ident.astrbot_version or "unknown",
+        platform=ident.platform,
+        python_version=ident.python_version,
+        artifacts=artifacts,
+        runtime_pip=runtime_pip,
+        target_shell=target or "",
+    )
+    m.save(dest_dir / "manifest.json")
+
+    archive_info: Optional[Dict[str, Any]] = None
+    if want_archive:
+        archive_path = dest_dir.parent / f"gen-{gen:06d}.tar.gz"
+        info("打包 …")
+        archive_info = make_archive(dest_dir, archive_path)
+        print(
+            f"    {C.GRN}{C.S_OK}{C.R} {archive_info['bytes'] / 1024 / 1024:.1f} MB  "
+            f"{archive_info['file_count']} 个文件  "
+            f"{C.DIM}{archive_info['sha256'][:16]}…{C.R}"
+        )
+
+    return 0, gen, dest_dir, archive_info
+
+
+def _live_data_dir_reason(data_dir: Path) -> Optional[str]:
+    """这个 data 目录看起来正被一个活着的 AstrBot 用着吗？
+
+    判据是 SQLite 的 `-shm` 文件：WAL 模式下的连接会把它 mmap 成共享内存索引，
+    **只有活着的连接才会建它**，干净停机后会被删掉（实测：停机前 32,768 B，停机后消失）。
+
+    局限：进程崩溃也会留下 `-shm`。所以这个函数只负责"提醒"，不负责"定罪"——
+    调用方给 `--force` 就放行。猜测不该是不可绕过的。
+    """
+    if not data_dir.is_dir():
+        return None
+    for side in sorted(data_dir.glob("*-shm")):
+        try:
+            size = side.stat().st_size
+        except OSError:
+            size = 0
+        return (
+            f"{side.name} 还在（{size} 字节）—— WAL 的共享内存索引，"
+            "只有活着的连接才会建它"
+        )
+    return None
+
+
+def cmd_land(args: argparse.Namespace) -> int:
+    """在目标壳上，把收到的归档落进 data 目录。
+
+    ## 它为什么必须独立成一条命令
+
+    因为 `land` 跑在**另一台机器**上，而 `migrate` 跑在源端。它们之间
+    隔着一次传输。把两者合成一条命令需要先解决"谁连谁、用什么凭据"，
+    那是 Warden 中转区解决的事——现在支持了，见下面的 `--generation`。
+
+    现在这样安排的好处是：每一步都能单独验证，出了问题知道是哪一半。
+
+    ## 两种取归档的方式
+
+      * `--archive <本地文件>` —— 人已经把它传过来了（scp / 共享盘 / U 盘）
+      * `--generation N`       —— 从 Warden 的中转区自己取（需要
+                                  `--warden-url` / `--warden-token`）
+
+    后者是"全自动"的最后一环：源端 `migrate --transport warden` 把归档
+    PUT 上去，目标端 `land --generation N` 把它 GET 下来。两端都只跟
+    已经互相认证过的 Warden 说话，中间不需要第三套凭据。
+    """
+    data_dir = Path(args.data).expanduser().resolve()
+    if not data_dir.is_dir():
+        # 新壳上 data/ 本来就不存在——AstrBot 第一次启动才会创建它。
+        # 但"不存在"有两种：路径打错了，还是这台机器真的还没跑过 AstrBot。
+        # 分不清就一律拒绝，会把最常见的场景（迁到一台全新的 Windows 上）
+        # 变成必须先手工 mkdir 的谜题；一律放行，则 `--data G:\molt` 这种
+        # 手滑会安静地在盘根上建出一个 data 目录。
+        # 判据用父目录：父目录在 → 是"这台机器还没跑过"；父目录也不在 → 打错了。
+        if not data_dir.parent.is_dir():
+            bad(f"目标 data 目录的上层目录不存在：{data_dir.parent}")
+            dim("  这通常意味着路径打错了。请给一个已经存在的位置。")
+            return 2
+        info(f"目标 data 目录不存在，新建它：{data_dir}")
+        dim("  这是全新壳上正常的第一次——AstrBot 还没在它上面跑过。")
+        try:
+            data_dir.mkdir(parents=True, exist_ok=False)
+        except OSError as e:
+            bad(f"建不出目标 data 目录：{e}")
+            return 2
+
+    generation = getattr(args, "generation", None)
+    archive_arg = getattr(args, "archive", None)
+    if bool(generation) == bool(archive_arg):
+        bad("必须且只能给 --archive 或 --generation 之一")
+        dim("  --archive 用本地文件；--generation 从 Warden 中转区自己取。")
+        return 2
+
+    be = None
+    if generation:
+        try:
+            be = _backend(args)
+        except ValueError as e:
+            bad(str(e))
+            return 2
+        if be.kind != "remote":
+            bad("--generation 需要 --warden-url / --warden-token 指向 NAS 上的 Warden")
+            dim("  中转区在 Warden 那一侧，不是本地目录。")
+            return 2
+
+    # 归档落到哪里：跟解包目录分开，因为"下载下来的 tar"和"解开之后的
+    # 目录"是两个生命周期的东西。下载失败时我们希望看到的是
+    # 「下载失败」，而不是「解包目录里只有一半的文件」。
+    if args.to:
+        work_dir = Path(args.to).expanduser().resolve()
+    else:
+        work_dir = Path(tempfile.mkdtemp(prefix="molt-land-"))
+
+    if generation:
+        archive = work_dir / f"gen-{int(generation):06d}.tar.gz"
+        head("从 Warden 中转区取归档")
+        kv("generation", generation)
+        kv("裁决者", be.where())
+        kv("存到", archive)
+        try:
+            got_arc = be.download_archive(
+                int(generation), archive, expected_sha256=args.sha256 or ""
+            )
+        except Fatal as e:
+            bad(str(e))
+            return 4
+        except MoltError as e:
+            bad(f"{type(e).__name__}: {e}")
+            return 4
+        ok(
+            f"已取到 {got_arc['bytes'] / 1024 / 1024:.1f} MB "
+            f"sha256 {got_arc['sha256'][:16]}…"
+        )
+        # 服务端已经算过并回报了哈希；把它当成后续解包的期望值，
+        # 这样"下载 → 解包"这条链上 sha256 只在前一步被信任一次。
+        if not args.sha256:
+            args.sha256 = got_arc["sha256"]
+    else:
+        archive = Path(args.archive).expanduser().resolve()
+        if not archive.is_file():
+            bad(f"归档不存在：{archive}")
+            return 2
+
+    # 每次落位都必须是一个**全新的空目录**。
+    #
+    # 这里原本用 `landed-<时间戳>` 建在共享的系统临时目录下，时间戳精确到秒。
+    # 实测抓到的后果：连着两次运行落在同一秒时，第二次会读到第一次留下的
+    # `manifest.json` 和数据文件——于是 `land` 拿着**上一份** manifest 去
+    # "校验通过"，把上一次的文件当成这一次的落进目标 data 目录。
+    # 它不会报错，它只是默默地用了错的东西。
+    #
+    # 所以默认路径改成 mkdtemp：由内核保证唯一，不存在"同一秒撞车"这种可能。
+    # 只有用户显式给了 --to 时才按时间戳命名——那种情况下"目录已存在"
+    # 是个需要人看一眼的信号，直接拒绝而不是覆盖。
+    if args.to:
+        candidate = work_dir / f"landed-{time.strftime('%Y%m%dT%H%M%S')}"
+        if candidate.exists():
+            bad(f"解包目录已存在：{candidate}")
+            dim("  拒绝复用它——里面的旧文件会被误认为这份归档的内容。")
+            dim("  删掉它，或者用别的 --to 目录，或者等一秒再跑。")
+            return 2
+        gen_dir = candidate
+        gen_dir.mkdir(parents=True)
+    else:
+        gen_dir = Path(tempfile.mkdtemp(prefix="molt-land-unpack-"))
+
+    head("落位")
+    kv("归档", archive)
+    kv("目标 data", data_dir)
+    kv("解包到", gen_dir)
+    if args.sha256:
+        kv("期望 sha256", args.sha256[:24] + "…")
+
+    sha = args.sha256 or ""
+    if not sha:
+        warn("没有给 --sha256，跳过归档指纹校验")
+        dim("  这意味着截断的归档也会被解包。跨机传过来的应该总是带上它。")
+
+    try:
+        extracted = extract_archive(archive, gen_dir, expected_sha256=sha or None)
+    except Fatal as e:
+        bad(str(e))
+        return 4
+    except NeedsHuman as e:
+        bad(str(e))
+        return 2
+
+    ok(f"解包完成：{len(extracted['files'])} 个文件 / {extracted['bytes'] / 1024 / 1024:.1f} MB")
+
+    mpath = gen_dir / "manifest.json"
+    if not mpath.exists():
+        # 走到这里说明归档里真的没有 manifest。
+        #
+        # 这个判断**必须**建在"全新的空目录"之上才成立。之前 `land` 用
+        # 共享时间戳目录，同一秒内第二次运行会继承上一次的 manifest.json，
+        # 于是这条检查永远通过，而 `land` 会拿旧 manifest 去校验新归档。
+        # 真正的保险是上面那个"目录已存在就拒绝"，这一条是它的补充：
+        # 万一将来有人改成允许复用目录，至少这里还有一道。
+        bad("归档里没有 manifest.json——这不是一个 molt 快照")
+        dim(f"  解包目录 {gen_dir} 里没有 manifest.json。")
+        return 6
+
+    m = Manifest.load(mpath)
+    if m.protocol_version != PROTOCOL_VERSION:
+        bad(f"协议版本不匹配：快照 {m.protocol_version}，本机 {PROTOCOL_VERSION}")
+        return 5
+
+    print()
+    info(f"来源 {m.source_host} ({m.platform}) / AstrBot {m.astrbot_version} / 第 {m.generation} 代")
+
+    problems = m.verify_against(gen_dir)
+    if problems:
+        bad("快照校验失败，不落位：")
+        for p in problems:
+            print(f"    {C.RED}{C.S_BULLET}{C.R} {p}")
+        return 6
+    ok("快照完整性校验通过")
+
+    # 目标 data 目录是不是还活着？——在问"要不要落位"之前先问这个。
+    live = _live_data_dir_reason(data_dir)
+    if live:
+        bad("目标 data 目录看起来正在被一个活着的 AstrBot 使用：")
+        print(f"    {C.RED}{C.S_BULLET}{C.R} {live}")
+        dim("  它现在持有那个库的写连接。直接换掉文件，它会继续往被移走的旧 inode 上写，")
+        dim("  而你以为新数据已经生效了 —— 两边各说各话，比崩溃难查得多。")
+        dim("  先让它停下来：")
+        dim("    容器：docker kill -s INT <容器名>   （不是 docker stop，那个不走优雅停机）")
+        dim("    裸进程：在那个窗口里按 Ctrl+C")
+        if not getattr(args, "force", False):
+            dim("  确认它真的停了，再加 --force 跳过这一条。")
+            return 2
+        warn("--force：跳过这项检查，继续落位。")
+
+    if not args.yes:
+        # 落位会移动目标 data 里现有的文件（虽然会备份）。这一步不可自动。
+        print()
+        warn("落位会把目标 data 目录里的同名文件移进备份目录")
+        dim(f"  备份到 {data_dir}/.molt-pre-restore-<时间戳>/")
+        dim("  确认无误后加 --yes 执行。")
+        return 0
+
+    try:
+        got = restore_into(gen_dir, data_dir, backup=True)
+    except NeedsHuman as e:
+        bad(str(e))
+        return 2
+    except Fatal as e:
+        bad(str(e))
+        return 4
+
+    head("落位完成")
+    for rel in got["restored"]:
+        print(f"    {C.GRN}{C.S_OK}{C.R} {rel}")
+    if got["backup_dir"]:
+        kv("原有文件已备份到", got["backup_dir"])
+    if got.get("sidecars_cleaned"):
+        kv("清掉了落位产生的 sidecar", ", ".join(got["sidecars_cleaned"]))
+    print()
+
+    # --- 记账：告诉 Warden 这份快照已经被这台壳消费 ---
+    #
+    # 只在这份快照是从 Warden 取的（--generation）、且知道自己是哪只壳
+    # （--shell）时登记。`--archive` 那条路是人的手工传文件，Warden
+    # 根本不知道那次落位，拿一个本地 shell_id 去认领一代它没发过的
+    # 快照只会制造假记录。
+    #
+    # 为什么这次标记失败**绝不能**让 land 失败：
+    # 走到这里时 `restore_into` 已经返回，字节真的进了 data/。也就是说
+    # "灵魂已经搬完"这个事实已经发生，账本只是它的一份索引。索引落后
+    # 是**可恢复**的（账本会一直显示"还没人取走"，人可以稍后补记，或者
+    # 至少知道这次没被记上）；而把一次成功的落位报成失败是**不可恢复**的
+    # ——人会重跑 land，那份快照会再把刚恢复好的 data/ 覆盖一遍。
+    # 两种错误的不对称性决定了这里只能 warn，不能 raise/return 非零。
+    if generation and args.shell:
+        try:
+            consumed = be.mark_consumed(int(generation), args.shell)
+        except MoltError as e:
+            warn(
+                f"字节已经落位，但账本没记住这次消费：{type(e).__name__}: {e}"
+            )
+            dim("  这不是落位失败：data/ 已经是这份快照的状态，可以正常启动。")
+            dim("  账本落后于现实是可恢复的（status 会显示还没人取走），")
+            dim("  可以确认 Warden 可用后补记这一代的消费。")
+        else:
+            ok(
+                f"账本已记下：generation {consumed['generation']} 由 "
+                f"{consumed['consumed_by']} 消费"
+            )
+
+    # --- 机器覆写层 ---
+    #
+    # 走到这一步时，目标 data/ 里是**从别处搬来的** cmd_config.json。
+    # 它带着原来那台机器的机器绑定设置：dashboard 监听地址、jwt_secret、
+    # 以及指向原机器本机服务的 provider 地址。直接起 AstrBot 的后果实测过：
+    # 它在 Windows 上监听 0.0.0.0:6185，并对局域网开放，用的还是 NAS 的密钥。
+    #
+    # 还有一条比上面几条都重要：`platform[].enable` 也是原样搬来的 `True`，
+    # 一起 AstrBot 就会去连那个 QQ 机器人。2026-11-14 14:41 真的发生过
+    # （见 overlay._disable_platform_adapters 的注释）——那次只差几秒就是
+    # 两条鱼同时在线。所以**平台适配器无论在哪个平台都必须关掉**，
+    # 而 dashboard 那几条只在 Windows 上做（非 Windows 不猜端口）。
+    cfg_path = data_dir / "cmd_config.json"
+    if cfg_path.exists():
+        print()
+        try:
+            base_cfg = load_config(cfg_path)
+            if platform.system() == "Windows":
+                patched, notes = overlay_for_windows(
+                    base_cfg,
+                    shell_id=args.shell or "windows",
+                    port=args.dashboard_port,
+                )
+                save_config(patched, cfg_path)
+                head("机器覆写层（Windows）")
+                for ch in notes["changes"]:
+                    print(f"    {C.GRN}{C.S_OK}{C.R} {ch}")
+                ok("配置已改成这台壳该有的样子。")
+                dim("  jwt_secret 已重新生成——绝不跨机复用（那是安全问题）。")
+            else:
+                # 非 Windows：dashboard 端口不猜（猜错会让它监听在别人能访问的
+                # 地址上），但平台适配器这一条与平台无关，必须关。
+                patched, notes = apply_overlay(
+                    base_cfg,
+                    shell_id=args.shell or platform.system().lower(),
+                    platform=platform.system().lower(),
+                    drop_provider_sources=[],
+                    dashboard_host=None,
+                    dashboard_port=None,
+                    rotate_jwt=False,
+                    disable_platforms=True,
+                )
+                save_config(patched, cfg_path)
+                head("机器覆写层（非 Windows：只做与平台无关的那几条）")
+                for ch in notes["changes"]:
+                    print(f"    {C.GRN}{C.S_OK}{C.R} {ch}")
+                warn("这是一台非 Windows 壳，dashboard 与 provider 地址没有自动改")
+                dim("  请确认 dashboard.host/port 与本机 provider 地址是否符合预期。")
+                dim("  （不猜是刻意的：猜错会让它监听在别人能访问的地址上。）")
+        except (Fatal, NeedsHuman) as e:
+            bad(str(e))
+            dim("  落位本身已完成，但配置没能自动调整。请手动检查 dashboard 段。")
+            dim("  ⚠️ 尤其要确认 platform[].enable 是 false——它连着 QQ 账号。")
+            return 0
+
+    print()
+    ok("现在这台壳的 data/ 就是那个存在的状态了。")
+    if cfg_path.exists():
+        dim("  ⚠️ 平台适配器已关闭：这只鱼现在还没连上 QQ。")
+        dim("     确认账本里只有你在持租约之后，再手动把 platform[].enable 打开。")
+    dim("  下一步：起 AstrBot（记得 --data 指向这里），让它用这份状态跑起来。")
+    if m.runtime_pip:
+        warn(f"还需要重装 {len(m.runtime_pip)} 个运行时包（manifest 里有清单）：")
+        for pkg in m.runtime_pip[:8]:
+            print(f"    {C.DIM}{pkg}{C.R}")
+        if len(m.runtime_pip) > 8:
+            dim(f"    … 共 {len(m.runtime_pip)} 个")
+    return 0
+
+
+def cmd_wake(args: argparse.Namespace) -> int:
+    """把睡着的目标壳叫醒。
+
+    这个命令存在的原因：迁徙的第一步不是"备份"，而是"目标机得是开着的"。
+    在此之前那一步一直是人手做的（人按电源键，或者人跑 `wol-test.py`），
+    而**人手做的第一步会让整条链子看起来是自动的、其实不是**。
+
+    ## 为什么 `--wait` 是独立的开关
+
+    "发出去了"和"醒了"是两件事，中间隔着 BIOS POST + 引导 + 网络栈起来。
+    真机实测：S5 关机 → 发包 → 网络恢复 **23.1 秒**，但 AstrBot 监听 6199
+    还要再等几十秒。所以"等不等""等哪个判据"必须由调用者决定：
+    `--wait` 用 ICMP（网络栈起来就算醒），`--wait-port` 用 TCP（服务能干活才算醒）。
+
+    ## 为什么叫不醒要报错退出（而不是重试到成功）
+
+    `wait_online()` 超时抛 `NeedsHuman`。叫不醒只有三种原因（网卡没 arm /
+    上电后没进到能联网的状态 / 换了网卡或驱动把设置重置了），**每一种都需要
+    人看一眼**。静默重试会让人以为系统在工作，而实际上它永远叫不醒。
+    """
+    mac = args.mac
+    host = args.host or ""
+
+    head("唤醒目标")
+    # 从 format_mac 开始就要在 try 里：它会对坏 MAC 抛 Fatal，
+    # 而"参数错"（exit 4）和"目标叫不醒"（exit 5）必须区分开 ——
+    # 这两种故障要人做的事完全不同，混成一个退出码等于让人自己猜。
+    try:
+        kv("MAC", W.format_mac(mac))
+        kv("目标", host or "（只知道 MAC，走全网广播）")
+
+        targets = W.wake_targets(host, args.prefix)
+        kv("发包路径", " / ".join(targets))
+        if len(targets) == 1:
+            dim("  只发广播：机器关机后 ARP 表项会过期，单播出不去，广播才是主力。")
+        print()
+
+        result = W.wake(
+            mac,
+            host=host,
+            prefix_len=args.prefix,
+            port=args.port,
+            count=args.count,
+            interval=args.interval,
+            quiet=args.quiet,
+        )
+    except Fatal as e:
+        bad(str(e))
+        return 4
+
+    kv("轮次", f"{result['rounds_ok']}/{result['rounds_sent']} 轮至少一个路径成功")
+    kv("封包", f"{result['packet_bytes']} 字节 × {result['packets']} 个")
+    print()
+
+    if not result["any_sent"]:
+        # 一个都发不出去 = 环境问题，不是"机器没醒"。这两件事必须分开报，
+        # 否则人会去检查机器，而真正的问题是 NAS 自己的网络。
+        bad("一个封包都没发出去。")
+        dim("  这不是目标机的问题，是本机发不出去：检查网卡、防火墙、广播权限。")
+        for r in result["rounds"][0]["results"]:
+            dim(f"    {r['target']}: {r['error']}")
+        return 4
+
+    ok("封包已发出。")
+
+    if not args.wait and not args.wait_port:
+        print()
+        dim("  没等它醒（--wait 才等）。魔术封包只能「请求」开机，不保证成功。")
+        return 0
+
+    print()
+    timeout = args.wait_timeout
+    criterion = f"tcp/{args.wait_port}" if args.wait_port else "icmp"
+    info(f"等它起来（判据 {criterion}，最多 {timeout:.0f} 秒）…")
+
+    def tick(n: int, secs: float) -> None:
+        # 每 5 次打一行，避免刷屏。真机上 23 秒醒来，所以大约 2-3 行。
+        if n % 5 == 0:
+            dim(f"  第 {n} 次探测，已等 {secs:.1f} 秒")
+
+    if not (args.wait_port or None) and not W.can_probe_icmp():
+        raise NeedsHuman(
+            "这台机器上没有 ping，ICMP 判据用不了。"
+            "\n  这不是「目标机没醒」——是我没法判断它醒没醒。"
+            "\n  给一个 TCP 判据试试：--wait-port <端口>"
+        )
+    try:
+        r = W.wait_online(
+            host,
+            port=args.wait_port or None,
+            timeout=timeout,
+            interval=args.wait_interval,
+            on_tick=tick,
+        )
+    except NeedsHuman as e:
+        print()
+        bad(str(e))
+        return 5
+
+    print()
+    ok(f"它起来了：{r['seconds']} 秒（{r['criterion']}，探测 {r['attempts']} 次）")
+    return 0
+
+
+def _human_size(n: int) -> str:
+    """把字节数变成人能读的大小。中转区里的东西从 KB 到 GB 都可能。"""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    """清理 Warden 中转区里"账本不认"的归档。
+
+    ## 为什么需要一个命令而不是自动清
+
+    因为自动清理会删掉人正在看的东西。中转区里的归档有四种来历：
+    ①账本里记着、目标壳还没取（**绝不能删**）②上传成功但 push 失败
+    （那次迁徙废了，可以删）③来自更早的、已经清理过的账本（可删）
+    ④人手工扔进来的（不归我们管，不删）。判据只有第一条是硬边界，
+    其余都要靠 `keep_recent` 这种"留几份缓冲"的直觉来兜。
+
+    把判断交给命令 + 默认 `dry_run`，人就能先看一眼"它会删哪些"。
+
+    ## 退出码
+
+    0 = 成功（dry-run 也算成功，它完成了它承诺的事）
+    2 = 参数不合法
+    4 = 连不上 Warden / Warden 报错
+    """
+    try:
+        be = _backend(args)
+    except ValueError as e:
+        bad(str(e))
+        return 2
+
+    if args.keep_recent < 0:
+        bad(f"--keep-recent 不能是负数：{args.keep_recent}")
+        return 2
+
+    try:
+        result = be.prune(keep_recent=args.keep_recent, dry_run=not args.yes)
+    except Fatal as e:
+        bad(str(e))
+        return 4
+    except MoltError as e:
+        bad(str(e))
+        return 4
+
+    head("中转区")
+    kv("位置", result.get("archive_dir", be.where()))
+    kv("保留最近", f"{args.keep_recent} 份")
+
+    removed = result.get("removed") or []
+    kept = result.get("kept") or []
+    freed = int(result.get("freed_bytes") or 0)
+    dry = bool(result.get("dry_run", True))
+
+    if not removed:
+        ok("没有可清理的归档 —— 每一份都在账本里，或者都是别人放的")
+    else:
+        print()
+        if dry:
+            warn(f"将要删除 {len(removed)} 份（共 {_human_size(freed)}）—— 这次没动手")
+        else:
+            ok(f"已删除 {len(removed)} 份，腾出 {_human_size(freed)}")
+        for item in removed:
+            name = item.get("name", "?")
+            size = _human_size(int(item.get("bytes") or 0))
+            reason = item.get("reason", "")
+            marker = "?" if dry else "-"
+            print(f"  {marker} {name}  {size}  {C.DIM}{reason}{C.R}")
+
+    if kept:
+        print()
+        dim(f"  保留 {len(kept)} 份：")
+        for item in kept[:12]:
+            name = item.get("name", "?")
+            reason = item.get("reason", "")
+            dim(f"    {name}  {reason}")
+        if len(kept) > 12:
+            dim(f"    …… 还有 {len(kept) - 12} 份")
+
+    print()
+    if dry:
+        dim("  想真的删：加上 --yes")
+    else:
+        dim("  这些文件已经不在盘上了。账本里记着的永远不删。")
+    return 0
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    """把 Warden 跑成一个 HTTP 服务，等远端的壳来敲门。
+
+    这个命令是"权威住在库旁边"这条原则的落地形态：它必须跑在
+    **放着 state.json 和 data/ 的那台机器上**（也就是 NAS），
+    而不是跑在壳上。
+
+    前台阻塞运行（不 daemon 化）。理由：v0.1 阶段人在旁边看着它，
+    能直接看到每个请求；真要做成服务，交给 systemd / 计划任务，
+    而不是让 python 自己去 fork。
+    """
+    from .server import WardenServer
+
+    root = Path(args.root).expanduser() if args.root else DEFAULT_ROOT
+    srv = WardenServer(
+        root=root,
+        token=args.token,
+        host=args.host,
+        port=args.port,
+    )
+
+    head("Warden HTTP 服务")
+    kv("根目录", root)
+    kv("绑定", f"{args.host}:{args.port}")
+    print()
+
+    if srv.generated_token:
+        # 只在生成时打印一次，且明确说"只显示这一次"——
+        # token 会出现在终端回滚里，人应该把它当密码对待。
+        warn("没有指定 --token，已随机生成一个。它只显示这一次：")
+        print()
+        print(f"    {C.B}{srv.token}{C.R}")
+        print()
+        dim("  把它记到壳那边：molt status --warden-url http://<这台机器>:%d --warden-token <上面那串>" % args.port)
+    else:
+        info("使用命令行提供的 token")
+
+    print()
+    dim("  Ctrl+C 停止。")
+    print()
+
+    try:
+        host, port = srv.start()
+        ok(f"已监听 http://{host}:{port}")
+        # 主线程只等待。所有实际工作都在 HTTP 处理线程里。
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print()
+        info("收到 Ctrl+C，正在停止 …")
+    except OSError as e:
+        bad(f"起不来：{e}")
+        dim("  端口被占用了？换一个 --port 试试。")
+        return 3
+    finally:
+        srv.stop()
+
+    ok("已停止")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    head("环境")
+    ident = probe_identity()
+    kv("molt 版本", __version__)
+    kv("协议版本", PROTOCOL_VERSION)
+    kv("shell_id", ident.shell_id)
+    kv("platform", ident.platform)
+    kv("python", ident.python_version)
+
+    head("Warden")
+    root = Path(args.root).expanduser() if args.root else DEFAULT_ROOT
+    w = Warden(root=root)
+    kv("根目录", root)
+    kv("存在", "是" if root.exists() else "否（首次运行会创建）")
+    try:
+        s = w.status()
+        kv("state.json", "可读")
+        kv("当前 epoch", s["current_epoch"])
+        kv("租约", s["lease"]["state"])
+    except Fatal as e:
+        bad(f"state.json 有问题：{e}")
+
+    head("SQLite")
+    import sqlite3
+
+    kv("版本", sqlite3.sqlite_version)
+    kv("backup()", "可用" if hasattr(sqlite3.Connection, "backup") else "不可用")
+
+    head("依赖")
+    try:
+        import pytest  # noqa: F401
+
+        ok("pytest（可以跑测试）")
+    except ImportError:
+        dim(f"  {C.S_BULLET} pytest 未装（只影响跑测试）")
+
+    return 0
+
+
+# --------------------------------------------------------------------------
+# 入口
+# --------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="molt",
+        description="让一个 AI 存在在多台机器之间迁徙，而不失去连续性。",
+        epilog="核心公理：任意时刻只能有一个存在在线。",
+    )
+    p.add_argument("--version", action="version", version=f"molt {__version__}")
+    p.add_argument("--no-color", action="store_true", help="关闭彩色输出")
+
+    # --no-color 也要能被放在子命令后面（molt doctor --no-color），
+    # 因为人就是这么写的。argparse 默认只认全局位置，所以用 parent 再挂一份。
+    #
+    # --warden-url / --warden-token 同样挂在这里：**每个**需要跟 Warden
+    # 说话的命令都要能指定远端，否则只有一半命令支持远程是没用的。
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--no-color", action="store_true", default=argparse.SUPPRESS)
+    common.add_argument(
+        "--warden-url",
+        default=argparse.SUPPRESS,
+        help="远端 Warden 地址，如 http://192.168.1.10:6186（给了就走 HTTP）",
+    )
+    common.add_argument(
+        "--warden-token",
+        default=argparse.SUPPRESS,
+        help="远端 Warden 的 token",
+    )
+    common.add_argument(
+        "--staging",
+        default=argparse.SUPPRESS,
+        help="远端模式下快照落在本地哪个目录（默认系统临时目录下的 molt-staging）",
+    )
+
+    sub = p.add_subparsers(dest="command", metavar="<命令>")
+
+    def add(name: str, help_text: str) -> argparse.ArgumentParser:
+        return sub.add_parser(name, help=help_text, parents=[common])
+
+    # shell
+    s = add("shell", "自述这台壳是谁、能做什么")
+    s.add_argument("--json", action="store_true", help="输出 JSON")
+    s.add_argument("--astrbot-src", help="AstrBot 源码目录（用于探测版本）")
+    s.add_argument("--data", help="data 目录（覆盖 ASTRBOT_ROOT 推断）")
+    s.add_argument("--check-wol", help="tools/check-wol.ps1 的路径")
+    s.set_defaults(func=cmd_shell)
+
+    # status
+    s = add("status", "现在是谁在线、第几代")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--root", help="Warden 根目录")
+    s.set_defaults(func=cmd_status)
+
+    # checkout
+    s = add("checkout", "从源端 data/ 热备出一份快照")
+    s.add_argument("--data", required=True, help="源端 data 目录")
+    s.add_argument("--shell", required=True, help="自己的 shell_id")
+    s.add_argument("--root", help="Warden 根目录")
+    s.add_argument("--astrbot-src", help="AstrBot 源码目录")
+    s.add_argument("--target", help="打算交给哪个壳（可留空，反正还不知道它开机没有）")
+    s.set_defaults(func=cmd_checkout)
+
+    # verify
+    s = add("verify", "验证一个 generation 目录")
+    s.add_argument("--dir", required=True, help="generation 目录")
+    s.set_defaults(func=cmd_verify)
+
+    # push
+    s = add("push", "把快照交给新壳（唯一改变灵魂归属的操作）")
+    s.add_argument("--dir", required=True, help="generation 目录")
+    s.add_argument("--shell", required=True, help="目标 shell_id")
+    s.add_argument("--epoch", required=True, type=int, help="自己的 epoch")
+    s.add_argument("--root", help="Warden 根目录")
+    s.set_defaults(func=cmd_push)
+
+    # release
+    s = add("release", "交还租约")
+    s.add_argument("--shell", required=True)
+    s.add_argument("--epoch", required=True, type=int)
+    s.add_argument("--root", help="Warden 根目录")
+    s.set_defaults(func=cmd_release)
+
+    # migrate
+    s = add("migrate", "一条命令走完：热备 → 打包 → （上传）→ 登记")
+    s.add_argument("--data", required=True, help="源端 data 目录")
+    s.add_argument("--shell", required=True, help="自己的 shell_id")
+    s.add_argument("--root", help="Warden 根目录")
+    s.add_argument("--astrbot-src", help="AstrBot 源码目录（用于探测版本）")
+    s.add_argument("--target", default="", help="打算交给哪个壳（写进 manifest）")
+    s.add_argument(
+        "--transport",
+        choices=("local", "warden"),
+        default=None,
+        help="归档怎么走：local=留在本地由人传（默认同机）；"
+             "warden=PUT 到 Warden 中转区，目标壳自己取（默认跨机）",
+    )
+    s.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="只做热备不打包（用于本地调试）",
+    )
+    s.add_argument(
+        "--keep-lease",
+        action="store_true",
+        help="做完不自释放租约（还要再拍一份时用）",
+    )
+    s.add_argument(
+        "--wake-mac",
+        default=None,
+        help="先发魔术封包叫醒目标网卡（跨机迁徙的第一步，也可单独用 molt wake）",
+    )
+    s.add_argument("--wake-host", default="", help="目标 IPv4（配合 --wake-mac 判断是否真的起来）")
+    s.add_argument("--wake-prefix", type=int, default=24, help="子网掩码长度（默认 24）")
+    s.add_argument("--wake-count", type=int, default=W.DEFAULT_COUNT, help=f"发几轮（默认 {W.DEFAULT_COUNT}）")
+    s.add_argument("--wake-interval", type=float, default=W.DEFAULT_INTERVAL, help=f"轮次间隔秒（默认 {W.DEFAULT_INTERVAL}）")
+    s.add_argument(
+        "--wake-timeout",
+        type=float,
+        default=180.0,
+        help="等目标起来的最长秒数（默认 180）",
+    )
+    s.add_argument(
+        "--wake-port-check",
+        type=int,
+        default=0,
+        help="等这个 TCP 端口能连上才算起来（不给就用 ICMP）",
+    )
+    s.add_argument(
+        "--no-wait-wake",
+        action="store_true",
+        help="发完封包就继续，不确认目标是否真的开机了（不推荐）",
+    )
+    s.add_argument(
+        "--control-url",
+        default="",
+        help="源壳的控制面地址（如 http://127.0.0.1:6185）。给了就在热备前先让它停止对外说话",
+    )
+    s.add_argument(
+        "--control-config",
+        default="",
+        help="源壳的 cmd_config.json（用它自己的 jwt_secret 现签一个短命 token）",
+    )
+    s.add_argument(
+        "--control-token",
+        default="",
+        help="直接给一个 dashboard JWT（不给 --control-config 时才用）",
+    )
+    s.set_defaults(func=cmd_migrate)
+
+    # land
+    s = add("land", "在目标壳上把归档落进 data 目录（本地文件或从 Warden 取）")
+    s.add_argument("--archive", help="本地 .tar.gz（与 --generation 二选一）")
+    s.add_argument(
+        "--generation",
+        type=int,
+        help="从 Warden 中转区取第几代（与 --archive 二选一，需要 --warden-url）",
+    )
+    s.add_argument(
+        "--data",
+        required=True,
+        help="目标 data 目录（不存在就新建——全新壳上它本来就不存在，但上层目录必须在）",
+    )
+    s.add_argument("--sha256", default="", help="归档的 sha256（强烈建议给）")
+    s.add_argument("--to", help="解包到哪个目录（默认用 mkdtemp 建一个全新的）")
+    s.add_argument("--shell", default="", help="这台壳的 shell_id（写进覆写日志）")
+    s.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=DEFAULT_DASHBOARD_PORT,
+        help=f"Windows 上 dashboard 监听端口（默认 {DEFAULT_DASHBOARD_PORT}）",
+    )
+    s.add_argument(
+        "--yes",
+        action="store_true",
+        help="真的落位（不给只做检查并说明会移动哪些文件）",
+    )
+    s.add_argument(
+        "--force",
+        action="store_true",
+        help="跳过「目标 data 目录看起来还活着」的检查（确认那个 AstrBot 真的停了再用）",
+    )
+    s.set_defaults(func=cmd_land)
+
+    # doctor
+    s = add("doctor", "体检：把能查的都查一遍")
+    s.add_argument("--root", help="Warden 根目录")
+    s.set_defaults(func=cmd_doctor)
+
+    # wake
+    s = add("wake", "发魔术封包把目标壳叫醒（可选等它真的起来）")
+    s.add_argument("--mac", required=True, help="目标网卡 MAC（四种写法都认）")
+    s.add_argument("--host", default="", help="目标 IPv4（给得越准，单播路径就能用上）")
+    s.add_argument(
+        "--prefix",
+        type=int,
+        default=24,
+        help="子网掩码长度，用来算定向广播（默认 24）",
+    )
+    s.add_argument("--port", type=int, default=W.DEFAULT_PORT, help=f"UDP 端口（默认 {W.DEFAULT_PORT}）")
+    s.add_argument("--count", type=int, default=W.DEFAULT_COUNT, help=f"发几轮（默认 {W.DEFAULT_COUNT}）")
+    s.add_argument(
+        "--interval",
+        type=float,
+        default=W.DEFAULT_INTERVAL,
+        help=f"轮次间隔秒（默认 {W.DEFAULT_INTERVAL}）",
+    )
+    s.add_argument("--wait", action="store_true", help="发完等它起来（ICMP 判据）")
+    s.add_argument(
+        "--wait-port",
+        type=int,
+        default=0,
+        help="等这个 TCP 端口能连上才算起来（比 --wait 严格，也更接近「能干活」）",
+    )
+    s.add_argument("--wait-timeout", type=float, default=180.0, help="最长等多少秒（默认 180）")
+    s.add_argument("--wait-interval", type=float, default=2.0, help="探测间隔秒（默认 2）")
+    s.add_argument("--quiet", action="store_true", help="不逐轮打印")
+    s.set_defaults(func=cmd_wake)
+
+    # prune
+    s = add("prune", "清理 Warden 中转区里账本不认的归档（默认只看不删）")
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.add_argument(
+        "--keep-recent",
+        type=int,
+        default=2,
+        help="账本不认的归档里，保留最新几份做缓冲（默认 2）",
+    )
+    s.add_argument(
+        "--yes",
+        action="store_true",
+        help="真的删。不给这个开关只报告不删",
+    )
+    s.set_defaults(func=cmd_prune)
+
+    # serve
+    s = add("serve", "把 Warden 跑成一个 HTTP 服务（给远端壳用）")
+    s.add_argument("--root", help="Warden 根目录")
+    s.add_argument("--host", default="0.0.0.0", help="绑定地址（默认 0.0.0.0）")
+    s.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"端口（默认 {DEFAULT_PORT}）")
+    s.add_argument("--token", help="认证 token（不给就随机生成并打印一次）")
+    s.set_defaults(func=cmd_serve)
+
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    # 必须在任何输出之前——见 _setup_console 的文档。
+    # 漏了这一步的后果实测过：中文 Windows 上第一行输出就 traceback。
+    _setup_console()
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if getattr(args, "no_color", False) or _no_color():
+        C.off()
+
+    if not getattr(args, "command", None):
+        parser.print_help()
+        print()
+        dim("  第一次用？先跑：molt doctor && molt shell")
+        return 0
+
+    try:
+        return int(args.func(args))
+    except MoltError as e:
+        bad(f"{type(e).__name__}: {e}")
+        return 1
+    except KeyboardInterrupt:
+        print()
+        warn("被中断")
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,463 @@
+"""`tools/molt-agent.py` 的测试。
+
+这个文件守的是**公理 0 的三个推论**：
+- 不是给我的，我不动
+- 有人还攥着租约，我不落位
+- 本机已经在跑，我不起第二只
+
+跑测试的 Python 没装 AstrBot、也不需要装：agent 只用标准库。
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+AGENT_PATH = ROOT / "tools" / "molt-agent.py"
+
+
+def _load_agent():
+    spec = importlib.util.spec_from_file_location("molt_agent_under_test", AGENT_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    # 必须先登记进 sys.modules 再 exec：文件里有 `from __future__ import annotations`，
+    # `@dataclass` 解析字符串注解时会 `sys.modules.get(cls.__module__).__dict__`，
+    # 没登记就是 None → AttributeError: 'NoneType' object has no attribute '__dict__'。
+    sys.modules["molt_agent_under_test"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+agent = _load_agent()
+
+
+# ---------------------------------------------------------------- 夹具
+
+
+def ledger(*, generation=7, target="win-shell", consumed_by="", holder=None):
+    latest = {
+        "generation": generation,
+        "target_shell": target,
+        "consumed_by": consumed_by,
+        "pushed_by": "nas-shell",
+    }
+    return {
+        "current_epoch": 8,
+        "lease": {"holder": holder, "state": "held" if holder else "no-lease"},
+        "latest_generation": latest,
+    }
+
+
+ME = "win-shell"
+
+
+def settings(**kw):
+    base = dict(
+        execute=True,
+        shell=ME,
+        data_dir=r"G:\molt-fish\data",
+        molt_pkg=str(ROOT),
+        python="py",
+        boot_script=str(ROOT / "tools" / "boot-keepalive.py"),
+        astrbot_python="astrbot-python",
+        log_path=r"G:\molt-fish\logs\astrbot.log",
+        platform_switch=str(ROOT / "tools" / "platform-switch.py"),
+        warden_url="http://192.168.1.10:6186",
+        warden_token="t0ken",
+        port=6199,
+        interval=0.01,
+        timeout=1.0,
+    )
+    base.update(kw)
+    return agent.Settings(**base)
+
+
+class FakeRunner:
+    def __init__(self, returncode=0, stdout="", stderr="", raises=None):
+        self.calls = []
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.raises = raises
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((list(argv), kwargs))
+        if self.raises is not None:
+            raise self.raises
+        return subprocess.CompletedProcess(argv, self.returncode, self.stdout, self.stderr)
+
+
+# ---------------------------------------------------------------- decide
+
+
+def test_idle_when_ledger_has_no_generation():
+    d = agent.decide({}, shell=ME, state={})
+    assert d.kind == "idle"
+    assert "还没有任何一代" in d.reason
+
+
+def test_idle_when_generation_is_for_someone_else():
+    d = agent.decide(ledger(target="nas-fish"), shell=ME, state={})
+    assert d.kind == "idle"
+    assert "nas-fish" in d.reason
+
+
+def test_idle_when_i_already_consumed_it():
+    d = agent.decide(ledger(consumed_by=ME), shell=ME, state={})
+    assert d.kind == "idle"
+    assert "已经落过" in d.reason
+
+
+def test_idle_when_someone_else_consumed_it():
+    d = agent.decide(ledger(consumed_by="other-box"), shell=ME, state={})
+    assert d.kind == "idle"
+    assert "other-box" in d.reason
+
+
+def test_wait_when_lease_is_still_held():
+    d = agent.decide(ledger(holder="nas-shell"), shell=ME, state={})
+    assert d.kind == "wait"
+    assert d.generation == 7
+    assert "租约" in d.reason
+
+
+def test_land_when_it_is_mine_and_nobody_holds_the_lease():
+    d = agent.decide(ledger(), shell=ME, state={})
+    assert d.kind == "land"
+    assert d.generation == 7
+
+
+def test_error_when_shell_is_blank():
+    d = agent.decide(ledger(), shell="", state={})
+    assert d.kind == "error"
+    assert "不知道自己是谁" in d.reason
+
+
+def test_error_when_generation_is_not_an_integer():
+    bad = ledger()
+    bad["latest_generation"]["generation"] = "第七代"
+    d = agent.decide(bad, shell=ME, state={})
+    assert d.kind == "error"
+    assert "不是整数" in d.reason
+
+
+def test_pending_start_debt_wins_over_a_newer_generation():
+    """上一轮落位成功但没起起来，这笔债要先还。
+
+    否则账本会显示 consumed_by=我（一切正常），而鱼其实没在说话。
+    """
+    state = {"needs_start": True, "landed_generation": 6}
+    d = agent.decide(ledger(generation=9, consumed_by=""), shell=ME, state=state)
+    assert d.kind == "start"
+    assert d.generation == 6
+
+
+def test_lease_held_but_for_me_is_still_a_wait():
+    """哪怕持租约的是我自己那次迁徙，租约没还也不许落位。"""
+    d = agent.decide(ledger(holder=ME), shell=ME, state={})
+    assert d.kind == "wait"
+
+
+# ---------------------------------------------------------------- 配置
+
+
+def test_settings_defaults_are_harmless(tmp_path):
+    cfg = agent.Settings.load(tmp_path / "nope.json")
+    assert cfg.execute is False
+    assert cfg.shell == ""
+    assert cfg.problems()
+
+
+def test_settings_reads_bom_json(tmp_path):
+    path = tmp_path / "a.json"
+    path.write_text("\ufeff" + json.dumps({"execute": True, "shell": ME}), encoding="utf-8")
+    cfg = agent.Settings.load(path)
+    assert cfg.execute is True
+    assert cfg.shell == ME
+
+
+def test_settings_rejects_broken_json_with_position(tmp_path):
+    path = tmp_path / "a.json"
+    path.write_text('{"execute": true,,}', encoding="utf-8")
+    with pytest.raises(agent.ConfigError) as info:
+        agent.Settings.load(path)
+    assert "行" in str(info.value) and "列" in str(info.value)
+
+
+def test_settings_rejects_non_object(tmp_path):
+    path = tmp_path / "a.json"
+    path.write_text("[1,2,3]", encoding="utf-8")
+    with pytest.raises(agent.ConfigError):
+        agent.Settings.load(path)
+
+
+def test_settings_ignores_unknown_keys(tmp_path):
+    path = tmp_path / "a.json"
+    path.write_text(json.dumps({"shell": ME, "拼错的键": 1}), encoding="utf-8")
+    assert agent.Settings.load(path).shell == ME
+
+
+def test_problems_lists_every_reason():
+    problems = agent.Settings().problems()
+    assert any("execute 是 false" in p for p in problems)
+    assert any("shell" in p for p in problems)
+    assert any("warden_url" in p for p in problems)
+    assert any("warden_token" in p for p in problems)
+
+
+def test_problems_flags_missing_molt_pkg(tmp_path):
+    cfg = settings(molt_pkg=str(tmp_path / "not-here"))
+    assert any("molt_pkg 不存在" in p for p in cfg.problems())
+
+
+# ---------------------------------------------------------------- argv
+
+
+def test_land_argv_is_explicit():
+    argv = agent.Agent(settings=settings(), state_path=Path("x")).land_argv(7)
+    for pair in (
+        ("--generation", "7"),
+        ("--data", r"G:\molt-fish\data"),
+        ("--warden-url", "http://192.168.1.10:6186"),
+        ("--warden-token", "t0ken"),
+        ("--shell", ME),
+    ):
+        i = argv.index(pair[0])
+        assert argv[i + 1] == pair[1]
+    assert "--yes" in argv
+    assert "--no-color" in argv
+
+
+def test_boot_argv_passes_data_dir_port_and_log():
+    argv = agent.Agent(settings=settings(), state_path=Path("x")).boot_argv()
+    assert argv[0] == "astrbot-python"
+    assert argv[1].endswith("boot-keepalive.py")
+    assert argv[2] == r"G:\molt-fish\data"
+    assert argv[3] == "6199"
+    assert argv[4] == r"G:\molt-fish\logs\astrbot.log"
+
+
+# ---------------------------------------------------------------- 执行
+
+
+def _agent(tmp_path, **kw):
+    runner = kw.pop("runner", FakeRunner())
+    cfg = kw.pop("cfg", settings())
+    probe = kw.pop("port_probe", lambda: False)
+    spawned = kw.pop("spawned", [])
+    logs = []
+
+    def spawner(argv, log_path):
+        spawned.append((list(argv), log_path))
+        return 4242
+
+    a = agent.Agent(
+        settings=cfg,
+        state_path=tmp_path / "state.json",
+        runner=runner,
+        port_probe=probe,
+        spawner=spawner,
+        log=logs.append,
+        **kw,
+    )
+    return a, runner, spawned, logs
+
+
+def test_dry_run_touches_nothing(tmp_path):
+    runner = FakeRunner()
+    a, runner, spawned, logs = _agent(
+        tmp_path, runner=runner, cfg=settings(execute=False), status_fetcher=lambda: ledger()
+    )
+    decision, steps = a.run_once()
+    assert decision.kind == "land"
+    assert steps == []
+    assert runner.calls == []
+    assert spawned == []
+    assert any("dry-run" in line for line in logs)
+
+
+def test_status_failure_means_do_nothing(tmp_path):
+    def boom():
+        raise RuntimeError("连不上账本")
+
+    runner = FakeRunner()
+    a, runner, spawned, logs = _agent(tmp_path, runner=runner, status_fetcher=boom)
+    decision, steps = a.run_once()
+    assert decision.kind == "error"
+    assert steps == []
+    assert runner.calls == []
+
+
+def test_happy_path_lands_then_switches_then_boots(tmp_path):
+    runner = FakeRunner()
+    a, runner, spawned, logs = _agent(tmp_path, runner=runner, status_fetcher=lambda: ledger())
+    decision, steps = a.run_once()
+
+    assert decision.kind == "start"
+    assert steps and all(s.ok for s in steps)
+    assert len(runner.calls) == 2  # land + platform-switch
+    assert "land" in runner.calls[0][0]
+    assert "platform-switch.py" in " ".join(runner.calls[1][0])
+    assert len(spawned) == 1
+
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert state["landed_generation"] == 7
+    assert state["needs_start"] is False
+    assert "started_at" in state
+
+
+def test_land_failure_does_not_advance_state(tmp_path):
+    runner = FakeRunner(returncode=4, stdout="取快照失败")
+    a, _, spawned, logs = _agent(tmp_path, runner=runner, status_fetcher=lambda: ledger())
+    decision, steps = a.run_once()
+
+    assert decision.kind == "land"
+    assert steps and steps[0].ok is False
+    assert "退出码 4" in steps[0].detail
+    assert spawned == []
+    assert a.load_state() == {}
+
+
+def test_switch_failure_does_not_boot(tmp_path):
+    class TwoStep(FakeRunner):
+        def __call__(self, argv, **kwargs):
+            self.calls.append((list(argv), kwargs))
+            rc = 0 if "land" in argv else 1
+            return subprocess.CompletedProcess(argv, rc, "", "平台开关炸了")
+
+    runner = TwoStep()
+    a, _, spawned, logs = _agent(tmp_path, runner=runner, status_fetcher=lambda: ledger())
+    _, steps = a.run_once()
+
+    assert [s.ok for s in steps] == [True, False]
+    assert spawned == []
+    # 落位成功了，所以要记住"还欠一次启动"，否则鱼永远不开口
+    assert a.load_state()["needs_start"] is True
+
+
+def test_does_not_start_a_second_bot_on_the_same_machine(tmp_path):
+    runner = FakeRunner()
+    a, _, spawned, logs = _agent(
+        tmp_path,
+        runner=runner,
+        status_fetcher=lambda: ledger(consumed_by=ME),
+        port_probe=lambda: True,
+    )
+    decision, steps = a.run_once()
+    assert decision.kind == "idle"
+    assert spawned == []
+
+
+def test_boot_is_skipped_when_port_is_already_listening(tmp_path):
+    (tmp_path / "state.json").write_text(
+        json.dumps({"landed_generation": 6, "needs_start": True}), encoding="utf-8"
+    )
+    a, runner, spawned, _ = _agent(
+        tmp_path, port_probe=lambda: True, status_fetcher=lambda: ledger(generation=9)
+    )
+    decision, steps = a.run_once()
+    assert decision.kind == "start"
+    assert spawned == []
+    assert any("已经在跑" in s.detail for s in steps if s.name == "boot")
+    # 端口已经在听 = 它已经在说话，这笔债算还了
+    assert a.load_state()["needs_start"] is False
+
+
+def test_timeout_is_reported_not_raised(tmp_path):
+    runner = FakeRunner(raises=subprocess.TimeoutExpired(cmd="x", timeout=600))
+    a, _, spawned, _ = _agent(tmp_path, runner=runner, status_fetcher=lambda: ledger())
+    _, steps = a.run_once()
+    assert steps[0].ok is False
+    assert "超时" in steps[0].detail
+    assert spawned == []
+
+
+def test_spawn_failure_is_reported(tmp_path):
+    def bad_spawn(argv, log_path):
+        raise OSError("没有这个可执行文件")
+
+    a = agent.Agent(
+        settings=settings(),
+        state_path=tmp_path / "state.json",
+        runner=FakeRunner(),
+        port_probe=lambda: False,
+        spawner=bad_spawn,
+        log=lambda m: None,
+        status_fetcher=lambda: ledger(),
+    )
+    _, steps = a.run_once()
+    boot = [s for s in steps if s.name == "boot"][0]
+    assert boot.ok is False
+    assert "没有这个可执行文件" in boot.detail
+
+
+def test_state_survives_corrupt_file(tmp_path):
+    (tmp_path / "state.json").write_text("{不是 json", encoding="utf-8")
+    a, _, _, _ = _agent(tmp_path, status_fetcher=lambda: ledger())
+    assert a.load_state() == {}
+
+
+def test_run_forever_once_exits_after_one_round(tmp_path):
+    a, _, _, _ = _agent(tmp_path, status_fetcher=lambda: ledger(target="someone-else"))
+    assert a.run_forever(once=True) == 0
+
+
+# ---------------------------------------------------------------- bug #15
+
+
+class _GbkStream:
+    """一个只能打 ASCII 的假 stdout —— 模拟 Windows 的 GBK 控制台。"""
+
+    encoding = "gbk"
+
+    def __init__(self):
+        self.written = []
+
+    def write(self, text):
+        # 真的按 gbk 编一次：编不了就抛，和真控制台一模一样
+        text.encode("gbk")
+        self.written.append(text)
+
+    def flush(self):
+        pass
+
+
+def test_log_line_does_not_raise_on_gbk_console(monkeypatch):
+    """一行日志打不出来，绝不该杀死一个正在搬家的进程。
+
+    2026-11-14 真机上就是这一行把 agent 打死了（`\u2713 落位 gen-7`），
+    而它当时刚好处在「已经落位、还没启动」的中间态 —— 险些让鱼两边都不在。
+    """
+    fake = _GbkStream()
+    monkeypatch.setattr(agent.sys, "stdout", fake)
+
+    agent._log_line("  \u2713 落位 gen-7")  # 不抛就算过
+
+
+def test_log_line_still_writes_plain_ascii(monkeypatch):
+    fake = _GbkStream()
+    monkeypatch.setattr(agent.sys, "stdout", fake)
+
+    agent._log_line("landed gen-7")
+    assert any("landed gen-7" in w for w in fake.written)
+
+
+def test_setup_console_tolerates_streams_without_reconfigure(monkeypatch):
+    """`_setup_console()` 碰到的流可能没有 reconfigure（比如被重定向成文件对象）。"""
+
+    class _Bare:
+        def write(self, text):
+            pass
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(agent.sys, "stdout", _Bare())
+    monkeypatch.setattr(agent.sys, "stderr", _Bare())
+    agent._setup_console()  # 不抛即通过

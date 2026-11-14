@@ -1,0 +1,8 @@
+﻿name: astrbot_plugin_molt_loopback
+display_name: Molt 环回平台（仅验证用）
+author: molt
+version: 0.1.0
+repo: https://github.com/molt-dev/molt
+category: 工具
+astrbot_version: ">=4.24.0"
+description: 一个不连接任何外部服务的平台适配器，只用于验证 molt 的 drain / resume 完整往返。它永远不会被装到生产容器里。

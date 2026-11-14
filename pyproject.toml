@@ -1,0 +1,64 @@
+# molt / 蜕壳 —— 让一个已经养出人格的 AstrBot，从一台机器走进另一台机器。
+#
+# 这个文件存在的理由很具体：项目里到处是 `python -m molt.cli ...`，
+# 而人第一次上手最想知道的是「装什么、怎么跑」。`pip install -e .` 之后
+# 就能直接敲 `molt`，不必再记 `PYTHONPATH=. python3 -m molt.cli`。
+#
+# 两条不能动的约束，写在最前面免得后来的人改错：
+#   1. **运行时零依赖**。Warden 必须能在 NAS 宿主上裸跑（实测那台 UGREEN
+#      只有 python 3.10.7，没装任何第三方包）。所以 `dependencies = []`
+#      不是"暂时没写"，是设计。要加依赖先问一句：NAS 上装得上吗？
+#   2. `py-modules`/`packages` 只列 `molt`。仓库根下还有 `plugin/`（AstrBot
+#      侧插件）和 `tools/`（一次性脚本），它们**不是**本包的子模块，
+#      让 setuptools 自动发现它们会把一次 `pip install` 变成拷一堆临时脚本。
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "molt"
+version = "0.1.0"
+description = "让一个数字生命从一台机器，走进另一台机器；旧壳留下，魂走。"
+readme = "README.md"
+requires-python = ">=3.10"
+# Apache-2.0：与 PLAN.md 的选型一致。特别地，Coopanion 是 AGPL-3.0-only，
+# 与本项目互不兼容 —— 只能通过公开 API / 配置契约对接，绝不抄它的代码。
+# 用 SPDX 表达式（`license = "Apache-2.0"`）而不是旧的 `{ text = ... }`：
+# 旧写法会让 setuptools 每次构建都打印一条弃用警告，
+# 而"构建时有警告"是那种会训练人忽略输出的东西。
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "molt contributors" }]
+keywords = ["astrbot", "migration", "sqlite", "wake-on-lan", "handoff", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# 只有测试需要额外的东西。运行时（含 Warden）一个都不能有。
+dev = ["pytest>=8"]
+
+[project.scripts]
+molt = "molt.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/molt-dev/molt/blob/main/docs/ARCH.md"
+Source = "https://github.com/molt-dev/molt"
+
+[tool.setuptools]
+packages = ["molt"]
+
+[tool.pytest.ini_options]
+testpaths = ["molt/tests"]
+# `-q` 留给命令行；这里只固定"去哪里找测试"，免得在仓库根直接跑 pytest
+# 时把 plugin/ 和 tools/ 下的脚本也扫进来。

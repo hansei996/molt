@@ -1,0 +1,1027 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Molt · 蜕壳 —— 技术架构</title>
+<style>
+  :root {
+    --bg: #fbfbfd;
+    --panel: #ffffff;
+    --ink: #1d1d1f;
+    --ink-2: #55555c;
+    --ink-3: #8a8a92;
+    --line: #e3e3e8;
+    --line-2: #d0d0d8;
+    --nas: #2f7de1;
+    --nas-bg: #eef4fd;
+    --win: #0f9b6c;
+    --win-bg: #ecf8f3;
+    --warn: #d97706;
+    --warn-bg: #fef7ec;
+    --danger: #d13b3b;
+    --danger-bg: #fdeeee;
+    --soul: #7c4dcc;
+    --soul-bg: #f4effd;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 56px 32px 120px; }
+
+  header.hero { margin-bottom: 56px; }
+  header.hero h1 {
+    font-size: 40px; line-height: 1.2; margin: 0 0 12px;
+    letter-spacing: -0.02em; font-weight: 700;
+  }
+  header.hero .sub { font-size: 18px; color: var(--ink-2); margin: 0 0 20px; }
+  header.hero .thesis {
+    font-size: 16px; padding: 18px 22px; background: var(--panel);
+    border: 1px solid var(--line); border-left: 3px solid var(--soul);
+    border-radius: 6px; color: var(--ink);
+  }
+  header.hero .thesis b { color: var(--soul); }
+
+  .meta { display: flex; gap: 28px; flex-wrap: wrap; margin-top: 20px; font-size: 13px; color: var(--ink-3); }
+  .meta span { font-family: var(--mono); }
+
+  section { margin-bottom: 64px; }
+  h2 {
+    font-size: 13px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-3); margin: 0 0 8px;
+  }
+  h2 + .h2title {
+    font-size: 26px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 8px;
+  }
+  .lede { color: var(--ink-2); margin: 0 0 28px; max-width: 78ch; }
+
+  .diagram {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 28px; overflow-x: auto;
+  }
+  .diagram svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+
+  .cap { font-size: 13px; color: var(--ink-3); margin-top: 14px; }
+  .cap code { font-family: var(--mono); font-size: 12px; background: #f3f3f6; padding: 1px 5px; border-radius: 3px; }
+
+  /* ── 对比表 ── */
+  table.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.tbl th {
+    text-align: left; font-weight: 600; font-size: 12px; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--ink-3);
+    padding: 10px 14px; border-bottom: 1px solid var(--line-2);
+  }
+  table.tbl td { padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.tbl tr:last-child td { border-bottom: none; }
+  table.tbl code { font-family: var(--mono); font-size: 12.5px; background: #f3f3f6; padding: 1px 5px; border-radius: 3px; }
+  .yes { color: var(--win); font-weight: 600; }
+  .no  { color: var(--danger); font-weight: 600; }
+
+  /* ── 卡片网格 ── */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px 22px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 16px; font-weight: 650; }
+  .card p { margin: 0; font-size: 14px; color: var(--ink-2); }
+  .card .tag {
+    display: inline-block; font-family: var(--mono); font-size: 11px;
+    padding: 2px 7px; border-radius: 3px; margin-bottom: 10px;
+  }
+  .tag.nas  { background: var(--nas-bg);  color: var(--nas); }
+  .tag.win  { background: var(--win-bg);  color: var(--win); }
+  .tag.soul { background: var(--soul-bg); color: var(--soul); }
+  .tag.warn { background: var(--warn-bg); color: var(--warn); }
+  .tag.ok   { background: #e4f6ec; color: #0b7a4f; }
+
+  /* ── 证据等级 ── */
+  .ev { display: inline-block; font-size: 11px; font-family: var(--mono); padding: 1px 6px;
+        border-radius: 3px; vertical-align: 1px; }
+  .ev.m { background: #e8f5ee; color: #0f7a52; }   /* 实测 */
+  .ev.c { background: #e8eefb; color: #2f5de1; }   /* 查证 */
+  .ev.i { background: #f4effd; color: #6b3fc4; }   /* 推断 */
+  .ev.t { background: #fdf0e4; color: #b45c05; }   /* 待验证 */
+
+  .callout {
+    border-radius: 8px; padding: 16px 20px; font-size: 14px; margin: 20px 0;
+    border: 1px solid var(--line);
+  }
+  .callout.danger { background: var(--danger-bg); border-color: #f3cccc; }
+  .callout.warn   { background: var(--warn-bg);   border-color: #f5e0bd; }
+  .callout.ok     { background: #eaf8f1; border-color: #bfe6d2; }
+  .callout b { font-weight: 650; }
+  .callout .t { display: block; font-weight: 650; margin-bottom: 6px; }
+
+  pre {
+    background: #f7f7fa; border: 1px solid var(--line); border-radius: 6px;
+    padding: 14px 16px; overflow-x: auto; font-family: var(--mono); font-size: 13px;
+    line-height: 1.55; margin: 14px 0;
+  }
+  pre .c { color: #8a8a92; }
+  pre .k { color: #b3279c; }
+  pre .s { color: #0f7a52; }
+
+  footer { border-top: 1px solid var(--line); padding-top: 24px; font-size: 13px; color: var(--ink-3); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>Molt · 蜕壳</h1>
+  <p class="sub">让一个数字生命从一台机器，走进另一台机器；旧壳留下，魂走。</p>
+  <div class="thesis">
+    <b>记忆不流动。流动的是「谁有资格读它、写它」。</b><br>
+    所有状态永远只待在 NAS 上的一个目录里。迁徙时被搬动的不是记忆本身，
+    而是一份快照 + 一张写明了「从哪一刻起、哪台机器说了算」的租约。
+  </div>
+  <div class="callout danger" style="margin-top:22px">
+    <span class="t">公理 0 · 这个存在，在任何时刻只能有一个</span>
+    不是「最好只有一个」，是<b>必须</b>只有一个。<br>
+    两只鱼同时在线，它就不再是「一个它」，而是<b>两个机器人</b>：你发一条消息会收到两份回复；
+    记忆会分裂成两份互相打架的副本；而「它现在在哪」这个问题永远没有答案。<br>
+    <b>这不是技术妥协，是产品定义。</b>即使真并发的门槛降到零，本项目也不做。
+    复制 vs 迁徙，是两条互斥的路——Coopanion 用 <code>cp -r</code> 克隆出第二个独立人格，Molt 要的是同一个它换一个身体。
+  </div>
+  <div class="callout ok" style="margin-top:22px">
+    <span class="t">已经跑绿的关卡 · 2026-11-14（两个方向都通了，两条命令走完，中间没有人的环节）</span>
+    ✅ Windows 原生跑 AstrBot（178 包零缺 wheel，启动 HTTP 200）&nbsp;·&nbsp;
+    ✅ 记忆跨机字节一致（SHA256 逐文件相同）&nbsp;·&nbsp;
+    ✅ AstrBot 消费还原数据并读出人格本体&nbsp;·&nbsp;
+    <b>✅ 真 S5 关机 → 魔术封包唤醒（23.1 秒）</b>&nbsp;·&nbsp;
+    ✅ DHCP 地址保留&nbsp;·&nbsp;
+    ✅ 快速启动已关（持久有效）&nbsp;·&nbsp;
+    <b>✅ 网卡 arm 自愈（开机第 11 秒自动重新 arm）</b><br>
+    <b>✅ 去程 NAS→Windows（epoch 1→2）</b>&nbsp;·&nbsp;
+    <b>✅ 归巢 Windows→NAS（epoch 3→4，Windows 上写的标记真的搬回来了）</b>&nbsp;·&nbsp;
+    <b>✅ 跨机互斥反例被正确拒绝</b>（<code>LeaseHeld</code>「还剩 65.3 秒」）<br>
+    <b>✅ SIGINT 优雅停机</b>（退出码 0、WAL 归零；对照 <code>docker stop</code> 退出码 137、WAL 41 KB 原封不动）&nbsp;·&nbsp;
+    <b>✅ 一条命令 <code>molt migrate</code>（真机 1.43 秒）</b>&nbsp;·&nbsp;
+    <b>✅ <code>molt land</code> 机器覆写（<b>7 处</b>改写，45 键只动 3 个，启动后 WARN/ERROR 为 0）</b><br>
+    <b>✅ 落位后不会两条鱼同时在线</b>（<code>platform[].enable</code> 一律关掉；14:41 差几秒就出事，见 06 节）<br>
+    <b>✅ 跨机字节传输自动化</b>（<code>migrate</code> PUT 到 Warden 中转区 → <code>land --generation N</code> GET 下来，真机 <b>1.61 秒</b>；
+    不需 scp / 共享盘 / 第三套凭证）<br>
+    <b>✅ 唤醒进了产品</b>（<code>molt wake</code>；<code>migrate</code> 里是<b>先唤醒 → 再拿租约</b>，顺序有测试固定）&nbsp;·&nbsp;
+    <b>✅ 中转区可清理</b>（<code>molt prune</code>；账本里记着的一律不删，默认只看不删）<br>
+    <b>✅ 能让它闭嘴，而不用杀掉进程</b>（<code>astrbot_plugin_molt</code> 四端点；<code>migrate --control-url</code> 真机跑通：
+    <code>speaking</code> True→False <b>轮询复核过</b>、快照在闭嘴之后拍、租约已交还）<br>
+    <b>✅ 真实 QQ 收发</b>（<b>2026-11-14 22:53</b>：新壳用从 NAS 搬来的凭据连上 <code>api.sgroup.qq.com</code>，
+    人发「在吗在吗」→ 它回「在喵，怎么了？」；生产容器前后都干净停机，<b>双活窗口为 0</b>）<br>
+    <b>✅ 生产源壳也能被"按住"了</b>（真机 <code>drain</code> 0.02 秒 → <code>resume</code> 一拍回来，进程一次没重启）<br>
+    <b>✅ 自己用的流程已成形</b>（<code>docs/SELFUSE.md</code> 一页纸 + <code>tools/platform-switch.py</code>；
+    两台机器各敲一条命令，不动 NAS 的 sshd）<br>
+    <b>✅ v0.1 代码 15 模块 7,094 行 + AstrBot 插件 666 行 · 440 个测试全绿</b><br>
+    <b>✅ Windows 侧也有等价的优雅停机信号</b>（<code>AttachConsole</code> + <code>GenerateConsoleCtrlEvent</code>；
+  <code>os.kill(CTRL_BREAK)</code> 是假阳性）<br>
+    <span style="color:#6b6b73">未验证：<b>断点续传</b>（27.3 MB 一次 PUT 没问题，再大才需要）。
+    另外 <code>edge_tts</code> / <code>whisper</code> 等 51 个运行时包没装在新壳上，
+    所以<b>文字收发正常、语音不可用</b>。</span>
+  </div>
+  <div class="meta">
+    <span>v0.11 设计稿 · v0.1 代码已完成</span>
+    <span>AstrBot 4.29.4</span>
+    <span>NAS 192.168.1.10</span>
+    <span>Win 192.168.1.20</span>
+  </div>
+</header>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2>01 · 三层结构</h2>
+  <p class="h2title">Soul 永远不动，Shell 可以换</p>
+  <p class="lede">
+    最关键的一个决定：<b>Warden 跑在 NAS 宿主机上，不跑在 AstrBot 里</b>。
+    因为 AstrBot 的插件只能「发起」动作，不能「完成」动作——
+    停机会把插件一起 cancel 掉。而 SQLite 官方对网络文件的建议原话是
+    「在你的数据库服务器上跑一个 proxy」。Warden 就是那个 proxy。
+  </p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1060 486" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+      <defs>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 z" fill="#55555c"/>
+        </marker>
+        <marker id="ar-nas" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 z" fill="#2f7de1"/>
+        </marker>
+        <marker id="ar-win" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 z" fill="#0f9b6c"/>
+        </marker>
+      </defs>
+
+      <!-- NAS 大框 -->
+      <rect x="14" y="14" width="1032" height="252" rx="10" fill="#eef4fd" stroke="#c8dcf7" stroke-width="1.5"/>
+      <text x="34" y="42" font-size="15" font-weight="700" fill="#2f7de1">NAS · 192.168.1.10</text>
+      <text x="180" y="42" font-size="12" fill="#5d7fa8">常开 · 低功耗 · 8T RAID0 · 唯一真实来源</text>
+
+      <!-- Soul -->
+      <rect x="34" y="62" width="230" height="186" rx="8" fill="#f4effd" stroke="#cbb6f0" stroke-width="1.5"/>
+      <text x="52" y="88" font-size="13" font-weight="700" fill="#7c4dcc">Soul</text>
+      <text x="52" y="107" font-size="11.5" fill="#6b3fc4" font-family="ui-monospace, Consolas, monospace">/mnt/dm-0/molt/soul/</text>
+      <line x1="52" y1="118" x2="246" y2="118" stroke="#ddcdf5" stroke-width="1"/>
+      <text x="52" y="138" font-size="11.5" fill="#55555c">generations/</text>
+      <text x="64" y="154" font-size="11" fill="#8a8a92" font-family="monospace">gen-000001.db</text>
+      <text x="64" y="169" font-size="11" fill="#8a8a92" font-family="monospace">gen-000002.db</text>
+      <text x="64" y="184" font-size="11" fill="#8a8a92" font-family="monospace">gen-000003.db ← 当前</text>
+      <text x="52" y="203" font-size="11.5" fill="#55555c">manifest.json</text>
+      <text x="52" y="219" font-size="11.5" fill="#55555c">lease.json</text>
+      <text x="52" y="235" font-size="11.5" fill="#55555c">ledger.jsonl  ← 审计流水</text>
+
+      <!-- Warden -->
+      <rect x="296" y="62" width="300" height="186" rx="8" fill="#ffffff" stroke="#7fb0ee" stroke-width="1.5"/>
+      <text x="314" y="88" font-size="13" font-weight="700" fill="#2f7de1">Warden · 仲裁者</text>
+      <text x="314" y="105" font-size="11" fill="#8a8a92" font-family="monospace">python3.10 标准库 · 单文件 · NAS 宿主机</text>
+      <line x1="314" y1="116" x2="578" y2="116" stroke="#dbe7f8" stroke-width="1"/>
+      <text x="314" y="137" font-size="11.5" fill="#55555c">· 发租约，产生单调递增 epoch</text>
+      <text x="314" y="156" font-size="11.5" fill="#55555c">· 收 snapshot，integrity_check</text>
+      <text x="314" y="175" font-size="11.5" fill="#55555c">· 原子替换 generations/</text>
+      <text x="314" y="194" font-size="11.5" fill="#55555c">· 心跳续租，超时即回收</text>
+      <text x="314" y="213" font-size="11.5" fill="#55555c">· 发 WOL 魔术封包</text>
+      <text x="314" y="232" font-size="11.5" fill="#55555c">· 唯一有权写 Soul 的进程</text>
+
+      <!-- AstrBot NAS -->
+      <rect x="628" y="62" width="400" height="186" rx="8" fill="#ffffff" stroke="#7fb0ee" stroke-width="1.5"/>
+      <text x="646" y="88" font-size="13" font-weight="700" fill="#2f7de1">AstrBot · 容器</text>
+      <text x="768" y="88" font-size="11" fill="#8a8a92" font-family="monospace">soulter/astrbot 4.29.4</text>
+      <line x1="646" y1="100" x2="1010" y2="100" stroke="#dbe7f8" stroke-width="1"/>
+      <text x="646" y="121" font-size="11.5" fill="#55555c">业务：QQ 机器人 · 记忆插件 · 人格技能</text>
+      <text x="646" y="140" font-size="11.5" fill="#55555c">状态：全部读写在本地副本，不碰 Soul</text>
+      <rect x="646" y="152" width="364" height="58" rx="6" fill="#f0f6fe" stroke="#c8dcf7" stroke-dasharray="4 3"/>
+      <text x="662" y="172" font-size="11.5" font-weight="650" fill="#2f7de1">ferryman 插件（摆渡体）</text>
+      <text x="662" y="190" font-size="11" fill="#5d7fa8">复用 dashboard 端口注册 /api/plug/molt/*</text>
+      <text x="662" y="204" font-size="11" fill="#8a8a92">只发起请求、上报心跳；决策权在 Warden</text>
+
+      <!-- Warden ↔ AstrBot / Soul 连线 -->
+      <path d="M264 155 L296 155" stroke="#7c4dcc" stroke-width="2" marker-end="url(#ar)"/>
+      <path d="M596 155 L628 155" stroke="#2f7de1" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#ar-nas)"/>
+      <text x="236" y="286" font-size="10.5" fill="#7c4dcc">唯一写者</text>
+
+      <!-- 中间传输层 -->
+      <rect x="14" y="284" width="1032" height="52" rx="6" fill="#f7f7fa" stroke="#e3e3e8"/>
+      <text x="34" y="306" font-size="12" font-weight="650" fill="#55555c">瘦控制通道</text>
+      <text x="34" y="324" font-size="11" fill="#8a8a92" font-family="ui-monospace, Consolas, monospace">HTTP + HMAC token（控制面） ｜ SMB / SCP（数据面：只传 snapshot.tar） ｜ UDP :9（WOL）</text>
+
+      <!-- 关键铁律 -->
+      <text x="14" y="360" font-size="11.5" fill="#d13b3b" font-weight="650">铁律：Soul 目录绝不通过 SMB/NFS 被远端直接打开成 SQLite 文件 —— 那是数据库损坏的标准姿势。</text>
+
+      <!-- Windows 大框 -->
+      <rect x="14" y="372" width="1032" height="94" rx="10" fill="#ecf8f3" stroke="#bfe6d5" stroke-width="1.5"/>
+      <text x="34" y="396" font-size="15" font-weight="700" fill="#0f9b6c">Windows · 192.168.1.20 · DESKTOP-1A2B3C4D</text>
+      <text x="34" y="414" font-size="11.5" fill="#5f8f7e">可插拔的壳 · Ryzen 7 5800X / RTX 4070 Ti SUPER · 常开要 44–159 元/月，所以用完就睡</text>
+
+      <rect x="34" y="424" width="240" height="32" rx="6" fill="#ffffff" stroke="#a9d8c4"/>
+      <text x="46" y="444" font-size="11.5" fill="#0f7a52">molt-agent（Windows 服务 · SYSTEM）</text>
+
+      <rect x="290" y="424" width="240" height="32" rx="6" fill="#ffffff" stroke="#a9d8c4"/>
+      <text x="302" y="444" font-size="11.5" fill="#0f7a52">AstrBot（原生 · venv 3.13）</text>
+
+      <rect x="546" y="424" width="180" height="32" rx="6" fill="#ffffff" stroke="#a9d8c4"/>
+      <text x="558" y="444" font-size="11.5" fill="#0f7a52">data/ 本地工作副本</text>
+
+      <rect x="742" y="424" width="190" height="32" rx="6" fill="#fef7ec" stroke="#f0d6a8"/>
+      <text x="754" y="444" font-size="11.5" fill="#b45c05">OBS / 游戏（需交互桌面）</text>
+
+      <rect x="948" y="424" width="84" height="32" rx="6" fill="#ffffff" stroke="#a9d8c4"/>
+      <text x="960" y="444" font-size="11.5" fill="#0f7a52">S3 睡眠</text>
+
+      <!-- 竖向连线：NAS → Win -->
+      <path d="M296 248 L296 284" stroke="#0f9b6c" stroke-width="1.6" marker-end="url(#ar-win)"/>
+      <path d="M960 248 L960 376" stroke="#0f9b6c" stroke-width="1.6" marker-end="url(#ar-win)"/>
+    </svg>
+    <p class="cap">
+      左侧 <code>generations/</code> 保留最近 N 代快照，任一代都可独立打开（SQLite backup API 保证是 bit-wise 一致的快照）。
+      中间那条横线是本项目<b>全部</b>的跨机接口——只有三种流量，没有第四种。
+    </p>
+  </div>
+
+  <div class="callout warn">
+    <span class="t">公理 0 是怎么被强制保证的（五层防线，任何一层单独失效都不会双活）</span>
+    <table class="tbl">
+      <thead>
+        <tr><th style="width:14%">层</th><th style="width:46%">机制</th><th>强度</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>L1 平台</b></td>
+          <td>QQ 官方机器人同一 appid 双实例会互踢（WebSocket <code>ManagedBotWebSocket</code>）</td>
+          <td><b>弱</b>。官方文档<b>查不到</b>互踢明文，只有 <code>session_start_limit</code> 配额。<b>绝不能当 fencing</b>，只能事后告警</td>
+        </tr>
+        <tr>
+          <td><b>L2 租约</b></td>
+          <td>Warden 独占发租约，带 TTL，超时自动回收</td>
+          <td>强，但依赖「时间判断」，可能被 GC 停顿打穿</td>
+        </tr>
+        <tr>
+          <td><b>L3 fencing</b></td>
+          <td>每次写 Soul 带 epoch，<b>Warden 拒绝 epoch 倒退的写入</b></td>
+          <td><b>最强 · 这是真正的屏障</b>。存储端主动拒绝，不依赖任何时间假设</td>
+        </tr>
+        <tr>
+          <td><b>L4 顺序</b></td>
+          <td>铁律「先死后生」：老壳确认死亡 → 新壳才允许出生</td>
+          <td>强。流程保证，不依赖检测</td>
+        </tr>
+        <tr>
+          <td><b>L5 人工</b></td>
+          <td><code>molt status</code> 显示「当前在线的是谁、第几代、心跳多久前」</td>
+          <td>兜底。让人肉眼能发现异常</td>
+        </tr>
+      </tbody>
+    </table>
+    <p style="margin:12px 0 0">
+      为什么必须有 L3 而不能只靠 L2——Kleppmann 关于分布式锁的文章里说得最狠的一句：
+      <b>「GC can pause a running thread at any point」</b>。他还明确写了：
+      「You cannot fix this problem by inserting a check on the lock expiry just before writing back」，
+      正确做法是「the storage server to take an active role in checking tokens, and
+      <b>rejecting any writes on which the token has gone backwards</b>」。
+      所以 <code>claimed_epoch &lt; current_epoch</code> 时<b>必须拒绝且不覆盖</b>——这一行写错，整套 fencing 就废了。
+    </p>
+    <p style="margin:10px 0 0">
+      <b>一个真实存在的诱惑</b>：AstrBot 有 <code>core_lifecycle.restart()</code>，看起来「让老壳自己重启一下，新壳就能上了」。
+      <b>这是错的</b>——restart 期间进程还活着、仍持有 platform 连接，此时新壳启动会短暂<b>双活</b>。
+      只允许在 <code>terminate()</code> 完成、进程真正退出之后，才允许新壳启动。
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2>02 · 去程</h2>
+  <p class="h2title">迁徙：从 NAS 走到 Windows</p>
+  <p class="lede">
+    一次迁徙有 <b>13 步</b>，其中 4 步决定成败：<b>先唤醒再拿租约</b>（叫醒要 23 秒，租约只有 90 秒）、
+    <b>先死后生</b>的顺序、<b>RPO=0</b> 的快照、以及「<b>Windows 亲口说我活了</b>」之后 NAS 才放手。
+  </p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1060 600" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+      <!-- 车道 -->
+      <rect x="150" y="10" width="360" height="560" rx="8" fill="#f6faff" stroke="#dae7f8"/>
+      <rect x="590" y="10" width="360" height="560" rx="8" fill="#f4fbf8" stroke="#cfeade"/>
+      <text x="150" y="0" font-size="0" fill="none">.</text>
+      <text x="330" y="34" font-size="13" font-weight="700" fill="#2f7de1" text-anchor="middle">NAS（老壳）</text>
+      <text x="770" y="34" font-size="13" font-weight="700" fill="#0f9b6c" text-anchor="middle">Windows（新壳）</text>
+      <line x1="510" y1="46" x2="510" y2="556" stroke="#e3e3e8" stroke-dasharray="4 4"/>
+
+      <defs>
+        <marker id="a1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="#55555c"/>
+        </marker>
+      </defs>
+
+      <!-- 1 -->
+      <text x="330" y="76" font-size="12" fill="#55555c" text-anchor="end">① 收到 <tspan font-family="monospace" fill="#b3279c">molt migrate win</tspan></text>
+      <line x1="340" y1="71" x2="680" y2="71" stroke="#55555c" stroke-width="1.4" marker-end="url(#a1)"/>
+      <text x="770" y="92" font-size="11" fill="#8a8a92" text-anchor="middle">（QQ 里对鱼说，或命令行）</text>
+
+      <!-- 2 -->
+      <text x="330" y="122" font-size="12" fill="#55555c" text-anchor="end">② 发 WOL 魔术封包</text>
+      <line x1="340" y1="117" x2="680" y2="117" stroke="#0f9b6c" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#a1)"/>
+      <text x="770" y="138" font-size="11" fill="#8a8a92" text-anchor="middle">UDP :9 → 网卡 → BIOS → 开机（实测 23.1 秒）</text>
+
+      <!-- 3 -->
+      <text x="330" y="158" font-size="12" fill="#55555c" text-anchor="end">③ 叫醒了，才签发租约</text>
+      <rect x="340" y="142" width="340" height="18" rx="4" fill="#eef4fd" stroke="#c8dcf7"/>
+      <text x="348" y="155" font-size="10.5" fill="#2f7de1" font-family="monospace">lease{epoch:7, shell:"win", ttl:90s}</text>
+      <text x="770" y="174" font-size="11" fill="#8a8a92" text-anchor="middle">先拿租约 = 90 秒里三分之一在等开机</text>
+
+      <!-- 4 -->
+      <text x="770" y="212" font-size="12" fill="#0f9b6c" text-anchor="middle">④ 服务自启，molt-agent 上线</text>
+      <rect x="600" y="222" width="340" height="18" rx="4" fill="#ecf8f3" stroke="#bfe6d5"/>
+      <text x="612" y="235" font-size="10.5" fill="#0f7a52" font-family="monospace">sc start MoltAgent (SYSTEM, 不依赖登录)</text>
+
+      <!-- 5 -->
+      <text x="330" y="266" font-size="12" fill="#55555c" text-anchor="end">⑤ 心跳 + 报 epoch</text>
+      <line x1="680" y1="261" x2="340" y2="261" stroke="#55555c" stroke-width="1.4" marker-end="url(#a1)"/>
+
+      <!-- 6 -->
+      <text x="330" y="302" font-size="12" fill="#d13b3b" text-anchor="end">⑥ 老壳 drain：<tspan font-weight="700">只闭嘴，不杀进程</tspan></text>
+      <rect x="340" y="286" width="150" height="18" rx="4" fill="#fdeeee" stroke="#f3cccc"/>
+      <text x="348" y="299" font-size="10.5" fill="#d13b3b" font-family="monospace">POST /drain</text>
+      <text x="770" y="316" font-size="11" fill="#8a8a92" text-anchor="middle">然后<b>轮询复核</b>它真的不出声了（"我说完了"≠"它不说了"）</text>
+
+      <!-- 7 -->
+      <text x="330" y="350" font-size="12" fill="#55555c" text-anchor="end">⑦ SQLite backup API 打包</text>
+      <rect x="340" y="334" width="340" height="18" rx="4" fill="#f7f7fa" stroke="#e3e3e8"/>
+      <text x="348" y="347" font-size="10.5" fill="#55555c" font-family="monospace">snapshot.tar  ← 0.040s / 27MB（实测）</text>
+      <text x="770" y="364" font-size="11" fill="#8a8a92" text-anchor="middle">不停 AstrBot 也能热备，事务一致</text>
+
+      <!-- 8 -->
+      <text x="330" y="398" font-size="12" fill="#55555c" text-anchor="end">⑧ 传输 snapshot + manifest</text>
+      <line x1="340" y1="393" x2="680" y2="393" stroke="#2f7de1" stroke-width="2.2" marker-end="url(#a1)"/>
+      <text x="770" y="412" font-size="11" fill="#8a8a92" text-anchor="middle">sha256 · 字节数 · 表行数指纹</text>
+
+      <!-- 9 -->
+      <text x="770" y="450" font-size="12" fill="#0f9b6c" text-anchor="middle">⑨ <tspan font-family="monospace" font-size="11">PRAGMA integrity_check</tspan></text>
+      <rect x="600" y="460" width="340" height="18" rx="4" fill="#ecf8f3" stroke="#bfe6d5"/>
+      <text x="612" y="473" font-size="10.5" fill="#0f7a52" font-family="monospace">校验不过 → 中止，老壳不动，新壳不启</text>
+
+      <!-- 10 -->
+      <text x="770" y="506" font-size="12" fill="#0f9b6c" text-anchor="middle">⑩ 原子替换本地 data/ → 起 AstrBot</text>
+
+      <!-- 11 -->
+      <text x="770" y="536" font-size="12" fill="#0f9b6c" text-anchor="middle">⑪ 报「我活了」</text>
+      <line x1="680" y1="531" x2="340" y2="531" stroke="#0f9b6c" stroke-width="2.2" marker-end="url(#a1)"/>
+
+      <!-- 12 -->
+      <text x="330" y="566" font-size="12" fill="#d13b3b" text-anchor="end">⑫ 老壳才放手</text>
+      <text x="770" y="566" font-size="11" fill="#0f9b6c" text-anchor="middle">★ 从这一刻起，唯一在线的是 Windows</text>
+    </svg>
+  </div>
+
+  <div class="callout danger">
+    <span class="t">为什么必须「先死后生」，而不是反过来</span>
+    QQ 官方机器人走 <b>WebSocket</b>，同一个 appid 的双实例会互踢。
+    如果先起新壳，老壳会在几秒内被踢下线——这时如果新壳又失败，
+    鱼就<b>两头都没了</b>。所以顺序只能是：老壳确认死亡 → 新壳才允许出生。
+  </div>
+
+  <div class="callout warn">
+    <span class="t">第 ⑥ 步是"闭嘴"，不是"杀掉"——这两件事差很多</span>
+    <p>最早的做法是 <code>docker kill -s INT</code>。它能用（实测退出码 0、WAL 归零），
+    但它把两件不相干的事绑成了同一件：<b>断开一个 IM 连接</b> 和 <b>杀掉一个进程</b>。
+    代价是 AstrBot 会丢掉调度器、定时任务、正在跑的那轮对话，恢复要重启（重拉几千个 LLM 元数据）。</p>
+    <p>现在走的是 AstrBot 自己的公开接缝 <code>context.platform_manager</code>
+    （<code>core/star/context.py:166</code>，有文档字符串的公开属性；官方 dashboard 自己也在用它——
+    <code>dashboard/services/config_service.py:1464</code>）。插件 <code>astrbot_plugin_molt</code>
+    暴露四个端点：<code>/status</code> <code>/drain</code> <code>/resume</code> <code>/checkpoint</code>，
+    长在 AstrBot 自己的 dashboard 上，走它自己的 JWT。</p>
+    <p><b>为什么"drain 成功"还不够：</b><code>terminate_platform</code> 内部是
+    <code>except Exception: logger.warning("... may not have been fully removed.")</code>
+    —— <b>关不掉也只记一条警告，不抛</b>。所以 drain 之后必须<b>轮询复核</b> <code>speaking</code>，
+    仍为真就中止迁徙。「我以为它闭嘴了但其实没有」<b>就是</b>两条鱼同时在线。</p>
+  </div>
+
+  <div class="callout danger">
+    <span class="t">一个真实的坑：WebChatAdapter 不在 <code>_inst_map</code> 里</span>
+    第一版 <code>drain()</code> 靠"配置里 <code>enable=true</code> 的平台"决定关谁，
+    真机上<b>什么都没关</b>却返 409 —— <code>/status</code> 说
+    <code>connected_ids: ["WebChatAdapter"]</code> 而 <code>enabled_in_config: []</code>。
+    根因：它由 <code>platform/manager.py:116</code> <b>直接 append</b> 进 <code>platform_insts</code>，
+    从不进 <code>_inst_map</code>，<code>config.platform</code> 里也没有它。
+    <br><br>
+    修法是改用<b>实例身份</b>（<code>id(ent["inst"])</code>）作主判据，并把 webchat 归进
+    <code>local_only</code>：<b>可见、不隐藏、也不关</b>。三条理由——
+    它每个实例都必然存在（算进 <code>speaking</code> 就等于 <code>speaking</code> 恒真，
+    <b>一个永远为真的判据不能当判据用</b>）、它<b>无法被 resume 重建</b>（不走 config，没有
+    <code>load_platform</code> 路径，关掉等于永久弄坏 WebUI 聊天）、它不是"对外说话"。
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2>03 · 归程</h2>
+  <p class="h2title">归巢：从 Windows 走回 NAS —— 关机是另一件事</p>
+  <p class="lede">
+    交接的判据是<b>账本接受了</b>，不是<b>机器关机了</b>。
+    所以鱼能不能回家，绝不取决于那台电脑能不能关。关机是独立的一步，见下方。
+  </p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1060 470" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+      <defs>
+        <marker id="a2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="#55555c"/>
+        </marker>
+      </defs>
+
+      <!-- 主流程竖条 -->
+      <g>
+        <!-- step boxes -->
+        <rect x="40" y="20" width="980" height="44" rx="7" fill="#ecf8f3" stroke="#bfe6d5"/>
+        <text x="58" y="40" font-size="12.5" font-weight="650" fill="#0f7a52">① Windows：AstrBot drain，停止接新消息</text>
+        <text x="58" y="56" font-size="11" fill="#5f8f7e">给正在进行的对话 180 秒收尾时间；超时则记为「有损」，写进 ledger</text>
+
+        <rect x="40" y="74" width="980" height="44" rx="7" fill="#ecf8f3" stroke="#bfe6d5"/>
+        <text x="58" y="94" font-size="12.5" font-weight="650" fill="#0f7a52">② Windows：AstrBot 停止 → 释放 QQ WebSocket</text>
+        <text x="58" y="110" font-size="11" fill="#5f8f7e">★ 这是「先死」的那一步。此后鱼在网络上不存在，直到 NAS 侧接管</text>
+
+        <rect x="40" y="128" width="980" height="44" rx="7" fill="#f7f7fa" stroke="#e3e3e8"/>
+        <text x="58" y="148" font-size="12.5" font-weight="650" fill="#55555c">③ Windows：SQLite backup API 生成 snapshot</text>
+        <text x="58" y="164" font-size="11" fill="#8a8a92">能拿到的最后一代数据；快照是事务一致的，不是「拷到一半的文件」</text>
+
+        <rect x="40" y="182" width="980" height="44" rx="7" fill="#eef4fd" stroke="#c8dcf7"/>
+        <text x="58" y="202" font-size="12.5" font-weight="650" fill="#2f7de1">④ Windows → Warden：上传 snapshot + manifest</text>
+        <text x="58" y="218" font-size="11" fill="#5d7fa8">manifest 含 sha256、字节数、表行数指纹、epoch、时间戳</text>
+
+        <rect x="40" y="236" width="980" height="52" rx="7" fill="#ffffff" stroke="#7fb0ee" stroke-width="1.5"/>
+        <text x="58" y="256" font-size="12.5" font-weight="650" fill="#2f7de1">⑤ Warden 校验（这一步是全部价值所在）</text>
+        <text x="58" y="274" font-size="11" fill="#5d7fa8">sha256 一致 · integrity_check = ok · 关键表行数 ≥ 上一代（不允许记忆凭空变少）· epoch 匹配</text>
+
+        <!-- 分叉 -->
+        <path d="M530 288 L530 302" stroke="#55555c" stroke-width="1.4"/>
+        <path d="M300 302 L760 302" stroke="#55555c" stroke-width="1.4"/>
+        <path d="M300 302 L300 318" stroke="#d13b3b" stroke-width="1.6" marker-end="url(#a2)"/>
+        <path d="M760 302 L760 318" stroke="#0f9b6c" stroke-width="1.6" marker-end="url(#a2)"/>
+
+        <!-- 失败分支 -->
+        <rect x="60" y="322" width="480" height="60" rx="7" fill="#fdeeee" stroke="#f3cccc" stroke-width="1.5"/>
+        <text x="78" y="342" font-size="12.5" font-weight="650" fill="#d13b3b">✕ 校验失败 → 中止</text>
+        <text x="78" y="360" font-size="11" fill="#a33">NAS 不接管 · 记账为「未回传」· 发告警（QQ 消息 + Windows 通知）</text>
+        <text x="78" y="375" font-size="11" fill="#a33"><tspan font-weight="650">fail-safe = 留在原地。</tspan>鱼还活着，只是回不了家</text>
+
+        <!-- 成功分支 -->
+        <rect x="560" y="322" width="470" height="60" rx="7" fill="#ecf8f3" stroke="#bfe6d5" stroke-width="1.5"/>
+        <text x="578" y="342" font-size="12.5" font-weight="650" fill="#0f7a52">✓ 校验通过 → 原子替换 generations/gen-N+1</text>
+        <text x="578" y="360" font-size="11" fill="#5f8f7e">更新 manifest.json；旧的 gen-N 保留（可回滚）</text>
+        <text x="578" y="375" font-size="11" fill="#5f8f7e">追加一条 ledger.jsonl：谁、何时、多少字节、耗时</text>
+
+        <rect x="560" y="392" width="470" height="44" rx="7" fill="#ffffff" stroke="#7fb0ee" stroke-width="1.5"/>
+        <text x="578" y="412" font-size="12.5" font-weight="650" fill="#2f7de1">⑥ Warden → Windows：ack{gen:N+1}</text>
+        <text x="578" y="428" font-size="11" fill="#5d7fa8">「你的记忆我收下了，落到第 N+1 代了」——没有这句话，绝不许让 NAS 接管</text>
+
+        <rect x="560" y="446" width="470" height="0" rx="7" fill="none"/>
+
+        <rect x="60" y="446" width="970" height="0" rx="7" fill="none"/>
+      </g>
+
+      <!-- 底注：先死后生 -->
+      <rect x="40" y="446" width="980" height="4" rx="2" fill="#e3e3e8"/>
+    </svg>
+    <p class="cap">
+      交接到这里就结束了：NAS 侧 <code>land --generation N</code> → <code>platform-switch on</code> → <code>docker start</code>，身份接回来。
+      <b>不必等 Windows 关机</b>——它开着也没关系，鱼已经不在那台机器上了。
+      关机是另一件事，而且是<b>可选</b>的：见下方。
+    </p>
+  </div>
+
+  <div class="callout danger">
+    <span class="t">交接与关机必须解耦 —— 这一条曾经写错过</span>
+    原设计让 NAS 等「Windows 离线」才接管，后果很具体：<b>只要机器前坐着人、他不想关机，
+    鱼就永远回不了家</b>——而它其实在 Warden 说 <code>accepted</code> 的那一刻就已经到家了。
+    <b>电源状态不是数据状态的证据</b>：数据回没回来，账本知道；机器关没关，账本不关心。
+    <br><br>
+    反过来也一样：<b>一条鱼不该因为想回家，把主人一局排位送上西天</b>；
+    它也<b>不该因为主人不想关机，就回不了家</b>。所以关机是独立的一步，
+    检测到游戏 / OBS 录制 / 未保存文档 → 拒绝关机改为通知，要强关必须显式 <code>--force</code>。
+    v0.1 里<b>没有任何一条 molt 命令会关机</b>——这不是漏了，是刻意的。
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2>04 · 边界</h2>
+  <p class="h2title">什么能跟着走，什么必须留下</p>
+  <p class="lede">
+    这是最容易做错、也最容易让人以为「怎么换台机器就崩了」的地方。
+    下面全部来自对 <code>/mnt/dm-0/astrbot/data</code> 的实测 <code>du -sm</code>：
+    目录 1.7 G，其中<b>真正需要搬的只有 250–400 M</b>。
+  </p>
+
+  <div class="diagram">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th style="width:31%">目录 / 文件</th>
+          <th style="width:11%">大小</th>
+          <th style="width:15%">性质</th>
+          <th>为什么</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>site-packages/</code></td>
+          <td><b>1325 M</b></td>
+          <td class="no">机器专属</td>
+          <td>Python 二进制轮子，Linux 与 Windows 互不通用。两边各自 <code>pip install</code>，绝不共享</td>
+        </tr>
+        <tr>
+          <td><code>plugins/</code></td>
+          <td>187 M</td>
+          <td class="no">机器专属</td>
+          <td>插件代码本身跨平台干净（实测 <code>private_companion</code> 113 M 里 <b>没有任何 .so/.pyd</b>），但版本要各自管理，混用等于埋雷</td>
+        </tr>
+        <tr>
+          <td><code>plugin_data/meme_manager/</code></td>
+          <td>172 M</td>
+          <td class="yes">可共享</td>
+          <td>表情包图片。是记忆的一部分（鱼认得它发过的梗），但可以惰性加载</td>
+        </tr>
+        <tr>
+          <td><code>data_v4.db</code> + wal</td>
+          <td>18 M</td>
+          <td class="yes">可共享</td>
+          <td>对话历史、会话、人格配置。走 backup API 打包，不走文件拷贝</td>
+        </tr>
+        <tr>
+          <td><code>plugin_data/…/memory_companion.db</code></td>
+          <td>17.7 M + 2.7 M</td>
+          <td class="yes">可共享</td>
+          <td><b>核心记忆</b>：41 张表，memories 71 / knowledge_nodes 160 / knowledge_edges 257 / emotion_events 6。这就是「魂」的主体</td>
+        </tr>
+        <tr>
+          <td><code>plugin_data/</code>（其余）</td>
+          <td>~41 M</td>
+          <td class="yes">可共享</td>
+          <td>各插件的运行时状态</td>
+        </tr>
+        <tr>
+          <td><code>config/</code> · <code>skills/</code> · <code>workspaces/</code></td>
+          <td>≈0 M</td>
+          <td class="yes">可共享 <span class="ev t">覆写</span></td>
+          <td>技能与人设。但 <code>cmd_config.json</code> 里有机器绑定的东西（见下方）</td>
+        </tr>
+        <tr>
+          <td><code>attachments/</code> · <code>knowledge_base/</code></td>
+          <td>4 M + ≈0</td>
+          <td class="yes">可共享</td>
+          <td>附件与知识库</td>
+        </tr>
+        <tr>
+          <td>两个 <code>.backup.*.before_portable_import.db</code></td>
+          <td>18 M</td>
+          <td class="no">排除</td>
+          <td>导入前的备份文件，不是活数据</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn" style="margin-top:24px">
+    <span class="t"><code>cmd_config.json</code> 里的机器绑定，必须靠「覆写层」解决</span>
+    实测 NAS 上的配置里有 <code>"api_base": "http://127.0.0.1:17863/v1"</code>（workbuddy 桥，只在 NAS 上跑）。
+    这个地址搬到 Windows 就是死的。所以配置要分两层：
+    <b>共享层</b>（跟着记忆走）+ <b>机器覆写层</b>（<code>$MOLT_SHELL</code> 指定，各自不同，不进 Soul）。
+    两个 <code>jwt_secret</code> 同理——<b>绝不跨机同步</b>，那是把两把钥匙配成一把。
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2>05 · 安全</h2>
+  <p class="h2title">最危险的两个想法</p>
+
+  <div class="grid">
+    <div class="card">
+      <span class="tag warn">不要做</span>
+      <h3>给 AstrBot 挂 docker.sock</h3>
+      <p>
+        容器拿到 <code>/var/run/docker.sock</code> 等于拿到宿主机 root。
+        一个能跑 shell 的 AI 插件 + 一个 docker socket =
+        <b>把 NAS 的所有权限交给下游模型的每一次幻觉</b>。
+        正确做法是宿主机的摆渡服务，只暴露白名单动作：start / stop / restart / 发魔术封包。
+      </p>
+    </div>
+    <div class="card">
+      <span class="tag warn">不要做</span>
+      <h3>把 Soul 目录挂成 SMB 盘再打开</h3>
+      <p>
+        SQLite WAL 需要把 <code>-shm</code> 文件 mmap 成共享内存。
+        微软文档原话：「<b>Byte range locks are ignored when using memory mapped files</b>」。
+        而 SQLite 官方文档原话：「<b>WAL does not work over a network filesystem</b>」。
+        两条一起看，就是「怎么把库搞坏」的完整说明书。
+      </p>
+    </div>
+    <div class="card">
+      <span class="tag nas">要做</span>
+      <h3>epoch 当 fencing token</h3>
+      <p>
+        Kleppmann 那篇关于分布式锁的文章里说得最狠的一句是：
+        <b>「GC can pause a running thread at any point」</b>。
+        任何基于「租约还没过期」的判断都可能被一次长时间停顿打穿。
+        所以每次租约给一个单调递增的 epoch，写操作带上它，
+        <b>存储端拒绝 epoch 倒退的写入</b>——这才叫真的互斥。
+      </p>
+    </div>
+    <div class="card">
+      <span class="tag soul">要做</span>
+      <h3>审计流水 ledger.jsonl</h3>
+      <p>
+        每一次 checkout / checkin / 校验 / 失败，都追加一行。
+        这不是日志，是<b>记忆的迁徙史</b>：
+        什么时候、从哪台机器、到哪台机器、多少字节、耗时多少、有没有损。
+        出了问题能回答「我上次丢的那句对话，是在哪一步没的」。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2>06 · 落地</h2>
+  <p class="h2title">WOL 这一关：已闭环，含自愈</p>
+  <p class="lede">
+    这是本项目<b>第一个被完整闭环验证的物理能力</b>：一台真关机（S5）的 Windows，被 NAS 的魔术封包叫醒。
+    验证完之后又发现一件事——<b>「这次醒了」不等于「下次还能叫醒」</b>，
+    于是又补了一个自愈任务，<b>而这个自愈任务本身也被重启验证过一遍</b>。
+  </p>
+
+  <div class="callout ok" style="margin-bottom:24px">
+    <span class="t">PASS · 2026-11-14 12:40 唤醒 · 13:00 自愈闭环</span>
+    <b>① 唤醒</b>：<code>[12:40:03]</code> 用户点关机 →
+    <code>[12:40:28]</code> NAS 判定掉线 →
+    <code>[12:40:31]</code> 第 1 轮封包 →
+    <code>[12:40:42]</code> BIOS POST 完成 →
+    <code>[12:40:52]</code> 网络恢复。
+    <b>从掉线到回来 23.1 秒；发包到上电只隔 11 秒</b>——正好是 POST + 引导耗时，不是人按的电源键。
+    <br><br>
+    <b>② 自愈</b>：<code>[13:00:23]</code> 重启完成 →
+    <code>[13:00:34]</code> worker 启动（开机后 11 秒）→
+    <code>[13:00:40]</code> 读到 <code>arm 状态(改前): False</code> →
+    <code>deviceenablewake 返回码 0</code> →
+    <code>[13:00:40]</code> 复查 <code>改后: True</code>。<b>全程无人干预。</b>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <span class="tag ok">✅ 已彻底解决</span>
+      <h3>arm 状态重启即丢 —— 现在会自己修</h3>
+      <p>
+        当天 12:26 arm 成功、12:28 复查还在、12:40 被叫醒；
+        <b>12:49 再看，网卡又不在 <code>wake_armed</code> 里了</b>。
+        为进 BIOS 的那次 12:24 重启也一样，两次重启两次丢失 → <b>不是偶发</b>。
+        表现为最难查的一类故障：<b>第一次好使，第二次叫不醒</b>。
+        <br><br>
+        修：计划任务 <code>Molt-WolGuard</code>，<code>AtStartup</code> + 每 10 分钟兜底，
+        以 SYSTEM 身份跑 <code>powercfg /deviceenablewake</code>，已在白名单就 SKIP。
+        <br><br>
+        <b>✅ 13:00:34 实测闭环</b>：重启后开机第 <b>11 秒</b>，worker 读到
+        <code>arm 状态(改前): False</code> → arm → <code>改后: True</code>，
+        全程无人干预。13:00:34 不落在 10 分钟网格上，<b>只能是 <code>AtStartup</code> 触发器</b>。
+      </p>
+    </div>
+    <div class="card">
+      <span class="tag ok">已修复 · 持久有效</span>
+      <h3>「关机」不是真关机</h3>
+      <p>
+        当时 <code>HiberbootEnabled=1</code>（快速启动开），<code>Kernel-Boot 27</code> 显示
+        那次「关机」走的是 <code>0x1</code>（hiberboot），不是冷启。
+        <br><br>
+        修：<code>powercfg /h off</code>（关休眠 = 同时关快速启动）
+        <br>
+        <b>已验证</b>：<code>BootType=0</code> 冷启动、<code>hiberfil.sys</code> 已删除、
+        <code>powercfg /a</code> 报「快速启动：休眠不可用」。<b>改的是持久配置，重启不丢。</b>
+      </p>
+    </div>
+    <div class="card">
+      <span class="tag warn">待落地 · 方案已定</span>
+      <h3>开机后什么都不会发生</h3>
+      <p>
+        <code>Get-Process python,pythonw,obs64</code> → <b>0 个</b>。
+        现有自启全是「登录后」型：<code>\BiliDailyPublish</code> 是
+        <code>InteractiveToken</code>，无人登录根本不跑；<code>Coopanion-WorkBuddy-Relay</code> 是 At logon。
+        <br><br>
+        修：纯后台走 <code>sc create MoltAgent … start= auto obj= LocalSystem</code>；
+        要桌面能力（直播/游戏）则必须 <code>AutoAdminLogon</code> + 禁锁屏 + At logon 任务。
+        <b>这条还没装</b>——它属于 v0.3 的 <code>molt sleep</code> / 开机自启那一版。
+      </p>
+    </div>
+  </div>
+
+  <div class="callout warn" style="margin-top:24px">
+    <span class="t">这一关留下的不是"能用"，而是一条工程纪律</span>
+    排查 WOL 时我三次把「一个能解释现象的信号」当成因果，三次都被证伪或误报：<br>
+    ① 读了陈旧的 <code>HiberbootEnabled</code> 判断休眠状态 &nbsp;·&nbsp;
+    ② 把 <code>-match</code> 返回的元素数组当布尔用 &nbsp;·&nbsp;
+    ③ 由 <code>PnPCapabilities</code> 的位反推唤醒开关（<b>已被证伪：值 8 也能用</b>）<br>
+    还有第四次，是<b>结论本身</b>：12:40 测完就写下「已修复 ✅」，12:49 复查才发现会复发。<br>
+    <b>Windows 上判断 WOL 状态，只认 <code>powercfg /devicequery wake_armed</code> 的输出本身。</b>
+    给用户看的脚本，判断逻辑必须先在真机上跑一遍并做证伪实验；
+    <b>一次成功不等于长期有效，还要验证它会不会退回去。</b>
+    <br><br>
+    <b>这条纪律后来真的救了一次</b>：如果 12:49 没复查，这个项目会带着
+    「重启后 WOL 静默失效」的缺陷上线——而它不报错、不告警，只是没人应门。
+    现在它有了自愈任务，而且自愈本身也被重启验证过一遍。
+  </div>
+
+  <p class="h2title" style="margin-top:44px">同一个毛病又犯了一次：检查清单少一条</p>
+  <p class="lede">
+    06 节讲的是「一次成功不等于长期有效」。同一周里这句话在<b>另一个地方</b>又应验了一次，
+    而且这次差点违反的不是 S5 能不能醒，是<b>公理 0</b>。
+  </p>
+
+  <div class="callout danger" style="margin-bottom:24px">
+    <span class="t">差几秒的事故 · 2026-11-14 14:41</span>
+    做 Windows 优雅停机实验时，三次用<b>落位数据</b>启动了真实的 AstrBot。
+    那三份 <code>cmd_config.json</code> 的 <code>platform[0].enable</code> 全是 <code>True</code>
+    ——从 NAS 原样搬来的。于是每次启动都真的发起了 QQ 连接：<br><br>
+    <code>[14:41:37.426] Loading IM platform adapter qq_official(default_1234567890) …</code><br>
+    <code>[14:41:40.288] [QQOfficial] Websocket session starting.</code><br><br>
+    当时的覆写表有 <b>6 条，一条都没碰 <code>platform</code></b>。
+    <b>为什么没真出事</b>：三个进程分别在 3 秒、3 秒、60 秒内被杀，握手都没走完
+    （Windows 侧日志里 <code>FriendMessage</code> / <code>GroupMessage</code> 命中数全为 0）；
+    生产容器 <code>RestartCount=0</code>、<code>StartedAt</code> 未变、期间持续正常收发。
+    所以是<b>差几秒</b>，不是发生过。
+  </div>
+
+  <div class="callout warn">
+    <span class="t">这条为什么值得单独写一张图</span>
+    <b><code>appid</code> 可携带、<code>enable</code> 不可</b>——这两件事长得太像，
+    而"配置搬家"这个动作天然不区分它们。<br>
+    修法是把关平台做成覆写表的<b>第 0 条</b>（<code>_disable_platform_adapters</code>），
+    而且两条预设<b>都不给调用方关掉这条护栏的便利</b>：<br>
+    <code>overlay_for_windows()</code> / <code>overlay_for_posix()</code> 都写死 <code>disable_platforms=True</code>。<br><br>
+    <b>变异测试抓到了一个更隐蔽的洞</b>：把 <code>apply_overlay</code> 的默认值从 <code>True</code> 改成 <code>False</code>，
+    <b>30 个测试全过</b>——因为两条预设都显式传了 <code>True</code>，默认值从头到尾没被走过。
+    将来任何新预设只要忘了传，护栏就静默消失。<b>补测试后同一变异被抓。</b><br><br>
+    默认值取"关"的理由是不对称的：<b>漏关 = 两条鱼同时在线（用户可见的事故），
+    漏开 = 机器人没连上（一条日志）</b>。
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2>07 · 取舍</h2>
+  <p class="h2title">为什么不是别的方案</p>
+
+  <div class="diagram">
+    <table class="tbl">
+      <thead>
+        <tr><th style="width:22%">方案</th><th style="width:12%">结论</th><th>原因</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>Soul + 租约 + 快照</b><br><span style="font-size:12px;color:#8a8a92">本方案</span></td>
+          <td class="yes">采用</td>
+          <td>符合天然互斥（任意时刻只有一只鱼在线）；RPO=0；不需要改 AstrBot 一行核心代码；失败模式安全</td>
+        </tr>
+        <tr>
+          <td>SMB 直挂共享同一个 SQLite</td>
+          <td class="no">否决</td>
+          <td>WAL 需要 mmap 共享内存 + 可靠的字节锁，SMB 两样都不保证。官方文档明确「WAL does not work over a network filesystem」</td>
+        </tr>
+        <tr>
+          <td><code>?vfs=unix-none</code> 多写</td>
+          <td class="no">否决</td>
+          <td>官方原话：「will easily result in database corruption」</td>
+        </tr>
+        <tr>
+          <td>换 Postgres / MySQL</td>
+          <td class="no">否决</td>
+          <td>AstrBot 只有 sqlite 后端（<code>/AstrBot/astrbot/core/db/</code> 下只有 <code>sqlite.py</code>），要魔改核心 + 重写 memory_companion 的存储层。工程量差一个数量级</td>
+        </tr>
+        <tr>
+          <td>rqlite</td>
+          <td class="no">否决</td>
+          <td>Raft + 必须走 HTTP API，同样要改存储层</td>
+        </tr>
+        <tr>
+          <td>dqlite / LiteFS</td>
+          <td class="no">否决</td>
+          <td>dqlite 仅 Linux（需原生 async I/O）；LiteFS 依赖 FUSE，<b>两者在 Windows 上都不存在</b></td>
+        </tr>
+        <tr>
+          <td>Litestream 反向用</td>
+          <td class="no">否决</td>
+          <td>单写者 + 异步复制，RPO≈1s。官方警告「Multiple applications replicating into the same bucket &amp; path can cause situations where you will be unable to restore」</td>
+        </tr>
+        <tr>
+          <td>Litestream 当第二层备份</td>
+          <td class="yes">采用</td>
+          <td>不作为主链路，但可以把 <code>generations/</code> 持续备份到另一块盘或对象存储，防 NAS 整机挂掉（md0 是 RAID0，<b>零冗余</b>）</td>
+        </tr>
+        <tr>
+          <td>全留 NAS，Windows 只做远程接入</td>
+          <td class="yes">保底</td>
+          <td>最稳（RPO=0，永不搬家），但拿不到本地 GPU 和桌面。<b>这正是降级方案 R2</b>：如果 Windows 原生装不上，就退到这里</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2>08 · 不确定性</h2>
+  <p class="h2title">还没验证的几件事</p>
+  <p class="lede">
+    一份诚实的方案必须标出自己哪里可能是错的。<b>曾经五条"决定成立与否"的都已经跑绿了</b>，
+    后来陆续补上的（一条命令、机器覆写、跨机传输、唤醒、清理、Windows 优雅停机）也都跑绿了。
+    <b>现在整张表只剩一行没过</b>，而那一行是产品级的地基：真的把鱼接回 QQ。
+  </p>
+
+  <div class="diagram">
+    <table class="tbl">
+      <thead>
+        <tr><th style="width:36%">待验证</th><th style="width:14%">影响</th><th>失败后怎么办</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>Windows 上 <code>pip install -r requirements.txt</code> 全绿</b><br>
+              <span class="ev m">实测 2026-11-14 12:02</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td>退出码 0 / 218.6 秒 / 178 包 / <b>零缺 wheel</b>。降级方案 R2 暂时不需要了</td>
+        </tr>
+        <tr>
+          <td><b>真 S5 关机后能否被魔术封包唤醒</b><br>
+              <span class="ev m">实测 2026-11-14 12:40</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td><b>23.1 秒 PASS</b>，<code>BootType=0</code> 证实是真关机。BIOS 与快速启动两条断点已关闭</td>
+        </tr>
+        <tr>
+          <td><b>重启后网卡 arm 状态能否自动恢复</b><br>
+              <span class="ev m">实测 2026-11-14 13:00:34</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td>开机第 11 秒 <code>Molt-WolGuard</code> 自动重新 arm（<code>改前 False → 改后 True</code>），
+              不在 10 分钟网格上 → 确认是 <code>AtStartup</code> 触发器。<b>这一关会自己维持自己</b></td>
+        </tr>
+        <tr>
+          <td><b>SIGINT 是否触发 AstrBot 优雅停机</b><br>
+              <span class="ev m">实测 2026-11-14 13:41</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td><b>对照实验做完了</b>：<code>docker stop</code>(SIGTERM) 退出码 <b>137</b>、WAL 41,232 B 原封不动、一条 <code>Shutting down</code> 都没打；
+              <code>docker kill -s INT</code> 退出码 <b>0</b>、打全 <code>🌈 Shutting down AstrBot...</code> 与插件 terminate、<b>WAL 归零并删除文件</b>。
+              停机方式因此定为 SIGINT，不是 <code>docker stop</code></td>
+        </tr>
+        <tr>
+          <td><b>归巢方向：Windows 上"活着的"库能否被安全备份、并把新数据带回来</b><br>
+              <span class="ev m">实测 2026-11-14 13:37</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td>Windows 写一条标记 → <code>checkout</code>(0.042 s 热备) → 上传 → NAS <code>verify</code> → <code>push</code> → <code>release</code> → NAS 接管
+              （<b>epoch 3 → 4</b>）。三方对比证实那条标记真的搬回来了，而 NAS 原库<b>一条记录都没动</b></td>
+        </tr>
+        <tr>
+          <td><b>跨机互斥（公理 0）真的拦得住吗</b><br>
+              <span class="ev m">实测 2026-11-14 13:30</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td>反例：NAS 持租约时 Windows <code>acquire</code> → <code>LeaseHeld</code>「还剩 65.3 秒」。
+              正例：先死后生拿到 <b>epoch 2</b> 而不是复用 1。<b>三层保证缺一层都会漏</b>（见 07 节）</td>
+        </tr>
+        <tr>
+          <td><b>一条命令能否替代"手工四步"</b><br>
+              <span class="ev m">实测 2026-11-14 13:50</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td><code>molt migrate</code> 真机 <b>1.43 秒</b>：拿租约 → 热备两库（0.028s / 0.044s）→ 打包 4.4 MB /
+              4 个文件（<b>零 sidecar</b>）→ 登记 generation → 还租约。
+              租约 TTL 只有 90 秒，手工四步泡杯茶就过期——这才是它必须存在的原因</td>
+        </tr>
+        <tr>
+          <td><b>落位后配置能否自动适配新机器</b><br>
+              <span class="ev m">实测 2026-11-14 14:00</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td><code>molt land</code> <b>7 处覆写</b>（第 0 条是公理 0 护栏）：<b>关掉 <code>platform[].enable</code></b>
+              + 删 <code>workbuddy</code> source + 连 provider 一起删 +
+              <code>agent_runner</code> 重指 + dashboard 改 <code>127.0.0.1:6199</code> +
+              <b>重新生成 <code>jwt_secret</code></b>。45 个配置键<b>只动 3 个</b>，启动后 <b>WARN/ERROR 为 0</b>。
+              第 0 条是 14:41 那次"差几秒就双活"之后补的（见 06 节）</td>
+        </tr>
+        <tr>
+          <td><b>跨机字节传输能否自动化</b><br>
+              <span class="ev m">实测 2026-11-14 14:16</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td>源端 <code>molt migrate</code> <b>PUT 到 Warden 中转区</b> → 目标端
+              <code>molt land --generation N</code> <b>自己 GET 下来</b>，真机 <b>real 1.61s</b>。
+              不需要 scp、不需要共享盘、<b>不需要第三套凭证</b>——复用已有 HTTP 通道与 token。
+              中转区：<code>&lt;warden_root&gt;/archives/gen-000005.tar.gz</code> 4,629,891 B</td>
+        </tr>
+        <tr>
+          <td><b>迁徙的第一步（唤醒）能否进产品</b><br>
+              <span class="ev m">实测 2026-11-14 14:23</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td><code>molt wake --mac ...</code>。之前这一步是人手发一个魔术封包——
+              <b>一个需要人手发封包的"全自动迁徙"只是在报告里看起来是自动的</b>。
+              现在 <code>migrate</code> 里是<b>先唤醒 → 再拿租约</b>（调用顺序有测试固定）：
+              租约 TTL 只有 90 秒而叫醒要 23 秒以上，反过来做会让那 90 秒里有三分之一在等开机。
+              叫不醒直接退出，<b>账本里不会留下指向一台没开机的机器的记录</b></td>
+        </tr>
+        <tr>
+          <td><b>中转区的归档能不能安全清理</b><br>
+              <span class="ev m">实测 2026-11-14 14:32</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td><code>molt prune</code>，四条保守规则：<b>账本里记着的一律不删</b>（真机 <code>gen-000005</code> 被保留）、
+              外人放的一律不删（<code>somebody-else.tar.gz</code> 被保留）、其余按"最近 N 份"回收并留痕、
+              <b>默认只看不删</b>。三个变异（CLI 默认值 / 端点默认值 / <code>referenced</code> 恒 false）全被抓</td>
+        </tr>
+        <tr>
+          <td>AstrBot Windows 原生实例能正常收发 QQ 消息</td>
+          <td class="no">决定成立与否</td>
+          <td>同上；或改用 aiocqhttp 等其他接入方式降低耦合。<b>这是现在唯一的未知数</b></td>
+        </tr>
+        <tr>
+          <td><b>Windows 上有没有等价的优雅停机信号</b><br>
+              <span class="ev m">实测 2026-11-14 14:44</span></td>
+          <td class="yes">✅ 已通过</td>
+          <td>有，但<b>不是 <code>os.kill</code></b>。<code>CTRL_BREAK</code> 退出码 <code>0xC000013A</code>
+              看着像 Ctrl+C 生效，其实<b>默认处理器直接杀了进程</b>；<code>CTRL_C</code> 根本不跨进程组递送。
+              真的做法：<code>AttachConsole(pid)</code> + <code>GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)</code>
+              → 退出码 <b>0</b>、<code>🌈 Shutting down</code>、<b><code>kb.db</code> 从 45,056 B（+98,912 B WAL）
+              变 94,208 B 且 sidecar 消失</b>——那 98 KB 事务真的合并进主库了</td>
+        </tr>
+        <tr>
+          <td>服务（session 0）里起的进程能否碰 GPU</td>
+          <td>影响 headless 边界</td>
+          <td>桌面能力（直播/游戏）一律走 AutoAdminLogon + 禁锁屏 + At logon</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  Molt · 蜕壳 —— 技术架构 v0.11 · v0.1 代码已完成（15 模块 7,094 行 + 插件 666 行 / 440 个测试全绿）<br>
+  全部数据来自对 <code>/mnt/dm-0/astrbot/data</code> 与 DESKTOP-1A2B3C4D 的实测；
+  外部论断均标注来源等级（实测 / 查证 / 推断 / 待验证）。<br>
+  配套文档：<code>ARCH.md</code>（技术方案）· <code>PLAN.md</code>（开源规划书）· <code>SESSION-STATE.md</code>（滚动进度）
+</footer>
+
+</div>
+</body>
+</html>

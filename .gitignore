@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试与缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 运行期产物：日志、pid、临时测试数据
+*.log
+*.pid
+tools/logs/
+data/
+state/
+
+# 构建产物（NAS 部署包，随时可重新打）
+_molt-pkg.tar
+*.tar
+*.tar.gz
+
+# 打包产物（pip wheel / build / hatch 都会留下）
+build/
+dist/
+*.whl
+
+# 本地备份
+*.bak-*
+*.orig
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+tools/molt-agent-state.json
+tools/molt-homer-state.json

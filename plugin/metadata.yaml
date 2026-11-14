@@ -1,0 +1,24 @@
+name: astrbot_plugin_molt
+display_name: Molt 蜕壳 · 控制面
+author: molt
+version: 0.1.0
+description: >-
+  把 AstrBot 变成一个"可以交出自己"的壳。提供四个控制面端点：查看状态、断开平台连接（drain）、
+  重新连上（resume）、把 WAL 合并进主库（checkpoint）。
+  它只做三件事：报告自己是谁、停止对外说话、以及在被允许的时候重新开口。
+  它不认识 Molt 的账本，也从不自己决定该不该上线——那个判断属于 NAS 上的 Warden。
+desc: 让 AstrBot 支持优雅交出灵魂（drain / resume / checkpoint），配合 molt 完成跨机迁徙。
+repo: https://github.com/molt-dev/molt
+category: 工具
+tags:
+  - 迁徙
+  - 优雅停机
+  - 控制面
+icon: logo.png
+support_platforms:
+  - qq_official
+  - aiocqhttp
+  - weixin_oc
+  - wechat_native
+  - telegram
+astrbot_version: ">=4.24.0"

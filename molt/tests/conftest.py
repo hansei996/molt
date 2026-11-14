@@ -1,0 +1,209 @@
+"""pytest 全局夹具。
+
+## 为什么要有这个文件
+
+`molt/plugin/` 里的插件是**跑在 AstrBot 进程里**的代码，它的第一行 import 就是
+`from astrbot.api.star import Context, Star`。而跑测试的那个 Python（3.13 + pytest）
+并没有装 AstrBot —— 也不该装：装一个带 122 个 `.so` 的运行时进测试环境，
+会让"跑测试"从一个 15 秒的动作变成一件需要慎重考虑的事。
+
+所以这里给 `astrbot.*` 打一个**最小桩**：只提供插件真正用到的那几个名字，
+并且**故意保持它们的语义最简**（`Star` 是个空基类，`Context` 啥也不做）。
+这里是刻意的：如果桩做得太像，测试验的就不再是"插件的逻辑"，
+而是"我对 AstrBot 内部结构的想象"。真正需要精确模仿 manager 行为的地方，
+在 `test_plugin_control.py` 里单独写了个有明确契约的假 `PlatformManager`，
+而且那个假的契约本身也被一条测试盯着（`test_fake_matches_real_contract`）。
+"""
+
+import sys
+import types
+from pathlib import Path
+
+MOLT_ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_DIR = MOLT_ROOT / "plugin"
+
+
+def _install_astrbot_stub() -> None:
+    """装一个只够 import 通过的 astrbot 桩。已装真货时不覆盖。"""
+    if "astrbot" in sys.modules:
+        return
+
+    astrbot = types.ModuleType("astrbot")
+    astrbot.__path__ = []  # 让它看起来像个包
+
+    api = types.ModuleType("astrbot.api")
+    api.__path__ = []
+
+    star = types.ModuleType("astrbot.api.star")
+
+    class Star:
+        """AstrBot 插件基类的最小替身。"""
+
+        def __init__(self, context=None):
+            self.context = context
+
+    class Context:
+        """AstrBot 插件上下文的最小替身。"""
+
+    star.Star = Star
+    star.Context = Context
+
+    util = types.ModuleType("astrbot.api.util")
+    util.__path__ = []
+
+    # ---- astrbot.api.event / astrbot.api.event.filter -------------------------
+    #
+    # 聊天指令层（`plugin/command.py` 的薄壳在 `main.py` 里）要的是这几个名字：
+    # `AstrMessageEvent`、`MessageEventResult`、`filter`、`PermissionType`、
+    # `permission_type`。桩刻意让**所有装饰器都是恒等函数**：
+    # 测试关心的是"方法存在且能把事件翻成一句话"，不是"装饰器有没有挂到注册表"——
+    # 后者只有真的 AstrBot 能回答，假一个注册表只会测到我自己的想象。
+    event = types.ModuleType("astrbot.api.event")
+    event.__path__ = []
+
+    event_filter = types.ModuleType("astrbot.api.event.filter")
+    event_filter.__path__ = []
+
+    class AstrMessageEvent:  # noqa: D101 - 桩
+        pass
+
+    class MessageEventResult:  # noqa: D101 - 桩
+        pass
+
+    class PermissionType:  # noqa: D101 - 桩
+        ADMIN = "admin"
+        MEMBER = "member"
+        GROUP_ADMIN = "group_admin"
+        SHARED_GROUP_ADMIN = "shared_group_admin"
+
+    def _identity_decorator(*_args, **_kwargs):
+        def _wrap(func):
+            return func
+
+        return _wrap
+
+    for _name in (
+        "command",
+        "command_group",
+        "permission_type",
+        "llm_tool",
+        "after_message_sent",
+        "event_message_type",
+        "on_llm_request",
+        "on_llm_response",
+        "regex",
+        "custom_filter",
+        "platform_adapter_type",
+        "on_astrbot_loaded",
+        "on_agent_begin",
+        "on_agent_done",
+        "on_decorating_result",
+        "on_plugin_error",
+        "on_plugin_loaded",
+        "on_plugin_unloaded",
+        "on_platform_loaded",
+        "on_waiting_llm_request",
+        "on_using_llm_tool",
+        "on_llm_tool_respond",
+        "button_action",
+    ):
+        setattr(event_filter, _name, _identity_decorator)
+
+    event_filter.PermissionType = PermissionType
+    event_filter.permission_type = _identity_decorator
+    event_filter.AstrMessageEvent = AstrMessageEvent
+
+    event.AstrMessageEvent = AstrMessageEvent
+    event.MessageEventResult = MessageEventResult
+    event.filter = event_filter
+
+    astrbot.api = api
+    api.star = star
+    api.util = util
+    api.event = event
+
+    sys.modules["astrbot"] = astrbot
+    sys.modules["astrbot.api"] = api
+    sys.modules["astrbot.api.star"] = star
+    sys.modules["astrbot.api.util"] = util
+    sys.modules["astrbot.api.event"] = event
+    sys.modules["astrbot.api.event.filter"] = event_filter
+
+
+def _install_quart_stub() -> None:
+    """装一个只够 `jsonify` 用的 quart 桩。
+
+    `plugin/api.py` 只从 quart 拿一样东西：`jsonify`。它在真实 AstrBot 里返回
+    一个 Quart `Response`（`response.status_code` 可写）。这里给一个**最小但语义正确**
+    的替身：`.status_code` 默认 200、`.body` 是序列化后的字符串、`.json` 是原对象。
+
+    为什么不干脆把 `api.py` 改成不依赖 quart：那个文件必须是能被 AstrBot 加载的
+    真实插件代码，"用框架提供的 jsonify"是它对运行时的真实要求。把它为了测试而
+    改写成返回裸 dict，就等于测了一个不是插件的插件。
+    """
+    if "quart" in sys.modules:
+        return
+
+    import json as _json
+
+    class _Response:
+        def __init__(self, payload):
+            self.json = payload
+            self.status_code = 200
+            self.body = _json.dumps(payload, ensure_ascii=False)
+
+        def get_data(self, as_text=True):
+            return self.body if as_text else self.body.encode("utf-8")
+
+        def __repr__(self):
+            return f"<Response {self.status_code} {self.body[:80]}>"
+
+    quart = types.ModuleType("quart")
+
+    def jsonify(payload=None, **kwargs):
+        if payload is None:
+            payload = kwargs
+        elif kwargs:
+            merged = dict(payload)
+            merged.update(kwargs)
+            payload = merged
+        return _Response(payload)
+
+    quart.jsonify = jsonify
+    quart.Response = _Response
+    sys.modules["quart"] = quart
+
+
+# 装桩：`astrbot`（插件基类）与 `quart`（jsonify）
+_install_astrbot_stub()
+_install_quart_stub()
+
+# `plugin/main.py` 与 `plugin/api.py` 之间用的是**相对导入**（`from .api import ...`），
+# 因为 AstrBot 会以"目录名 = 包名"的方式加载插件（`astrbot_plugin_molt.main`）。
+# 测试里必须复现这个加载方式，否则 `main` 是个顶层模块，`from .api` 直接
+# `ImportError: attempted relative import with no known parent package` ——
+# 而 `_register_api_if_available` 会把这个异常吞成一条警告，
+# 于是"插件加载成功"但一个端点都没注册。**真机上也会是这样**，
+# 所以这里不是为了让测试通过而迁就，是为了让测试跑在同一条代码路径上。
+#
+# 做法：把 `plugin/` 目录注册成名为 `astrbot_plugin_molt` 的包（目录名不同无所谓，
+# 包名来自 `metadata.yaml` 的 `name:` 字段，AstrBot 就是这么定的）。
+import types  # noqa: E402
+
+_PKG_NAME = "astrbot_plugin_molt"
+
+# 建一个空包壳：`__path__` 指向 plugin 目录，子模块（`main` / `api`）按需 import。
+# 不执行 `main.py` —— 插件对象的构造由测试自己控制（需要注入假的 context）。
+_pkg = types.ModuleType(_PKG_NAME)
+_pkg.__path__ = [str(PLUGIN_DIR)]
+sys.modules[_PKG_NAME] = _pkg
+
+# 同时也让 `import main` 这种裸写法可用（个别测试直接这么写，方便对照）。
+_plugin_str = str(PLUGIN_DIR)
+if _plugin_str not in sys.path:
+    sys.path.insert(0, _plugin_str)
+
+# `molt` 包本身（`import molt.control` 这类）
+_molt_str = str(MOLT_ROOT)
+if _molt_str not in sys.path:
+    sys.path.insert(0, _molt_str)
