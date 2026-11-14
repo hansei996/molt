@@ -582,3 +582,23 @@ def test_heartbeat_survives_a_reload(tmp_path):
     again = Warden(tmp_path / "w")
     assert "win-shell" in again.status()["heartbeats"]
 
+def test_two_roles_on_the_same_shell_are_merged(tmp_path):
+    """同一个壳上跑着 homer 和 bounce，两条心跳不该互相覆盖。
+
+    不合并的话，页面上的"说明"会在两个词之间来回跳 —— 看起来像某个体
+    在反复重启，而实际上它只是有两个守护进程。
+    """
+    w = Warden(tmp_path / "w")
+    w.record_heartbeat("nas-shell", note="homer")
+    w.record_heartbeat("nas-shell", note="bounce")
+    beat = w.status()["heartbeats"]["nas-shell"]
+    assert beat["roles"] == ["homer", "bounce"]
+    assert beat["note"] == "homer / bounce"
+
+
+def test_a_late_role_does_not_forget_the_generation(tmp_path):
+    w = Warden(tmp_path / "w")
+    w.record_heartbeat("win-shell", generation=13, note="agent")
+    w.record_heartbeat("win-shell", note="watchdog")
+    assert w.status()["heartbeats"]["win-shell"]["generation"] == 13
+

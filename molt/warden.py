@@ -554,11 +554,28 @@ class Warden:
         with self._lock():
             self._reload_locked()
             now = time.time()
+            # 同一个壳上可能同时跑着好几个守护进程（NAS 上就有 homer 和 bounce），
+            # 它们共用一个 shell_id。如果后到的直接覆盖，页面上的"说明"就会
+            # 在两个词之间来回跳 —— 看起来像某个体在反复重启。
+            # 所以这里是**合并**：记住这个壳上出现过的角色，最多三个。
+            previous = self._heartbeats.get(shell_id) or {}
+            roles = [str(r) for r in (previous.get("roles") or [])]
+            if previous.get("note"):
+                roles.append(str(previous["note"]))
+            if note:
+                roles.append(str(note))
+            seen: List[str] = []
+            for role in roles:
+                if role and role not in seen:
+                    seen.append(role)
+            seen = seen[-3:]
+
             self._heartbeats[shell_id] = {
                 "last_seen": now,
                 "last_seen_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "generation": int(generation),
+                "generation": int(generation) or int(previous.get("generation") or 0),
                 "note": str(note)[:200],
+                "roles": seen,
             }
             # 只留最近 8 个壳。这是「当前状态」不是「历史」：留太多会让
             # `molt status` 里混进一堆早就没了的机器。
@@ -581,7 +598,8 @@ class Warden:
                 "age_readable": _human_age(age),
                 "generation": beat.get("generation", 0),
                 "last_seen_readable": beat.get("last_seen_readable", ""),
-                "note": beat.get("note", ""),
+                "note": " / ".join(beat.get("roles") or [beat.get("note", "")]).strip(" /"),
+                "roles": list(beat.get("roles") or []),
                 "stale": age > HEARTBEAT_STALE_SECONDS,
             }
         return out
