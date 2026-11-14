@@ -832,3 +832,40 @@ powershell -File tools\molt-autologon.ps1 -Account "you@example.com" -Password "
 
 ⚠️ 另外：这台机器登的是**微软账户**，自动登录要的是**账户密码**，不是开机 PIN。
 PIN 在 Winlogon 里没用（`net use /user:<用户> <PIN>` 返回 1326）。
+
+## DSH 的端口：为什么插件的默认值 3080 在这里是错的
+
+DSH 在本机有三类端口，性质完全不同，混起来会得出很荒谬的结论：
+
+| 是谁 | 端口 | 会不会变 | 拿来干什么 |
+|---|---|---|---|
+| DSH 桌面应用自己起的 host | `0.0.0.0:3082` | 桌面壳启动时决定，**不写在任何配置文件里** | `POST /api/<namespace>/<method>` 的 RPC 网关 —— 插件要的是这个 |
+| Web 界面 | `127.0.0.1:5859x` | **每次启动都变**（今天见过 52043 / 55221 / 58590） | 不带浏览器会话 cookie 一律 `401`，插件连它没用 |
+| 独立版 `dsh web`（如果单独起） | 默认 `3080` | 固定 | 只有你真敲过 `dsh web --port 3080` 才存在 |
+
+插件的文档默认值是 `http://127.0.0.1:3080`，因为它的作者假设你跑的是**独立版
+`dsh web --port 3080`**。而这台机器跑的是**桌面版**，桌面版压根不听 3080 ——
+于是插件一直报「远程计算机拒绝网络连接」，而这个报错长得非常像"DSH 没启动"。
+
+**不要背端口号，去问 DSH 本人：**
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dsh-port.ps1
+```
+
+它会枚举 DeepSeek Harness 在听的所有端口，逐个 `POST /api/session/list`，
+只有真的答出 `{"type":"server-response", ...}` 的那个才算网关（`401` 的是 Web 界面，
+`404` 的是静态资源），然后告诉你插件该写什么。加 `-Fix` 就直接改配置文件
+（保留 BOM、先备份）。
+
+判据是"它答得像不像 DSH 的 RPC 网关"，不是"端口通不通" ——
+**通了的端口可能是别的东西**，而这个错误的表现是"连上了但每一条命令都失败"，
+比连不上更难查。
+
+改完配置**必须重启壳**：`AstrBotConfig` 在内存里缓存着，改文件不会热生效
+（实测改完 `/dsh status` 还是报 3080）。重启后应当看到：
+
+```
+✅ HTTP 已连接：deepseek-account / deepseek-flash (version 0.2+ (Typert))
+事件桥：已连接；待授权请求：0
+```
