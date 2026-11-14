@@ -412,6 +412,64 @@ python3 tools/molt-homer.py               # 常驻
 
 **它不做"关机"**：回家的判据是账本接受了快照，不是那台 Windows 关机了（`ARCH.md` §5.5）。
 
+## NAS 重启之后，它自己会回来
+
+NAS 上有一个 `tools/molt-supervise.py`，负责让三个常驻进程一直活着：
+
+| 进程 | 干什么 | 死了会怎样 |
+|---|---|---|
+| `warden` | 账本，发租约 | 谁都搬不动了（但鱼还在 QQ 上说话，所以没人会发现） |
+| `molt-homer` | 鱼回了 NAS，它负责停容器 → 落位 → 开平台 → 起容器 | 鱼回到家却是哑的 |
+| `molt-bounce` | 鱼回家之后，等一会儿再把它推出去 | 关机之后机器醒不过来 |
+
+**它装在两个地方**（两处都装是故意的）：
+
+```sh
+# /etc/rc.local 里（开机最末尾由 S95done 调）
+/usr/bin/python3 /mnt/dm-0/astrbot/_molt/pkg/tools/molt-supervise.py --quiet --wait 60 >> ...
+# crontab 里
+@reboot     ... --quiet --wait 60 >> ...
+*/2 * * * * ... --quiet           >> ...
+```
+
+那条每 2 分钟的是兜底：`@reboot` 有可能早于 `/mnt/dm-0` 挂载，而且"某个进程半夜挂了"
+只有它会发现。
+
+**两条规矩**（改这个脚本之前先读）：
+
+1. **只补不杀**。在跑就跳过。别拿 `start-warden.py` 当看门狗——那个是"先杀掉旧的再起新的"，
+   每 5 分钟打断一次 Warden，赶上一次迁徙就是数据事故。
+2. **光看 pid 存在不算数**。重启后 pid 会重新分配，旧 pidfile 可能指到一个无关进程；
+   所以它用 `/proc/<pid>/cmdline` 确认真的是那一个。
+
+**它也会为"假成功"报错**：启动之后等 1.5 秒回头看，还活着才说"已启动"，
+否则说"启动了 pid=N，但它立刻退出了（日志：…）"。这一条是真机重启时踩出来的——
+第一次重启后日志写着三行"已启动"，两分钟后 `--status` 说三个都没在跑。
+
+### 手动看一眼
+
+```sh
+ssh nas
+python3 /mnt/dm-0/astrbot/_molt/pkg/tools/molt-supervise.py --status
+```
+
+输出应该是三行 `在跑 pid=…`。想看它在忙什么：
+
+```sh
+tail -n 20 /mnt/dm-0/astrbot/_molt/supervise.log
+tail -n 20 /mnt/dm-0/astrbot/_molt/homer.log
+tail -n 20 /mnt/dm-0/astrbot/_molt/bounce.log
+```
+
+### 重启 NAS 之后该确认的四件事
+
+1. `--status` 三个都在跑
+2. `netstat -ltn | grep 6186` 有监听
+3. `curl -H 'X-Molt-Token: …' http://127.0.0.1:6186/status` 里 `epoch` / `latest_generation` 还在
+4. **`docker inspect astrbot` 的 `running` 必须还是 `false`**
+   （`unless-stopped` 不该把被 SIGINT 显式停掉的容器拉起来；它要是自己起来了，
+   而你正在 Windows 上说话，那就是两条鱼同时在线）
+
 ## 出事了怎么办
 
 ### 退出码

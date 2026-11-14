@@ -2697,6 +2697,111 @@ BOM `efbbbf → efbbbf`；另造一个无 BOM 样本，`7b0a20 → 7b0a20`（**�
 
 ---
 
+### 13.14 NAS 重启之后，那条链路会自己回来 —— ✅ 已通过【实测 2026-11-15 02:20】
+
+**为什么非做不可**：到这一步，整条链路上有三个常驻进程跑在 NAS 上——
+Warden（账本 / 发租约）、`molt-homer`（回家接住）、`molt-bounce`（鱼回家之后再把它推出去）。
+它们全是手敲 `python3 tools/start-*.py` 起的。**NAS 一重启，三个全没，而断得很安静**：
+鱼还在 QQ 上说话，人也没收到任何告警，只是从那一刻起谁都搬不动了。
+更糟的是它的反面——`docker` 容器是 `restart=unless-stopped`，
+如果哪天守护进程自己起来了、容器也起来了，而鱼正在 Windows 上说话，那就直接撞公理 0。
+
+**这台 NAS 没有 systemd**：`PID 1 = /sbin/procd`（OpenWrt 式），
+`/etc/rc.d/S95done` 在开机最末尾 `sh /etc/rc.local`，`/etc/rc.d/S50cron` 拉起 crond。
+
+#### 13.14.1 装法（两处都装，belt and braces）
+
+`/etc/rc.local`（在 `exit 0` 之前）：
+
+```sh
+# molt: 三个守护进程（账本 / 回家 / 往返）。S95done 在开机最末尾调这个文件，
+# 那时 /mnt/dm-0 已经挂上了。supervise 只补不杀，重复调用安全。
+/usr/bin/python3 /mnt/dm-0/astrbot/_molt/pkg/tools/molt-supervise.py --quiet --wait 60 >> ...
+```
+
+`crontab -l`：
+
+```
+@reboot     .../molt-supervise.py --quiet --wait 60 >> ...
+*/2 * * * * .../molt-supervise.py --quiet          >> ...
+```
+
+**为什么 `@reboot` 之外还要一条每 2 分钟的**：`@reboot` 由 `S50cron` 触发，
+**可能早于 `/mnt/dm-0` 挂载**——那时脚本连自己在哪都不知道。
+定时那条是兜底，也是"某个进程半夜挂了"的唯一发现机制。
+**为什么不是 `*/5`**：鱼回家之后要等 `bounce` 把它推出去，中间这几分钟里少一个进程，
+人看到的现象就是"它怎么不动了"。2 分钟是我能接受的失联上限。
+
+#### 13.14.2 两条设计规矩（写进 `tools/molt-supervise.py` 的 docstring）
+
+1. **只补不杀**。在跑就跳过，绝不重启。
+   `start-warden.py` 那个脚本是"先杀掉旧的再起新的"，**绝不能拿来当看门狗**——
+   每 5 分钟把 Warden 打断一次，恰好赶上一次迁徙就是数据事故。
+2. **光看 pid 存在不算数**。机器重启后 pid 从低位重新分配，旧 pidfile 很可能指到
+   一个完全无关的进程上；那时"看 pid 存活"会说"已经在跑"，于是永远不起。
+   判据必须是 `/proc/<pid>/cmdline` 里真的出现那个 marker（`molt.cli` / `molt-homer.py` / `molt-bounce.py`）。
+
+**变异测试（不需要重启就能证它有牙）**：停掉 bounce 后 `echo 1 > bounce.pid`——
+pid 1 一定活着但完全无关。只看 pid 存活会答"在跑"；`--status` 答的是
+`bounce: 没在跑`，随后补齐成 `已启动 pid=28675`，cmdline 核对真的是 `molt-bounce.py --config ...`。
+
+#### 13.14.3 第一次真机重启：三行"已启动"，两个进程已经死了
+
+清空 `supervise.log` 后重启，打开看到的却是：
+
+```
+warden: 已启动 pid=8869
+homer: 已启动 pid=8870
+bounce: 已启动 pid=8871
+```
+
+两分钟后 `--status` 说**三个都没在跑**，`netstat` 里 6186 也没有监听；
+`homer.log` / `bounce.log` 里躺着 `[Errno 101] Network is unreachable`。
+是那条 `*/2` 的 cron 在 02:18 又把它们补了回来——**兜底救了主路径**。
+
+于是这件事的本质露出来了：**"我把一个进程拉起来了"和"那个进程还活着"是两件事**，
+而 `supervise.log` 当时只记录了前者。这和本项目反复踩的那一类 bug 完全同形：
+**它报成功，但它没做成。**
+
+修法两条，都落在 `tools/molt-supervise.py` 里：
+
+- **等真正的就绪信号**（`--wait N`）。判据是"`/proc/net/route` 里出现默认路由"，
+  不是"磁盘挂上了"，也不是"过了 30 秒"。磁盘没挂 → `磁盘未挂载`；磁盘挂了但没路由 →
+  `网络未就绪`；两次都能自己说出是哪一种。
+- **启动之后回头看它一眼**。`start()` 里 `sleep(START_GRACE=1.5)` 再查一次
+  `running(spec)`：还活着才算"已启动"，否则报
+  `启动了 pid=N，但它立刻退出了（日志：<最后三行>）`，并把退出码置 1。
+
+**新判据的变异测试**：起一个 `raise SystemExit(3)` 的进程 →
+`fake-dies: 启动了 pid=17621，但它立刻退出了（日志：boom: 网络还没起来）`；
+起一个 `sleep 30` 的 → `fake-lives: 已启动 pid=17933`。**它现在会为"假成功"报错。**
+
+#### 13.14.4 第二次真机重启：三行，全部还活着
+
+再次清空日志并重启，这次开机后 `supervise.log` 只有三行，且三行都成立：
+
+```
+warden: 已启动 pid=7174
+homer : 已启动 pid=7280
+bounce: 已启动 pid=7328
+```
+
+`--status` → 三个 `在跑`；`uptime 0 min` 时 `netstat -ltn` 已有 `0.0.0.0:6186 LISTEN`。
+
+四道复查（都在开机后一分钟内）：
+
+| 查什么 | 结果 |
+|---|---|
+| 账本还在吗 | `epoch 15 / gens 13 / latest 13 → desktop-h2kgiao / consumed_by desktop-h2kgiao / lease no-lease` ✅ |
+| homer / bounce 连得上账本吗 | 两边日志都是 `[idle] 第 13 代是给 desktop-h2kgiao 的，不是我`，**没有 `读不到账本`** ✅ |
+| 容器有没有自己起来（公理 0） | `running=false exit=0` ✅ `unless-stopped` 没有把被 SIGINT 显式停掉的容器拉起来 |
+| docker 守护进程自己起来了吗 | `20.10.16` ✅（它是容器能不能起的前提，也是上面那条的对照组） |
+
+**这一节的结论只有一句**：`supervise.log` 里写"已启动"不代表什么，
+**下一次 `--status` 说"在跑"才算**。所以我把它写成两条：等就绪、回头看一眼。
+
+---
+
 ## 14. 已知风险台账
 
 | 风险 | 等级 | 缓解 |
