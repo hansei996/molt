@@ -598,13 +598,23 @@ class Homer:
     # -- 一轮
 
     def backup_argv(self) -> List[str]:
-        """把当前状态热备一份推给 Warden 的 `backups/`（不占代、不是交接）。"""
-        return [
+        """把当前状态热备一份推给 Warden 的 `backups/`（不占代、不是交接）。
+
+        `--warden-url` / `--warden-token` 必须带上：漏了它 `molt backup` 会退回
+        本地模式，把备份写进这台机器自己的默认 root，然后打印成功 ——
+        而账本那边一份都没有。
+        """
+        argv = [
             self.settings.python, "-m", "molt.cli", "backup",
             "--data", self.settings.data_dir,
             "--shell", self.settings.shell,
             "--no-color",
         ]
+        if self.settings.warden_url:
+            argv += ["--warden-url", self.settings.warden_url]
+        if self.settings.warden_token:
+            argv += ["--warden-token", self.settings.warden_token]
+        return argv
 
     def do_backup(self) -> bool:
         env = dict(os.environ)

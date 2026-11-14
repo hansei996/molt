@@ -452,14 +452,24 @@ class Agent:
 
         它和 `migrate` 的区别只有一句话：`migrate` 是交接（占一代、要租约、
         有目标壳），`backup` 不是（不占代、不碰账本、没人来取）。
+
+        **`--warden-url` / `--warden-token` 必须跟着走**。漏了它们，`molt backup`
+        会退回本地模式：备份被写进这台机器自己的 `<默认 root>/backups/`，
+        然后打印成功 —— 而真正的账本那边一份都没有。
+        「它说推了一份」和「对面真的收到了」是两件事，这一层不该由日志来担保。
         """
         s = self.settings
-        return [
+        argv = [
             s.python, "-m", "molt.cli", "backup",
             "--data", str(Path(s.data_dir)),
             "--shell", s.shell,
             "--no-color",
         ]
+        if s.warden_url:
+            argv += ["--warden-url", s.warden_url]
+        if s.warden_token:
+            argv += ["--warden-token", s.warden_token]
+        return argv
 
     def do_backup(self) -> StepResult:
         return self._run(self.backup_argv(), timeout=300)

@@ -668,6 +668,9 @@ def test_backup_runs_while_the_fish_stays_home(tmp_path):
     assert len(calls) == 1
     assert "--data" in calls[0] and "/data" in calls[0]
     assert "--shell" in calls[0] and SHELL in calls[0]
+    # 漏了这两个参数，`molt backup` 会退回本地模式：写进本机默认 root，然后打印成功。
+    assert "--warden-url" in calls[0]
+    assert "--warden-token" in calls[0]
 
 
 def test_backup_waits_for_the_interval(tmp_path):

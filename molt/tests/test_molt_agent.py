@@ -945,7 +945,22 @@ def test_backup_runs_when_due_and_i_hold_the_generation(tmp_path):
     assert len(backups) == 1
     assert backups[0][:3] == ["py", "-m", "molt.cli"]
     assert "--shell" in backups[0] and ME in backups[0]
+    # 真机上就是漏了这两个参数：备份被写进本机默认 root，然后打印成功。
+    assert "--warden-url" in backups[0]
+    assert backups[0][backups[0].index("--warden-url") + 1] == "http://192.168.1.10:6186"
+    assert "--warden-token" in backups[0]
     assert a.load_state().get("last_backup_at")
+
+
+def test_backup_without_a_warden_falls_back_to_local_mode(tmp_path):
+    """没配 Warden 时不塞空串 —— `--warden-url ""` 比不传更让人困惑。"""
+    a, calls = _backup_agent(tmp_path, warden_url="", warden_token="")
+    a.run_once()
+
+    backups = [c for c in calls if "backup" in c]
+    assert len(backups) == 1
+    assert "--warden-url" not in backups[0]
+    assert "--warden-token" not in backups[0]
 
 
 def test_backup_does_not_repeat_within_the_interval(tmp_path):
