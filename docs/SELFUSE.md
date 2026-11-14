@@ -567,3 +567,54 @@ Start-Process -WindowStyle Hidden py -ArgumentList "-3.13","C:\Users\13553\Downl
 > ⚠️ **这个循环还没在真机上完整跑通过一次。**NAS 侧的三道闸和指令层已经在容器里跑起来了
 > （`/molt status` 能正确读到账本），Windows 侧的 agent 只在 dry-run 下验证过判决逻辑，
 > 没有真的让它 land 过一代。第一次真跑时请盯着两边的日志。
+
+## 关机 / 睡眠：这两件事差在哪
+
+鱼走了以后，这台机器要不要关？先说结论：**区别不是省不省电，是"回来的时候要不要有人在键盘前"。**
+
+| | 关机（`shutdown /s`） | 睡眠（S3） |
+|---|---|---|
+| 会话 | 销毁 | 保留 |
+| 回来时要不要登录 | **要**（否则停在登录界面，Startup 不跑） | 不要 |
+| 要不要先配好自动登录 | **要** | 不要 |
+| 唤醒 | 魔术封包，实测 23.1 秒（S5） | 魔术封包，S3 这条待真机验 |
+| 功耗 | 0 | 几瓦 |
+
+**普通用户就能关机**（实测 `shutdown /s /t 600` 排定成功、`shutdown /a` 撤销成功），
+但你**没有**权限直接调 `SetSuspendState` 睡眠 —— 不是特权缺失，是这台机器开着「离开模式」：
+
+```
+HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power
+    AwayModeEnabled = 1
+```
+
+开着它，每一次睡眠请求都会被翻译成"屏幕关掉、整机继续跑"，而 API 依然返回 `TRUE`。
+表现为：调用报成功、`Kernel-Power` 里没有 42（进入睡眠）事件、只有一条 59
+「系统正在进入"离开模式"」、功耗一点没降。**这是"报成功但其实什么都没做"，比直接失败难查。**
+
+一次性关掉（管理员）：
+
+```
+pwsh -File tools\molt-sleep-task.ps1
+```
+
+关掉之后，普通进程就能自己睡 —— agent 里的 `_suspend_now()` 会先
+`AdjustTokenPrivileges` 解开 `SeShutdownPrivilege`（它在令牌里、只是被禁用了），再挂起。
+`shutdown.exe` 干的就是这件事。
+
+### 如果就是要关机
+
+得先能自动登录，否则开机停在登录界面，agent 跑不起来。
+
+```
+powershell -File tools\molt-autologon.ps1 -Check      # 先看现在是什么状态
+powershell -File tools\molt-autologon.ps1 -Disable    # 清掉（撤销）
+powershell -File tools\molt-autologon.ps1 -Account "you@example.com" -Password "……"
+```
+
+⚠️ 这个脚本会把密码**明文**写进 `HKLM\...\Winlogon\DefaultPassword`。
+更安全的做法是自己跑 `netplwiz`，取消「要使用本计算机，用户必须输入用户名和密码」，
+然后自己输密码 —— 效果一样，密码存在 LSA secret 里而不是注册表。
+
+⚠️ 另外：这台机器登的是**微软账户**，自动登录要的是**账户密码**，不是开机 PIN。
+PIN 在 Winlogon 里没用（`net use /user:<用户> <PIN>` 返回 1326）。
