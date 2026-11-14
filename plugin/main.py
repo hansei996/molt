@@ -75,6 +75,19 @@ API_PREFIX = f"/{PLUGIN_NAME}"
 #     是有风险且不值得的。
 HOST_LABEL_FILENAME = "host_label.txt"
 
+# 落地观察（把"我在第 N 代搬到了这里"记成 `bot_observed_activity`）用到的常量与状态文件。
+# 状态文件放在插件自己目录里 —— 与 `host_label.txt` 同一条理由：`COPY_ARTIFACTS`
+# 不含 `plugins/**`，所以"我记过哪一代"是这台壳自己的事，不该跟着灵魂漂走。
+from .observed import (  # noqa: E402  (放在常量后面，读起来更顺)
+    DEFAULT_POLL_SECONDS,
+    FIRST_DELAY_SECONDS,
+    ObservationState,
+    compose_observation,
+    pick_generation,
+)
+
+OBSERVED_STATE_FILENAME = "observed_state.json"
+
 
 class MoltControlPlugin(Star):
     """把"AstrBot 现在是否在对外说话"变成一个可以查询和改变的状态。"""
@@ -98,6 +111,9 @@ class MoltControlPlugin(Star):
             self._mover = MoltMover(Path(__file__).resolve().parent)
         except Exception as exc:  # pragma: no cover - 防御性
             logger.warning("[Molt] 聊天指令层没起来：%s", exc, exc_info=True)
+        #: 落地之后"我自己看一眼我在哪"的那条后台任务（见 `observed.py`）。
+        self._obs_task: asyncio.Task | None = None
+        self._obs_state = None
         self._register_api_if_available()
 
     # ------------------------------------------------------------------ 生命周期
@@ -108,9 +124,118 @@ class MoltControlPlugin(Star):
             "只等 Warden 告诉它该做什么。",
             PLUGIN_VERSION,
         )
+        # 落地观察不在 initialize() 里起：AstrBot 调用 initialize() 时所在的那个
+        # 事件循环不等于之后真正在跑的服务循环（2026-11-15 实测：create_task 建出来的
+        # 任务永远不被调度，连 loop.call_later 都不触发）。改成等 `on_astrbot_loaded()`
+        # —— 那个钩子由 core_lifecycle 在主循环上发出来。
+
+    def _start_observe_task(self) -> None:
+        logger.info("[Molt] _start_observe_task 被调用了（loop=%s）", id(asyncio.get_running_loop()))
+        if self._obs_task is not None and not self._obs_task.done():
+            logger.info("[Molt] 已经有任务在跑了，不重复起")
+            return
+        try:
+            self._obs_task = asyncio.create_task(self._observe_loop())
+            logger.info("[Molt] 落地观察已启动：每 %.0f 秒看一眼账本，"
+                        "确认这一代是不是我落的地。", DEFAULT_POLL_SECONDS)
+        except Exception as exc:  # pragma: no cover - 防御性
+            logger.warning("[Molt] 落地观察没起来：%s", exc, exc_info=True)
 
     async def terminate(self) -> None:
+        task, self._obs_task = self._obs_task, None
+        if task is not None and not task.done():
+            task.cancel()
         logger.info("[Molt] 控制面退出。平台适配器的状态没有持久化，进程重启即复位。")
+
+    # ------------------------------------------------------------ 落地观察（记忆）
+
+    def _observed_state_path(self):
+        return Path(__file__).resolve().parent / OBSERVED_STATE_FILENAME
+
+    def _observed_state(self):
+        if self._obs_state is None:
+            self._obs_state = ObservationState.load(self._observed_state_path())
+        return self._obs_state
+
+    async def observe_migration_once(self) -> dict[str, Any]:
+        """看一次账本：这一代是不是我落的？是，而且没记过，就记成一次观察。
+
+        返回 `{"action": "skip"|"recorded"|"failed", ...}`，**永不抛** ——
+        它跑在后台任务里，抛出去只会变成一条没人看的 traceback。
+        """
+        if self._mover is None:
+            return {"action": "skip", "reason": "聊天指令层没起来，读不到账本"}
+
+        try:
+            settings = self._mover.settings()
+            status = self._mover.ledger_status()
+        except Exception as exc:  # pragma: no cover
+            return {"action": "skip", "reason": f"读账本失败：{exc}"}
+        if not status:
+            return {"action": "skip", "reason": "账本问不到（不猜）"}
+
+        shell = (settings.shell or self.host_label() or "").strip()
+        gen = pick_generation(status, shell=shell)
+        if gen is None:
+            return {"action": "skip", "reason": "最新一代不是我落的"}
+
+        number = int(gen.get("generation") or 0)
+        state = self._observed_state()
+        if state.observed_generation >= number:
+            return {"action": "skip", "reason": f"第 {number} 代已经记过了"}
+
+        text = compose_observation(
+            generation=number,
+            shell=self.host_label() or shell,
+            pushed_by=str(gen.get("pushed_by") or ""),
+            consumed_at=str(gen.get("consumed_at") or ""),
+            port=0,
+        )
+        try:
+            from .memory_bridge import record_observed_activity
+
+            result = await record_observed_activity(
+                self.context,
+                text,
+                occurred_at=str(gen.get("consumed_at") or ""),
+                shell=shell,
+                generation=number,
+                idempotency_key=f"molt-migration-gen-{number}",
+            )
+        except Exception as exc:  # pragma: no cover
+            result = {"ok": False, "via": "none", "reason": f"{type(exc).__name__}: {exc}"}
+
+        if result.get("ok"):
+            state.mark(number, detail=str(result.get("via", "")))
+            logger.info("[Molt] 第 %d 代已经记成「我自己观察到的」（走 %s）。",
+                        number, result.get("via"))
+            return {"action": "recorded", "generation": number, "via": result.get("via")}
+
+        # 失败不落盘 —— 下一轮再试，而不是把"已经记过了"记成事实
+        logger.info("[Molt] 第 %d 代没记进记忆：%s（下一轮再试）",
+                    number, result.get("reason"))
+        return {"action": "failed", "generation": number, "reason": result.get("reason")}
+
+    async def _observe_loop(self) -> None:
+        logger.info("[Molt] 落地观察循环真的跑起来了（第一轮在 %.0f 秒后）", FIRST_DELAY_SECONDS)
+        await asyncio.sleep(FIRST_DELAY_SECONDS)
+        while True:
+            try:
+                logger.info("[Molt] 落地观察：开始这一轮")
+                out = await self.observe_migration_once()
+                logger.info("[Molt] 落地观察：这一轮结束 -> %s", out.get("action"))
+                # 跳过的原因只在变化时说一次。否则每 30 秒一条同样的日志，
+                # 人会很快学会忽略它 —— 那和没有日志是一样的。
+                if out.get("action") == "skip":
+                    reason = str(out.get("reason") or "")
+                    if reason != getattr(self, "_obs_last_reason", None):
+                        self._obs_last_reason = reason
+                        logger.info("[Molt] 落地观察：%s", reason or "无话可说")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover
+                logger.warning("[Molt] 落地观察出错：%s", exc, exc_info=True)
+            await asyncio.sleep(DEFAULT_POLL_SECONDS)
 
     # ------------------------------------------------------------------ 平台操作
 
@@ -511,6 +636,17 @@ class MoltControlPlugin(Star):
             "已排定迁徙" if reply.plan is not None else "一句话回复",
         )
         yield event.plain_result(reply.text)
+
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self) -> None:
+        """AstrBot 起完了 —— 这时候才有一个真正在跑的事件循环。
+
+        `initialize()` 里 `create_task` 出来的任务在真机上从来没被调度过
+        （2026-11-15 实测：连 `loop.call_later` 的回调都不触发），而
+        `on_astrbot_loaded` 是 `core_lifecycle` 在主循环上发出来的钩子，
+        日志里能看到 `hook(on_astrbot_loaded) -> meme_manager ...` 就是它。
+        """
+        self._start_observe_task()
 
     @filter.after_message_sent()
     async def on_after_message_sent(self, event: AstrMessageEvent):

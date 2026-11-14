@@ -29,6 +29,8 @@ import platform
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -1658,91 +1660,82 @@ def cmd_prune(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_announce(args: argparse.Namespace) -> int:
-    """告诉刚落地的那只壳：「你搬家了」。
+def _wait_for_webui(base: str, *, timeout: float = 90.0, interval: float = 2.0) -> bool:
+    """等这只壳的 WebUI **装配完**，而不只是端口通了。
 
-    它补的是一个很具体的空洞：molt 搬的是**魂的数据**，不是**魂的经历**。
-    真机实测（2026-11-15 02:34）—— `memories` 84 条、`timeline` 296 条，提到
-    迁徙的那些**全是"主人说过的关于搬家的话"，没有一条是"我被搬了"**；而
-    drain 到 land 之间它根本不存在，所以那四分半里没有人经历任何事。
-
-    于是这里让 molt 通过 WebChat 投一条通知进去。它会回一句话，这一问一答
-    就是一次真正的对话轮次，`memory_companion` 会照常总结进 `memories`。
-
-    ## 为什么失败不算失败
-
-    通知没送到只意味着"这次它没记住"，而一次**已经成功**的迁徙不该因为写不进
-    记忆被判失败。所以：`wait_for_dashboard` 超时 → 返回 0 并说明"没送到"；
-    投递被拒 → 返回 0 并说明原因；只有**参数或配置错了**才返回 2。
+    判据用 `GET /api/auth/setup-status`：进程起来时端口可能已经在听，
+    但 dashboard 的路由还没挂上，这时候 POST 出去只会拿到 404。
+    4xx 也算"在应答" —— 那说明路由在，只是我们没带凭据。
     """
-    from .notify import (
-        DEFAULT_BASE,
-        DEFAULT_SESSION,
-        DEFAULT_TIMEOUT,
-        announce,
-        build_announcement,
-        wait_for_dashboard,
-    )
-    from .control import read_dashboard_credentials, sign_dashboard_jwt
+    deadline = time.monotonic() + max(0.0, timeout)
+    url = f"{base}/api/auth/setup-status"
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=3.0) as resp:
+                if resp.status < 500:
+                    return True
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                return True
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass
+        time.sleep(interval)
+    return False
 
-    message = build_announcement(
-        src=args.src,
-        dst=args.dst,
-        generation=args.generation,
-        seconds=args.seconds,
-        size_bytes=args.size_bytes,
-        extra=args.extra,
-    )
 
-    head("迁徙通知")
-    kv("来源壳", args.src or "（未给）")
-    kv("目标壳", args.dst or "（未给）")
-    if args.generation is not None:
-        kv("generation", str(args.generation))
-    print()
-    for line in message.splitlines():
-        dim(f"  {line}" if line else "")
-    print()
+def cmd_observe(args: argparse.Namespace) -> int:
+    """让这只壳自己做一轮「我观察到自己搬过来了」。
 
-    if args.dry_run:
-        dim("  --dry-run：只拼文案，不投递。")
-        return 0
+    为什么要有这条命令：插件里有同样的逻辑，但它依赖一个后台任务；2026-11-15
+    实测 AstrBot 给插件初始化的那个事件循环并不总是之后在跑的服务循环，
+    后台任务会静默地永不执行。**请求处理器一定跑在服务循环上** —— 所以让
+    落地的守护进程在壳起来之后敲一下这个端点，比指望后台任务可靠。
 
-    base = args.base or DEFAULT_BASE
-    info(f"等 {base} 能应答（最多 {args.wait:.0f} 秒）…")
-    if not wait_for_dashboard(base, timeout=args.wait):
-        warn("那只壳的 dashboard 一直没应答 —— 这条通知没送到。")
-        dim("  交接本身不受影响：这是「没记住」，不是「搬失败」。")
-        return 0
-    ok("它起来了。")
+    退出码：0 = 问到了（无论记没记住），2 = 参数/配置问题。
+    "没记住"不是失败 —— 交接本身早就完成了。
+    """
+    from .control import CONTROL_PREFIX, read_dashboard_credentials, sign_dashboard_jwt
 
+    config_path = Path(args.config)
     try:
-        secret, username = read_dashboard_credentials(args.config)
-        token = sign_dashboard_jwt(secret, username, ttl=args.token_ttl)
-    except Exception as e:  # NeedsHuman / Fatal / MoltError
-        bad(f"读不到控制凭据：{e}")
+        secret, username = read_dashboard_credentials(config_path)
+    except (Fatal, NeedsHuman) as e:
+        bad(str(e))
         return 2
 
-    result = announce(
-        base,
-        token,
-        message,
-        session_id=args.session or DEFAULT_SESSION,
-        timeout=args.timeout or DEFAULT_TIMEOUT,
-    )
-    if not result["ok"]:
-        warn(f"通知没送到：{result['error']}")
-        dim("  交接本身不受影响。")
+    base = args.base.rstrip("/")
+    ok(f"等 {base} 的 WebUI 能应答（最多 {args.wait:.0f} 秒）…")
+    if not _wait_for_webui(base, timeout=args.wait):
+        warn("WebUI 一直没应答 —— 这次先不记了。")
+        dim("  交接本身不受影响：这是「没记住」，不是「搬失败」。")
         return 0
 
-    ok("通知已投递，它也回话了 —— 这次搬家会进它的记忆。")
-    reply = (result.get("reply") or "").strip()
-    if reply:
-        print()
-        for line in reply.splitlines():
-            dim(f"  {line}")
-    elif args.verbose:
-        dim("  （它没有回正文，但对话轮次已经记下了）")
+    token = sign_dashboard_jwt(secret, username)
+    url = f"{base}{CONTROL_PREFIX}/observe"
+    req = urllib.request.Request(
+        url, data=b"{}", headers={"Authorization": f"Bearer {token}"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:300]
+        warn(f"这只壳拒绝了（HTTP {e.code}）：{body}")
+        return 0
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        warn(f"连不上这只壳的控制面：{e}")
+        return 0
+
+    action = str(payload.get("action") or "")
+    if payload.get("status") == "error" or (not action and not payload.get("success")):
+        warn(f"这只壳说：{payload.get('message') or payload.get('error') or '没听懂'}")
+    if action == "recorded":
+        ok(f"记下了：第 {payload.get('generation')} 代（走 {payload.get('via')}）")
+    elif action == "skip":
+        dim(f"不用记：{payload.get('reason') or ''}")
+    else:
+        warn(f"没记成：{payload.get('reason') or action or '未知原因'}")
+        dim("  这不影响交接 —— 下一轮还会再试。")
     return 0
 
 
@@ -2039,24 +2032,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.set_defaults(func=cmd_land)
 
-    # announce
-    s = add("announce", "告诉刚落地的那只壳「你搬家了」，让这次迁徙进它的记忆")
-    s.add_argument("--config", required=True, help="目标壳的 cmd_config.json（用它自己的 jwt_secret 现签 token）")
-    s.add_argument("--base", default="", help="目标壳 dashboard 地址（默认 http://127.0.0.1:6199）")
-    s.add_argument("--src", default="", help="从哪台机器搬过来的（写进文案）")
-    s.add_argument("--dst", default="", help="搬到了哪台机器（写进文案）")
-    s.add_argument("--generation", type=int, default=None, help="第几代（写进文案）")
-    s.add_argument("--seconds", type=float, default=None, help="整件事用了多少秒（写进文案）")
-    s.add_argument("--size-bytes", type=int, default=None, help="快照大小（写进文案）")
-    s.add_argument("--extra", default="", help="附加一句（可留空）")
-    s.add_argument("--session", default="", help="会话 id（默认 molt-migration，同 id 会接着上文）")
-    s.add_argument("--wait", type=float, default=90.0, help="等 dashboard 起来的最长秒数（默认 90）")
-    s.add_argument("--timeout", type=float, default=0.0, help="等它回话的秒数（默认 90）")
-    s.add_argument("--token-ttl", type=int, default=300, help="token 有效期，默认 300 秒")
-    s.add_argument("--dry-run", action="store_true", help="只拼文案，不投递")
-    s.add_argument("--verbose", action="store_true")
-    s.set_defaults(func=cmd_announce)
-
     # doctor
     s = add("doctor", "体检：把能查的都查一遍")
     s.add_argument("--root", help="Warden 根目录")
@@ -2107,6 +2082,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="真的删。不给这个开关只报告不删",
     )
     s.set_defaults(func=cmd_prune)
+
+    # observe
+    s = add(
+        "observe",
+        "让这只壳自己看一眼账本，把「我在第 N 代搬到了这里」记成它自己的观察",
+    )
+    s.add_argument("--config", required=True, help="这只壳的 cmd_config.json（拿 dashboard 凭据）")
+    s.add_argument("--base", default="http://127.0.0.1:6199", help="这只壳的 dashboard 地址")
+    s.add_argument(
+        "--wait",
+        type=float,
+        default=90.0,
+        help="等 WebUI 能应答的最长秒数（默认 90；壳刚起来时 WebUI 比进程慢）",
+    )
+    s.add_argument("--timeout", type=float, default=30.0, help="单次 HTTP 超时秒数")
+    s.set_defaults(func=cmd_observe)
 
     # serve
     s = add("serve", "把 Warden 跑成一个 HTTP 服务（给远端壳用）")

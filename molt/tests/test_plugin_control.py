@@ -300,8 +300,14 @@ def test_snapshot_without_platform_manager():
     assert "没有 platform_manager" in result["reason"]
 
 
-def test_api_registers_four_endpoints():
-    """`_register_api_if_available` 必须真的注册四条，不多不少。"""
+def test_api_registers_five_endpoints():
+    """`_register_api_if_available` 必须真的注册五条，不多不少。
+
+    第五条 `/observe` 是 2026-11-15 加的：AstrBot 交给插件的那个事件循环不一定是
+    在跑的那个，所以"每 30 秒自己看一眼账本"的后台任务在真机上从来没跑起来
+    （详见 `docs/ARCH.md` §13.15）。改成由外部敲一下 —— **请求处理器一定跑在
+    服务循环上**，这条路才靠得住。
+    """
     from astrbot_plugin_molt.main import MoltControlPlugin
 
     plugin, _, ctx = _plugin([QQ])
@@ -312,11 +318,12 @@ def test_api_registers_four_endpoints():
         "/astrbot_plugin_molt/drain",
         "/astrbot_plugin_molt/resume",
         "/astrbot_plugin_molt/checkpoint",
+        "/astrbot_plugin_molt/observe",
     ])
     # 方法必须对：只有 status 是 GET，/resume 是唯一能让它重新开口的
     by_route = {r["route"].rsplit("/", 1)[-1]: r for r in ctx.registered}
     assert by_route["status"]["methods"] == ["GET"]
-    for name in ("drain", "resume", "checkpoint"):
+    for name in ("drain", "resume", "checkpoint", "observe"):
         assert by_route[name]["methods"] == ["POST"]
 
 def test_platform_configs_includes_disabled_entries():

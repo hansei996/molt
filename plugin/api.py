@@ -52,6 +52,12 @@ class MoltControlApi:
             ("/drain", self.drain, ["POST"], "Molt 控制面：断开所有平台适配器（幂等）"),
             ("/resume", self.resume, ["POST"], "Molt 控制面：重新连上 drain 过的平台"),
             ("/checkpoint", self.checkpoint, ["POST"], "Molt 控制面：把 WAL 合并进主库"),
+            (
+                "/observe",
+                self.observe,
+                ["POST"],
+                "Molt 控制面：看一眼账本，如果这一代是我落的、还没记过，就把它记成我自己的观察",
+            ),
         ]
         return [(f"{API_PREFIX}{path}", handler, methods, desc) for path, handler, methods, desc in specs]
 
@@ -152,6 +158,23 @@ class MoltControlApi:
 
         if not result.get("ok"):
             return self._err(result.get("reason") or "checkpoint 未完成", status=409, **result)
+        return self._ok(**result)
+
+    async def observe(self):
+        """主动做一轮"我观察到自己搬过来了"。
+
+        为什么要一个端点，而不是只靠插件里的后台循环：2026-11-15 实测，
+        AstrBot 给 `initialize()` / `on_astrbot_loaded()` 的那个事件循环
+        并不总是之后真正在跑的服务循环（`create_task` 建出来的任务和
+        `loop.call_later` 的回调都不触发）。而**请求处理器一定跑在服务循环上**。
+        所以把这件事做成一个能被外部叫一下的端点，由落地守护进程在壳起来之后调一次。
+        """
+        try:
+            result = await self.plugin.observe_migration_once()
+        except Exception as exc:
+            logger.warning("[Molt] observe 失败：%s", exc, exc_info=True)
+            return self._err(f"observe 失败：{exc}")
+
         return self._ok(**result)
 
     @staticmethod
