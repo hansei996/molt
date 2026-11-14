@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -82,6 +83,9 @@ class Settings:
     #: 这台壳自己的 dashboard 监听地址/端口。留空 = 保持快照里原样。
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = DEFAULT_PORT
+    #: AstrBot 起来之后顺手拉起来的东西（形如 `[{"argv": [...], "skip_if": "x.exe"}]`）。
+    #: 鱼的身体是 AstrBot；这里放的是"人干活要用的东西"，比如 DSH 自己。
+    boot_extra: list = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> "Settings":
@@ -308,6 +312,10 @@ class Agent:
     status_fetcher: Optional[Callable[[], Dict[str, Any]]] = None
     port_probe: Optional[Callable[[], bool]] = None
     spawner: Optional[Callable[[list, str], int]] = None
+    #: 本机 AstrBot 的 pid（落位前要先让它停下来）。None = 本机没在跑。
+    pid_probe: Optional[Callable[[], Optional[int]]] = None
+    #: 让那个 pid 优雅退出。返回 True 表示"它真的没了"。
+    stopper: Optional[Callable[[int], bool]] = None
     log: Callable[[str], None] = field(default=_log_line)
 
     # -- 状态 ------------------------------------------------------
@@ -379,6 +387,43 @@ class Agent:
             return StepResult(argv[0], False, f"退出码 {proc.returncode}：{tail[-1] if tail else ''}")
         return StepResult(argv[0], True)
 
+    def do_stop(self) -> StepResult:
+        """落位之前，先让本机那只 AstrBot 停下来。
+
+        和 NAS 侧 homer 的 `do_stop()` 对称 —— 这一步谁都不能省：
+        活着的进程手里握着 `-shm` 和对旧 inode 的 fd，`land` 会因此拒绝落位
+        （那个护栏是对的：它分不清"有进程在写"和"只是没合并"）。
+        2026-11-15 01:10 真机就卡在这儿：NAS 已经把第 9 代推上来了，
+        Windows 上的壳还在跑，agent 每 10 秒试一次、每 10 秒失败一次。
+        """
+        if self.pid_probe is None or self.stopper is None:
+            return StepResult("stop", True, "没有 pid_probe/stopper（当成没在跑）")
+        try:
+            pid = self.pid_probe()
+        except OSError as exc:
+            return StepResult("stop", False, f"问不出本机 AstrBot 的 pid：{exc}")
+        if pid is None:
+            return StepResult("stop", True, "本机没有在跑的 AstrBot")
+        try:
+            gone = self.stopper(pid)
+        except OSError as exc:
+            return StepResult("stop", False, f"停不下来（pid {pid}）：{exc}")
+        if not gone:
+            return StepResult("stop", False, f"pid {pid} 没有在超时内退出")
+        return StepResult("stop", True, f"已让它优雅退出（pid {pid}）")
+
+    def do_checkpoint(self) -> StepResult:
+        """停干净之后，把残留的 WAL 合并回主库 —— 不合并 land 会被护栏挡住。"""
+        report = checkpoint_databases(self.settings.data_dir)
+        if not report:
+            return StepResult("checkpoint", True, "没有待合并的 WAL")
+        stuck = [(n, a) for n, _b, a in report if a]
+        if stuck:
+            return StepResult("checkpoint", False,
+                              "这些库合不干净：" + "、".join(f"{n} 还剩 {a} 字节" for n, a in stuck))
+        return StepResult("checkpoint", True,
+                          "已合并 " + "、".join(f"{n}（{b} → 0）" for n, b, _a in report))
+
     def do_land(self, generation: int) -> StepResult:
         return self._run(self.land_argv(generation), timeout=600)
 
@@ -396,6 +441,36 @@ class Agent:
         except OSError as exc:
             return StepResult("boot", False, f"起不来：{exc}")
         return StepResult("boot", True, f"已拉起 pid={pid}")
+
+    def do_extras(self) -> list:
+        """AstrBot 已经开口之后，把这台壳上"顺手该起来"的东西拉起来。
+
+        和 `do_boot` 的区别：那个起的是**鱼的身体**，这里的每一样起不来都
+        **不影响交接结论** —— 鱼已经在说话了，桌面程序起不来不该让它被判失败。
+
+        `skip_if` 是进程映像名：已经在跑就不重复开（DSH 这种单实例程序，
+        再拉一次多半只是把已有窗口提到前面，但日志会让人以为起了两个）。
+        """
+        results: list = []
+        for item in self.settings.boot_extra or []:
+            argv = item.get("argv") if isinstance(item, dict) else None
+            if not argv:
+                results.append(StepResult("extra", False, "boot_extra 里有一项没有 argv"))
+                continue
+            name = item.get("skip_if") or ""
+            if name and _process_running(name):
+                results.append(StepResult("extra", True, f"{name} 已经在跑，跳过"))
+                continue
+            if self.spawner is None:
+                results.append(StepResult("extra", False, "没有 spawner"))
+                continue
+            try:
+                pid = self.spawner(list(argv), self.settings.log_path)
+            except OSError as exc:
+                results.append(StepResult("extra", False, f"{argv[0]} 起不来：{exc}"))
+                continue
+            results.append(StepResult("extra", True, f"{argv[0]} 已拉起 pid={pid}"))
+        return results
 
     # -- 一轮 ------------------------------------------------------
     def run_once(self) -> Tuple[Decision, list]:
@@ -415,6 +490,18 @@ class Agent:
             if not self.settings.execute:
                 self.log(f"  (dry-run) 我会落位 gen-{decision.generation}")
                 return decision, steps
+            stop = self.do_stop()
+            steps.append(stop)
+            if not stop.ok:
+                self.log(f"  ✗ 停不下来：{stop.detail} —— 这一轮不落位")
+                return decision, steps
+            self.log(f"  ✓ {stop.detail}")
+            ck = self.do_checkpoint()
+            steps.append(ck)
+            if not ck.ok:
+                self.log(f"  ✗ {ck.detail} —— 这一轮不落位")
+                return decision, steps
+            self.log(f"  ✓ {ck.detail}")
             result = self.do_land(decision.generation)
             steps.append(result)
             if not result.ok:
@@ -445,6 +532,9 @@ class Agent:
             state["started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             self.save_state(state)
             self.log(f"  ✓ {boot.detail}")
+            for extra in self.do_extras():
+                steps.append(extra)
+                self.log(f"  {'✓' if extra.ok else '!'} {extra.detail}")
 
         return decision, steps
 
@@ -464,17 +554,157 @@ class Agent:
 # ---------------------------------------------------------------- 默认实现
 
 
+def checkpoint_databases(data_dir: str) -> list:
+    """把 data 目录下每个 `.db` 的 WAL 合回主库，返回 [(相对路径, 合并前, 合并后)]。
+
+    和 NAS 侧 `molt-homer.py` 里那份是同一条理由：第三方插件用自己的 SQLite
+    连接，AstrBot 的优雅停机不会替它 checkpoint，`-wal` 里留着已提交事务；
+    而 `land` 看到非空 `-wal` 必然拒绝落位。容器/进程确实停了之后合并是安全的，
+    而且正是让快照能落地的前提。
+    """
+    out = []
+    root = Path(data_dir)
+    if not root.is_dir():
+        return out
+    for db in sorted(root.rglob("*.db")):
+        if not db.is_file():
+            continue
+        side = db.with_name(db.name + "-wal")
+        try:
+            before = side.stat().st_size if side.exists() else 0
+        except OSError:
+            before = 0
+        if before == 0:
+            continue
+        try:
+            conn = sqlite3.connect(str(db), timeout=10.0)
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+        try:
+            after = side.stat().st_size if side.exists() else 0
+        except OSError:
+            after = 0
+        out.append((str(db.relative_to(root)), before, after))
+    return out
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        cp = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=15.0)
+    except (OSError, subprocess.SubprocessError):
+        return True          # 问不出来时假设它还活着：多等一轮，别把"还在写"当成"已停"
+    return str(pid) in (cp.stdout or "")
+
+
+def _listening_pid(port: int) -> Optional[int]:
+    """哪个进程在听这个端口。
+
+    用 `netstat -ano` 而不是"按命令行找"：AstrBot 的 cmdline 只有 `main.py`，
+    data 目录是环境变量传的，按命令行匹配根本认不出是哪一个（2026-11-15 00:32 踩过，
+    差点留下一个孤儿实例）。
+    """
+    try:
+        cp = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
+                            text=True, encoding="utf-8", errors="replace", timeout=20.0)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in (cp.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        local, state, pid_text = parts[1], parts[3], parts[4]
+        if state.upper() != "LISTENING":
+            continue
+        if local.endswith(":" + str(port)):
+            try:
+                return int(pid_text)
+            except ValueError:
+                continue
+    return None
+
+
+def _send_ctrl_c(pid: int, *, timeout: float = 30.0) -> bool:
+    """让它走自己的 Ctrl+C 处理，然后等它真的消失。
+
+    三种发法实测过（2026-11-14）：`CTRL_C_EVENT` 在 Windows 上根本不跨进程组，
+    等满 60 秒什么也没发生；`CTRL_BREAK_EVENT` 会被当成 SIGBREAK 直接杀掉
+    （退出码 0xC000013A，日志里没有 `Shutting down`）——那是最坏的假成功，
+    WAL 不会被 checkpoint。唯一有效的是 AttachConsole 之后
+    `GenerateConsoleCtrlEvent(0, 0)`。
+    """
+    if os.name != "nt":                       # pragma: no cover - 仅 Windows 有意义
+        return False
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32      # type: ignore[attr-defined]
+    ATTACH_PARENT_PROCESS = -1
+    kernel32.FreeConsole()
+    if not kernel32.AttachConsole(int(pid)):
+        return False
+    sent = False
+    try:
+        kernel32.SetConsoleCtrlHandler(None, True)
+        sent = bool(kernel32.GenerateConsoleCtrlEvent(0, 0))
+    finally:
+        kernel32.FreeConsole()
+        if kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+            kernel32.SetConsoleCtrlHandler(None, False)
+    if not sent:
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _process_running(image_name: str) -> bool:
+    """这台机器上有没有这个映像名的进程。
+
+    用 `tasklist` 而不是 psutil：agent 是纯标准库的，装不了第三方包。
+    问不出来时返回 False（"当它没在跑"）—— 重复拉起的代价是多个窗口，
+    而错误地当成"已经在跑"的代价是 DSH 根本没起来。
+    """
+    try:
+        cp = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/NH"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=15.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    out = (cp.stdout or "").strip()
+    if not out or "No tasks" in out:
+        return False
+    return image_name.lower() in out.lower()
+
+
 def _default_spawn(argv: list, log_path: str) -> int:
     """脱离本进程起 AstrBot。agent 退出不该带走它。"""
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
     handle = open(log_path, "ab")
     flags = 0
+    startupinfo = None
     if os.name == "nt":
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        # 不能用 DETACHED_PROCESS：那样进程**没有控制台**，事后就再也没有办法
+        # 把 Ctrl+C 送进去，只能硬杀 —— 而硬杀不 checkpoint，`land` 会因此拒绝落位。
+        # 用一个隐藏的新控制台：既有自己的进程组，又还留着一扇能敲 Ctrl+C 的门。
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NEW_CONSOLE
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0          # SW_HIDE
     try:
         proc = subprocess.Popen(
             argv, stdout=handle, stderr=handle, stdin=subprocess.DEVNULL,
-            creationflags=flags, close_fds=True,
+            creationflags=flags, startupinfo=startupinfo, close_fds=True,
         )
     finally:
         handle.close()
@@ -524,6 +754,8 @@ def main(argv: Optional[list] = None) -> int:
         status_fetcher=warden.status,
         port_probe=lambda: _port_open("127.0.0.1", settings.port),
         spawner=_default_spawn,
+        pid_probe=lambda: _listening_pid(settings.port),
+        stopper=lambda pid: _send_ctrl_c(pid, timeout=settings.timeout * 2),
     )
     return agent.run_forever(once=args.once)
 

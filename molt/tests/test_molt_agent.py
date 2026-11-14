@@ -318,8 +318,9 @@ def test_land_failure_does_not_advance_state(tmp_path):
     decision, steps = a.run_once()
 
     assert decision.kind == "land"
-    assert steps and steps[0].ok is False
-    assert "退出码 4" in steps[0].detail
+    land = steps[-1]
+    assert land.ok is False
+    assert "退出码 4" in land.detail
     assert spawned == []
     assert a.load_state() == {}
 
@@ -335,7 +336,7 @@ def test_switch_failure_does_not_boot(tmp_path):
     a, _, spawned, logs = _agent(tmp_path, runner=runner, status_fetcher=lambda: ledger())
     _, steps = a.run_once()
 
-    assert [s.ok for s in steps] == [True, False]
+    assert [s.ok for s in steps] == [True, True, True, False]  # stop/checkpoint/land/switch
     assert spawned == []
     # 落位成功了，所以要记住"还欠一次启动"，否则鱼永远不开口
     assert a.load_state()["needs_start"] is True
@@ -373,8 +374,9 @@ def test_timeout_is_reported_not_raised(tmp_path):
     runner = FakeRunner(raises=subprocess.TimeoutExpired(cmd="x", timeout=600))
     a, _, spawned, _ = _agent(tmp_path, runner=runner, status_fetcher=lambda: ledger())
     _, steps = a.run_once()
-    assert steps[0].ok is False
-    assert "超时" in steps[0].detail
+    land = steps[-1]
+    assert land.ok is False
+    assert "超时" in land.detail
     assert spawned == []
 
 
@@ -461,3 +463,94 @@ def test_setup_console_tolerates_streams_without_reconfigure(monkeypatch):
     monkeypatch.setattr(agent.sys, "stdout", _Bare())
     monkeypatch.setattr(agent.sys, "stderr", _Bare())
     agent._setup_console()  # 不抛即通过
+
+
+# ------------------------------------------------------- boot_extra（顺手要起来的）
+
+def test_extra_boots_run_after_astrbot_boots(tmp_path):
+    """AstrBot 先开口，然后才轮到"人干活要用的东西"。
+
+    用户的要求就是这条链：鱼搬过来 → 它开口 → DSH 起来 → 人（或 agent）能干活。
+    顺序反了的话，DSH 起来时鱼还没说话，人就先看到桌面而收不到消息。
+    """
+    order = []
+    cfg = settings(execute=True, boot_extra=[{"argv": ["DSH.exe"], "skip_if": ""}])
+    a, _r, _sp, _logs = _agent(tmp_path, cfg=cfg, status_fetcher=lambda: ledger(target=settings().shell))
+    a.do_switch_on = lambda: (order.append("switch"), agent.StepResult("switch", True, ""))[1]
+    a.do_boot = lambda: (order.append("boot"), agent.StepResult("boot", True, "ok"))[1]
+    a.spawner = lambda argv, log: (order.append("extra:" + argv[0]), 1234)[1]
+    a.run_once()
+    assert order == ["switch", "boot", "extra:DSH.exe"]
+
+
+def test_extra_boot_is_skipped_when_the_process_is_already_running(tmp_path, monkeypatch):
+    """已经在跑就不重复开 —— 否则每次轮询都会多一个窗口。"""
+    monkeypatch.setattr(agent, '_process_running', lambda name: True)
+    calls = []
+    cfg = settings(execute=True, boot_extra=[{"argv": ["DSH.exe"], "skip_if": "DSH.exe"}])
+    a, _r, _sp, _logs = _agent(tmp_path, cfg=cfg, status_fetcher=lambda: ledger(target=settings().shell))
+    a.do_switch_on = lambda: agent.StepResult("switch", True, "")
+    a.do_boot = lambda: agent.StepResult("boot", True, "ok")
+    a.spawner = lambda argv, log: (calls.append(argv), 1)[1]
+    a.run_once()
+    assert calls == []
+
+
+def test_extra_boot_failure_does_not_fail_the_handoff(tmp_path):
+    """DSH 起不来，不该让"迁徙成功"变成失败 —— 鱼已经在说话了。"""
+    cfg = settings(execute=True, boot_extra=[{"argv": ["nope.exe"], "skip_if": ""}])
+    a, _r, _sp, _logs = _agent(tmp_path, cfg=cfg, status_fetcher=lambda: ledger(target=settings().shell))
+    a.do_switch_on = lambda: agent.StepResult("switch", True, "")
+    a.do_boot = lambda: agent.StepResult("boot", True, "ok")
+
+    def boom(argv, log):
+        raise OSError("no such file")
+
+    a.spawner = boom
+    decision, steps = a.run_once()
+    assert decision.kind == "start"
+    assert any(not s.ok for s in steps if s.name == "extra")
+    assert a.load_state().get("needs_start") is False
+
+
+# ------------------------------------------------------- 落位前先停本机
+
+def test_stop_happens_before_landing(tmp_path):
+    """先停本机，再落位 —— 和 NAS 侧 homer 对称，这一步谁都不能省。
+
+    2026-11-15 01:10 真机：NAS 已经把第 9 代推上来了，Windows 上的壳还在跑，
+    `land` 因为目标目录"还活着"（-shm）拒绝落位，agent 每 10 秒失败一次。
+    """
+    order = []
+    a, _r, spawned, _logs = _agent(tmp_path, status_fetcher=lambda: ledger(target=settings().shell))
+    a.pid_probe = lambda: (order.append("probe"), 4321)[1]
+    a.stopper = lambda pid: (order.append("stop:%d" % pid), True)[1]
+    a.do_land = lambda gen: (order.append("land"), agent.StepResult("land", True, ""))[1]
+    a.do_switch_on = lambda: agent.StepResult("switch", True, "")
+    a.do_boot = lambda: agent.StepResult("boot", True, "")
+    a.run_once()
+    assert order == ["probe", "stop:4321", "land"]
+
+
+def test_stop_failure_aborts_landing(tmp_path):
+    """停不下来就别落位 —— 落在一个还在写的数据目录上，两边各说各话。"""
+    order = []
+    a, _r, spawned, _logs = _agent(tmp_path, status_fetcher=lambda: ledger(target=settings().shell))
+    a.pid_probe = lambda: 4321
+    a.stopper = lambda pid: False
+    a.do_land = lambda gen: (order.append("land"), agent.StepResult("land", True, ""))[1]
+    decision, steps = a.run_once()
+    assert order == []
+    assert any(not s.ok and s.name == "stop" for s in steps)
+
+
+def test_stop_is_a_noop_when_nothing_is_running(tmp_path):
+    order = []
+    a, _r, spawned, _logs = _agent(tmp_path, status_fetcher=lambda: ledger(target=settings().shell))
+    a.pid_probe = lambda: None
+    a.stopper = lambda pid: (order.append("stop"), True)[1]
+    a.do_land = lambda gen: (order.append("land"), agent.StepResult("land", True, ""))[1]
+    a.do_switch_on = lambda: agent.StepResult("switch", True, "")
+    a.do_boot = lambda: agent.StepResult("boot", True, "")
+    a.run_once()
+    assert order == ["land"]
