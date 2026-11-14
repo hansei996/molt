@@ -1,0 +1,23 @@
+{
+  "_note": "复制成 molt-agent.json 再改。它不会自己跑起来——见 docs/SELFUSE.md。",
+  "_note_execute": "execute=false 时只报告不动手。先这样跑一轮看看判决对不对。",
+
+  "execute": false,
+
+  "shell": "win-shell",
+  "data_dir": "D:\\molt\\data",
+  "molt_pkg": "D:\\molt\\molt",
+
+  "python": "py",
+  "boot_script": "D:\\molt\\molt\\tools\\boot-keepalive.py",
+  "astrbot_python": "D:\\astrbot\\venv\\Scripts\\python.exe",
+  "log_path": "D:\\molt\\logs\\astrbot.log",
+  "platform_switch": "D:\\molt\\molt\\tools\\platform-switch.py",
+
+  "warden_url": "http://192.168.1.10:6186",
+  "warden_token": "改成你自己的",
+
+  "port": 6199,
+  "interval": 10.0,
+  "timeout": 15.0
+}

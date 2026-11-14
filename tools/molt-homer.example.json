@@ -1,0 +1,18 @@
+{
+  "_note": "复制成 molt-homer.json 再改。放在 NAS 上，和 molt-homer.py 同目录。",
+  "_note_execute": "execute=false 时只报告不动手。它会在你确认之前不碰生产容器。",
+
+  "execute": false,
+
+  "shell": "nas-shell",
+  "container": "astrbot",
+  "data_dir": "/mnt/dm-0/astrbot/data",
+  "molt_pkg": "/mnt/dm-0/astrbot/_molt/pkg",
+  "platform_switch": "/mnt/dm-0/astrbot/_molt/pkg/tools/platform-switch.py",
+
+  "python": "python3",
+  "warden_url": "http://127.0.0.1:6186",
+  "warden_token": "改成你自己的",
+
+  "interval": 10
+}

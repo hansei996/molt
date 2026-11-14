@@ -1,5 +1,7 @@
 # Molt · 蜕壳
 
+[![tests](https://github.com/hansei996/molt/actions/workflows/ci.yml/badge.svg)](https://github.com/hansei996/molt/actions/workflows/ci.yml) [![python](https://img.shields.io/badge/python-3.10%20%7C%203.13-blue)](https://github.com/hansei996/molt) [![license](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+
 > **让你的 AI 伙伴从一个身体，走进另一个身体。记忆不断，人格不散，旧的那个可以睡去。**
 
 ---

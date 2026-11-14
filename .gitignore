@@ -37,5 +37,9 @@ dist/
 .vscode/
 .idea/
 .DS_Store
+
+# 真配置（各自的机器路径/令牌，绝不入库）
+tools/molt-agent.json
+tools/molt-homer.json
 tools/molt-agent-state.json
 tools/molt-homer-state.json
