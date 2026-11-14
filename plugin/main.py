@@ -85,8 +85,21 @@ from .observed import (  # noqa: E402  (放在常量后面，读起来更顺)
     compose_observation,
     pick_generation,
 )
+from .arrival import (  # noqa: E402
+    ArrivalState,
+    compose_arrival_note,
+    pick_arrival,
+)
 
 OBSERVED_STATE_FILENAME = "observed_state.json"
+
+# 落地播报的状态（"这次落地我说过没有"）。同样放在插件自己目录里，
+# 与 `host_label.txt` 一条理由：属于壳，不属于魂。
+ARRIVAL_STATE_FILENAME = "arrival_state.json"
+
+#: 账本问不到时最多试几次。每次 ledger_status() 自带 5 秒超时，
+#: 所以最坏情况是某一条回复多等 15 秒 —— 再多就该直接放弃说话了。
+ARRIVAL_MAX_ATTEMPTS = 3
 
 
 class MoltControlPlugin(Star):
@@ -114,6 +127,14 @@ class MoltControlPlugin(Star):
         #: 落地之后"我自己看一眼我在哪"的那条后台任务（见 `observed.py`）。
         self._obs_task: asyncio.Task | None = None
         self._obs_state = None
+        #: 落地播报（"我刚从 X 搬过来"）说过没有。
+        self._arrival_state = None
+        #: 这个进程问过账本没有了。**每次落地都是新进程**（land 要求先把容器停掉），
+        #: 所以"一次进程问一次"既够用，又不会让每一条回复都去走一趟 HTTP。
+        self._arrival_checked = False
+        #: 账本暂时问不到时重试几次就放弃 —— 网络抖动不该让人等第四次。
+        self._arrival_attempts = 0
+        self._arrival_said = False
         self._register_api_if_available()
 
     # ------------------------------------------------------------------ 生命周期
@@ -236,6 +257,73 @@ class MoltControlPlugin(Star):
             except Exception as exc:  # pragma: no cover
                 logger.warning("[Molt] 落地观察出错：%s", exc, exc_info=True)
             await asyncio.sleep(DEFAULT_POLL_SECONDS)
+
+    # -------------------------------------------------------- 落地播报（第一句话）
+
+    def _arrival_state_path(self):
+        return Path(__file__).resolve().parent / ARRIVAL_STATE_FILENAME
+
+    def _arrival_state_obj(self):
+        if self._arrival_state is None:
+            self._arrival_state = ArrivalState.load(self._arrival_state_path())
+        return self._arrival_state
+
+    def arrival_note(self) -> str:
+        """这次落地还没说过「我从哪来」，就返回那一行；否则返回空串。
+
+        **永不抛** —— 它挂在每一条回复的发送路径上，抛一次就等于这个人说不出话。
+        读不到账本、拿不到壳名、状态文件坏了：一律安静地返回空串。
+        """
+        if self._mover is None or self._arrival_checked:
+            return ""
+        state = self._arrival_state_obj()
+        try:
+            settings = self._mover.settings()
+            status = self._mover.ledger_status()
+        except Exception as exc:  # pragma: no cover - 防御性
+            logger.info("[Molt] 落地播报：读不到账本，这次不说了（%s）", exc)
+            return ""
+        if not status:
+            # 账本问不到：不猜、不说，但留几次重试的机会 —— 刚落地那几秒
+            # NAS 可能正忙。三次之后就不问了，免得每句话都多等 5 秒。
+            self._arrival_attempts += 1
+            if self._arrival_attempts >= ARRIVAL_MAX_ATTEMPTS:
+                self._arrival_checked = True
+                logger.info("[Molt] 落地播报：账本问了 %d 次都问不到，这次不说了",
+                            self._arrival_attempts)
+            return ""
+        self._arrival_checked = True
+        shell = (settings.shell or self.host_label() or "").strip()
+        arrival = pick_arrival(
+            status,
+            shell=shell,
+            now=time.time(),
+            announced_generation=state.announced_generation,
+        )
+        if arrival is None:
+            return ""
+
+        number = int(arrival["generation"])
+        # 无论说不说，都推到这一代。说过是真的说过，太久也是真的太久 ——
+        # 两种情况都不该让之后的每一条回复再去问一遍账本。
+        stale = bool(arrival.get("stale"))
+        state.mark(number, detail="stale" if stale else "announced")
+        if stale:
+            age = arrival.get("age_seconds")
+            logger.info(
+                "[Molt] 第 %d 代已经是 %.0f 分钟前的事了，不再自称「刚搬过来」",
+                number,
+                (float(age) if age is not None else 0.0) / 60.0,
+            )
+            return ""
+
+        note = compose_arrival_note(
+            generation=number,
+            from_label=str(arrival.get("from_label") or ""),
+            from_shell=str(arrival.get("from_shell") or ""),
+        ).strip()
+        logger.info("[Molt] 第 %d 代落地播报：%s", number, note)
+        return note
 
     # ------------------------------------------------------------------ 平台操作
 
@@ -647,6 +735,34 @@ class MoltControlPlugin(Star):
         日志里能看到 `hook(on_astrbot_loaded) -> meme_manager ...` 就是它。
         """
         self._start_observe_task()
+
+    @filter.on_waiting_llm_request()
+    async def announce_arrival(self, event: AstrMessageEvent) -> None:
+        """在它开口之前，先单独说一句「我刚从 X 搬过来」。
+
+        为什么不再往回复的 chain 前面插一段：**这条回复是流式的**。
+        
+esult_decorate/stage.py:191-193 在 STREAMING_FINISH 时直接 return，
+        而文字早已被逐块推给平台 —— 插进 chain 只是插进一个不会再被发送的对象。
+        实测证据（2026-11-15 04:04）：插件确实记下了「第 15 代落地播报」，
+        但同一秒 
+esult_decorate.stage:169 打了「Plugins that depend on the
+        pre-send event hook may not work correctly when streaming output is
+        enabled.」，而人看到的那句话里没有它。
+
+        所以改成在**发请求之前**单独发一条。三个好处：顺序天然在前、与流式无关、
+        这句话不会被当成模型自己说的话写进对话历史（它是状态播报，不是记忆）。
+        """
+        if self._arrival_said:
+            return
+        note = self.arrival_note()
+        if not note:
+            return
+        self._arrival_said = True
+        try:
+            await event.send(event.plain_result(note))
+        except Exception as exc:  # noqa: BLE001 - 播报失败不该影响这次对话
+            logger.warning("[Molt] 落地播报没发出去：%s", exc)
 
     @filter.after_message_sent()
     async def on_after_message_sent(self, event: AstrMessageEvent):

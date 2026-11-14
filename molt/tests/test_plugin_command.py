@@ -145,7 +145,10 @@ class _Ok:
         ("确认", "confirm"),
         ("取消", "cancel"),
         ("status", "status"),
-        ("在哪", "status"),
+        ("状态", "status"),
+        ("where", "where"),
+        ("在哪", "where"),
+        ("在哪呢", "where"),
         ("help", "help"),
         ("", ""),
         ("随便说点什么", ""),
@@ -259,8 +262,36 @@ def test_disabled_refuses_confirm(plugin_dir):
 
 
 def test_disabled_still_answers_status(plugin_dir):
+    """`enabled=false` 只该关掉"搬家"，不该关掉"看一眼"。
+
+    早先这条路径返回的是"入口没开……现在能做的只有查询"，然后**拒绝查询**。
+    默认配置下每个人都会撞到这句话，而它自己打自己的脸。
+    """
     m = mover(plugin_dir)
-    assert "没开" in m.handle("status").text
+    text = m.handle("status").text
+    assert "没开" not in text
+    assert "账本 epoch" in text
+
+
+def test_disabled_still_answers_where(plugin_dir):
+    m = mover(plugin_dir)
+    text = m.handle("where").text
+    assert text.startswith("我现在在 **")
+
+
+def test_where_says_less_than_status(plugin_dir):
+    """两个词各自算数：`where` 只答位置，`status` 是它的超集。
+
+    比的是它们**各自真的该有的东西**，而不是"谁更短"——后者会把
+    "`where` 少打一行"和"`status` 多打一行"当成同一件事。
+    """
+    m = mover(plugin_dir)
+    where = m.handle("where").text
+    status = m.handle("status").text
+    assert "我现在在 **" in where
+    assert "账本 epoch" not in where          # 账本数字不是"在哪"
+    assert "我现在在 **" in status            # 但 status 仍然带上位置
+    assert "账本 epoch" in status
 
 
 def test_incomplete_config_refuses_go(plugin_dir):

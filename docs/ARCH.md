@@ -2,7 +2,7 @@
 
 > **Molt / 蜕壳** —— 让一个数字生命在多台机器之间迁徙，而它的记忆原地不动。
 >
-> 文档状态：Draft v0.10 · 基于真实硬件实测（NAS + Windows 双机）· 所有关键结论标注证据等级
+> 文档状态：Draft v0.11 · 基于真实硬件实测（NAS + Windows 双机）· 所有关键结论标注证据等级
 >
 > **已验证的关卡**（截至 2026-11-14 23:15 —— **两个方向都跑通，两套命令走完，最后一个产品级未知数也回答了**）：
 > ✅ Windows 原生跑 AstrBot（178 包零缺 wheel）· ✅ 记忆跨机往返字节一致 · ✅ AstrBot 消费还原数据并读出人格
@@ -903,6 +903,47 @@ manifest 里必须记：
 
 **它不解决什么**：心跳证明"某个壳在报"，不证明"鱼在说话"。两者之间还差一层 ——
 `speaking` 字段（控制面 `/status`）。心跳变哑只能说明那一侧没人报了，需要人去判断。
+
+`/molt where` 与 `/molt status` 现在是**两层**，不是两个名字：`where` 只答"在哪"
+（位置 + 各壳心跳，且不检查 `enabled` —— 查询是只读的，装上就该能用），
+`status` 是它的超集（再加账本 epoch、租约持有人、最新一代的来去）。
+早先它们被并成一套五个词一份输出，结果是**名字暗示两种内容、实际只有一份**。
+
+### 6.2.13 落地播报：为什么它必须是一条单独的消息
+
+到了新壳上，它开口的第一句回复之前先单独发一条
+`（我刚从 UGREEN-776B 搬过来，这是第 15 代。）`。
+
+需求侧理由：QQ 官方机器人的**资料页、昵称、签名只能在开放平台后台改**，程序没有接口。
+"它换了台机器"这件事只有它自己说出来才到得了人眼前。
+
+**第一版做错了，而且是"看起来完全成功"的错**：用
+`@filter.on_decorating_result()` 把 `Plain` 插到 `result.chain[0]`。日志里
+`[Molt] 第 15 代落地播报：（…）` 打得清清楚楚，`arrival_state.json` 也写好了，
+**人却一个字都没看见**。
+
+根因（`G:\molt-p0\astrbot-src`）：
+
+| 证据 | 内容 |
+|---|---|
+| `pipeline/result_decorate/stage.py:137` | `is_stream = result.result_content_type == ResultContentType.STREAMING_FINISH` |
+| `pipeline/result_decorate/stage.py:191-193` | `if is_stream: return` |
+| 同一秒日志 | 20 条 `Plugins that depend on the pre-send event hook may not work correctly when streaming output is enabled.` |
+| `platform/sources/webchat/request_flags.py:6` | `"enable_streaming": True` |
+| `platform/platform_metadata.py:20` | `support_streaming_message: bool = True`（默认值，QQ 官方适配器**没有覆盖**） |
+
+→ 文字早已一块块推给平台了，**往那个 chain 里插东西等于插进一个不会再被发送的对象**。
+而且 `state.mark()` 在组装时就执行了，于是"生效了一次，永远不再播"。
+
+修法：换通道，用 `@filter.on_waiting_llm_request()` + `await event.send(event.plain_result(note))`。
+三条好处：顺序天然在前、**与流式开关无关**、这句话不会被当成模型自己说的话写进对话历史。
+
+四条自我约束（缺一条就不要这个功能）：只在一个 30 分钟窗口里说一次 /
+来源与代号必须能在账本里查到否则闭嘴 / 问不到账本最多试 3 次就放弃（每次都是带超时的
+HTTP，不封顶等于让一次问话先等 5 秒）/ 发不出去也只算一次（重试会刷成复读机）。
+
+**通用教训**：标记"说过了"的时机必须在"真的送到"之后。日志里有一行成功，
+和用户屏幕上有一个字，是两件事。
 
 ## 7. 机器专属 vs 可共享的边界
 

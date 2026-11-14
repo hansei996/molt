@@ -112,9 +112,15 @@ def _where_html(status: Dict[str, Any]) -> str:
         stale = beat.get("stale")
         color = "#b42318" if stale else "#067647"
         word = "哑了" if stale else "在跑"
+        label = str(beat.get("label") or "").strip()
+        name = (
+            f"<b>{esc(label)}</b><br><span style=\"color:#98a2b3;font-size:12px\">{esc(shell_id)}</span>"
+            if label
+            else f"<b>{esc(shell_id)}</b>"
+        )
         rows.append(
             "<tr>"
-            f"<td><b>{esc(shell_id)}</b></td>"
+            f"<td>{name}</td>"
             f'<td style="color:{color};font-weight:600">{word}</td>'
             f"<td>{esc(beat.get('age_readable', ''))}</td>"
             f"<td>{esc(beat.get('generation', ''))}</td>"
@@ -287,6 +293,7 @@ class WardenServer:
                     shell_id,
                     generation=generation,
                     note=str(body.get("note") or ""),
+                    label=str(body.get("label") or ""),
                 )
                 return _ok(heartbeat=beat)
 

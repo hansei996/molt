@@ -98,7 +98,11 @@ PRE_RUN_DELAY_SECONDS = 2.0
 GO_WORDS = {"go", "home", "gohome", "回家", "回nas", "迁徙", "搬家", "去windows", "去win"}
 CONFIRM_WORDS = {"confirm", "yes", "ok", "确认", "确定", "走"}
 CANCEL_WORDS = {"cancel", "no", "取消", "算了", "不走了"}
-STATUS_WORDS = {"status", "where", "状态", "在哪", "在哪呢"}
+#: 「你在哪」和「账本怎么样」是两件事，所以两套词、两份输出。
+#: 早先它们被并成一套（五个词一份输出），结果是**名字暗示两种内容、实际只有一份**——
+#: 一个说自己叫 `where` 却回了一大段账本数字的命令，比没有这个命令更让人困惑。
+WHERE_WORDS = {"where", "在哪", "在哪呢"}
+STATUS_WORDS = {"status", "状态"}
 HELP_WORDS = {"help", "?", "帮助", "怎么用"}
 
 
@@ -119,6 +123,8 @@ def normalize_args(raw: str) -> str:
         return "confirm"
     if first in CANCEL_WORDS:
         return "cancel"
+    if first in WHERE_WORDS:
+        return "where"
     if first in STATUS_WORDS:
         return "status"
     if first in HELP_WORDS:
@@ -344,12 +350,21 @@ class MoltMover:
             lines.extend(others)
         return lines
 
+    def _where_text(self, cfg: Settings) -> str:
+        """只回答"你在哪"。
+
+        **不检查 `enabled`**：查位置是只读的，插件装上就该能用。
+        "能不能搬家"和"能不能告诉我它在哪"是两件事，把它们绑在一起，
+        只会让人为了看一眼位置去开一个会搬家的开关。
+        """
+        st = self.ledger_status()
+        if st is None:
+            return f"问不到账本：{cfg.warden_url or '（warden_url 没配）'}\n它可能没在跑，也可能这台壳够不到它。"
+        return "\n".join(self._where_lines(st))
+
     def _status_text(self, cfg: Settings) -> str:
-        if not cfg.enabled:
-            return (
-                "迁徙入口没开（`molt_command.json` 里 `enabled` 是 false 或文件不存在）。\n"
-                "现在能做的只有查询。要开就改那个文件，不用重启我。"
-            )
+        # 早先这里在 `not cfg.enabled` 时直接返回"入口没开，现在能做的只有查询"，
+        # 然后**拒绝查询** —— 一句自己打自己脸的话，而且默认配置下每个人都撞得到。
         st = self.ledger_status()
         if st is None:
             return f"问不到账本：{cfg.warden_url or '（warden_url 没配）'}\n它可能没在跑，也可能这台壳够不到它。"
@@ -396,6 +411,8 @@ class MoltMover:
 
         if want == "" or want == "help":
             return Reply(self._help_text(cfg))
+        if want == "where":
+            return Reply(self._where_text(cfg))
         if want == "status":
             return Reply(self._status_text(cfg))
         if want == "go":
@@ -410,7 +427,8 @@ class MoltMover:
         state = "已开启" if cfg.enabled else "未开启"
         return (
             f"迁徙入口当前{state}。\n"
-            "· `/molt status` —— 现在谁在线、账本第几代\n"
+            "· `/molt where` —— 我现在在哪台机器上、谁还活着\n"
+            "· `/molt status` —— 上面那些，加上账本第几代、租约在谁手上\n"
             "· `/molt go` —— 提议搬去 " + (cfg.target or "（target 未配）") + "，我会问你确认\n"
             "· `/molt confirm` —— 真的搬（会先把我的嘴闭上，再说再见）\n"
             "· `/molt cancel` —— 取消还没确认的提议"

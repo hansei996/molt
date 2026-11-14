@@ -38,6 +38,7 @@ import argparse
 import inspect
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -155,7 +156,9 @@ class Warden:
         self.token = token
         self.timeout = timeout
 
-    def heartbeat(self, shell_id: str, *, generation: int = 0, note: str = "") -> bool:
+    def heartbeat(
+        self, shell_id: str, *, generation: int = 0, note: str = "", label: str = ""
+    ) -> bool:
         """告诉账本「我还在」。
 
         为什么需要：账本其它字段都只记「谁取走了第几代」，没有一处回答
@@ -166,7 +169,12 @@ class Warden:
         if not shell_id:
             return False
         body = json.dumps(
-            {"shell_id": shell_id, "generation": int(generation), "note": note}
+            {
+                "shell_id": shell_id,
+                "generation": int(generation),
+                "note": note,
+                "label": label or socket.gethostname(),
+            }
         ).encode("utf-8")
         req = urllib.request.Request(
             f"{self.base_url}/heartbeat",

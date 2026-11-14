@@ -51,6 +51,25 @@ def _install_astrbot_stub() -> None:
     util = types.ModuleType("astrbot.api.util")
     util.__path__ = []
 
+    # ---- astrbot.api.message_components ---------------------------------------
+    #
+    # 落地播报（`plugin/arrival.py` 的接线）要在**发出去的那条回复前面**插一行字，
+    # 做法是往 `result.chain` 里 insert 一个 `Plain`。真实 AstrBot 里这个类就是
+    # `astrbot/api/message_components.py`（`from astrbot.core.message.components import *`）。
+    # 桩只提供 `Plain(text)` 这个最小形状 —— 测试要验的是"插进去的是哪句话、
+    # 插在第几位、插了几次"，不是"Plain 在真实链条里怎么渲染"。
+    message_components = types.ModuleType("astrbot.api.message_components")
+
+    class Plain:  # noqa: D101 - 桩
+        def __init__(self, text=""):
+            self.text = text
+
+        def __repr__(self):  # pragma: no cover - 调试用
+            return f"Plain({self.text!r})"
+
+    message_components.Plain = Plain
+    api.message_components = message_components
+
     # ---- astrbot.api.event / astrbot.api.event.filter -------------------------
     #
     # 聊天指令层（`plugin/command.py` 的薄壳在 `main.py` 里）要的是这几个名字：
@@ -126,6 +145,7 @@ def _install_astrbot_stub() -> None:
     sys.modules["astrbot.api"] = api
     sys.modules["astrbot.api.star"] = star
     sys.modules["astrbot.api.util"] = util
+    sys.modules["astrbot.api.message_components"] = message_components
     sys.modules["astrbot.api.event"] = event
     sys.modules["astrbot.api.event.filter"] = event_filter
 

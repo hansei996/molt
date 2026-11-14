@@ -541,13 +541,17 @@ class Warden:
     # ---------------------------------------------------------------- 心跳
 
     def record_heartbeat(
-        self, shell_id: str, *, generation: int = 0, note: str = ""
+        self, shell_id: str, *, generation: int = 0, note: str = "", label: str = ""
     ) -> Dict[str, Any]:
         """记一次「我还在」。
 
         为什么需要它：账本原来的每个字段回答的都是**过去**（谁取走了第几代），
         没有任何东西回答「现在谁还在跑」。于是鱼被拔电之后 `molt status`
         看起来一切正常 —— 它分不清「鱼死了」和「鱼闲着」。
+
+        `label` 是这台机器**人读得懂的名字**（`UGREEN-776B`、`DESKTOP-H2KGIAO`）。
+        `shell_id` 是人造的主键（`ugreen-776b-8b7896df`），出现在「我刚从 X 搬过来」
+        这句话里会很别扭。两者都要：一个用来对账，一个用来对话。
         """
         if not shell_id:
             raise NeedsHuman("心跳必须带 shell_id")
@@ -576,6 +580,9 @@ class Warden:
                 "generation": int(generation) or int(previous.get("generation") or 0),
                 "note": str(note)[:200],
                 "roles": seen,
+                # 空 label 不覆盖已有的那次 —— 老版本的守护进程不发 label，
+                # 不该因为它上报了一次就把已经知道的名字抹成空。
+                "label": str(label).strip()[:80] or str(previous.get("label") or ""),
             }
             # 只留最近 8 个壳。这是「当前状态」不是「历史」：留太多会让
             # `molt status` 里混进一堆早就没了的机器。
@@ -600,6 +607,7 @@ class Warden:
                 "last_seen_readable": beat.get("last_seen_readable", ""),
                 "note": " / ".join(beat.get("roles") or [beat.get("note", "")]).strip(" /"),
                 "roles": list(beat.get("roles") or []),
+                "label": str(beat.get("label") or ""),
                 "stale": age > HEARTBEAT_STALE_SECONDS,
             }
         return out
