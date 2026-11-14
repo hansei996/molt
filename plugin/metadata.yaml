@@ -1,24 +1,28 @@
 name: astrbot_plugin_molt
 display_name: Molt 蜕壳 · 控制面
-author: molt
+author: hansei996
 version: 0.1.0
-description: >-
-  把 AstrBot 变成一个"可以交出自己"的壳。提供四个控制面端点：查看状态、断开平台连接（drain）、
-  重新连上（resume）、把 WAL 合并进主库（checkpoint）。
-  它只做三件事：报告自己是谁、停止对外说话、以及在被允许的时候重新开口。
-  它不认识 Molt 的账本，也从不自己决定该不该上线——那个判断属于 NAS 上的 Warden。
-desc: 让 AstrBot 支持优雅交出灵魂（drain / resume / checkpoint），配合 molt 完成跨机迁徙。
-repo: https://github.com/molt-dev/molt
-category: 工具
-tags:
-  - 迁徙
-  - 优雅停机
-  - 控制面
-icon: logo.png
+desc: |-
+  让 AstrBot 成为一个"可以交出自己"的壳。
+
+  它提供两样东西：
+  1. 四个控制面端点（/status /drain /resume /checkpoint），让外部程序可以在
+     不杀死进程的前提下让机器人"停止对外说话"，复核它真的安静了，然后再让它开口。
+  2. 一条聊天指令 `/molt go` → `/molt confirm`，让人可以在 QQ 里直接触发一次
+     跨机迁徙（需要配合 molt 本体与账本，见 https://github.com/hansei996/molt）。
+
+  装它本身不会让机器人搬家，也不会改变任何现有行为：配置文件不存在时，
+  指令层默认关闭，四个端点只报告状态。
+
+  设计上只碰 AstrBot 的公开接缝：context.platform_manager 与 context.register_web_api。
+repo: https://github.com/hansei996/astrbot_plugin_molt
+astrbot_version: ">=4.24.0"
 support_platforms:
   - qq_official
   - aiocqhttp
   - weixin_oc
-  - wechat_native
   - telegram
-astrbot_version: ">=4.24.0"
+tags:
+  - 迁徙
+  - 优雅停机
+  - 控制面

@@ -242,6 +242,21 @@ untime_pip 清单就是为这个留的，
 
 ## 怎么装
 
+### AstrBot 侧插件（可选）
+
+```
+# 直接放进 AstrBot 的插件目录
+git clone https://github.com/hansei996/astrbot_plugin_molt \
+  <AstrBot data>/plugins/astrbot_plugin_molt
+```
+
+它提供四个控制面端点（`drain` / `resume` / `checkpoint` / `status`），
+以及在 QQ 里用 `/molt go` 触发迁徙的指令层。**装它本身不会让机器人搬家**，
+配置文件不存在时指令层是关着的。详见
+[astrbot_plugin_molt](https://github.com/hansei996/astrbot_plugin_molt)。
+
+### molt 本体
+
 运行时**零第三方依赖**（只用标准库）。这不是"暂时没写依赖"，是设计——
 Warden 必须能在 NAS 宿主上裸跑（实测那台 UGREEN-776B 只有 python 3.10.7，什么都没装）。
 
