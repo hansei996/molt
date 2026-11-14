@@ -598,9 +598,11 @@ def test_shutdown_after_leave_does_not_fire_for_my_own_generation(tmp_path):
     assert not [c for c in calls if c and c[0] == "shutdown"]
 
 
-def test_leave_sleeps_instead_of_shutdown_when_power_action_is_sleep(tmp_path):
+def test_leave_sleeps_instead_of_shutdown_when_power_action_is_sleep(tmp_path, monkeypatch):
     """睡眠这条路不需要开机密码 —— 会话不销毁，醒来一切照旧。"""
     mod = sys.modules["molt_agent_under_test"]
+    monkeypatch.setattr(mod, "_away_mode_enabled", lambda: False)
+    monkeypatch.setattr(mod, "_suspend_now", lambda: (True, "已挂起"))
     calls = []
     cfg = settings(shutdown_after_leave=True, execute=True, power_action="sleep")
     st = {"latest_generation": {"generation": 12, "target_shell": "nas-shell",
@@ -612,8 +614,41 @@ def test_leave_sleeps_instead_of_shutdown_when_power_action_is_sleep(tmp_path):
     _d, steps = agent.run_once()
     assert [s.name for s in steps] == ["shutdown"]
     assert steps[0].ok is True
-    assert calls and calls[-1][0] == "rundll32.exe"
-    assert "SetSuspendState" in calls[-1][1]
+    assert "睡着了" in steps[0].detail
+    assert not [c for c in calls if c and c[0] == "shutdown"]
+
+
+def test_away_mode_is_refused_and_explained(tmp_path, monkeypatch):
+    """开着离开模式时，API 会返回成功但机器根本没睡 —— 不能假装成功。"""
+    mod = sys.modules["molt_agent_under_test"]
+    monkeypatch.setattr(mod, "_away_mode_enabled", lambda: True)
+    cfg = settings(shutdown_after_leave=True, execute=True, power_action="sleep")
+    st = {"latest_generation": {"generation": 14, "target_shell": "nas-shell",
+          "consumed_by": None, "pushed_by": "win-shell"}, "lease": None}
+    agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
+                      status_fetcher=lambda: st, runner=_recorder([]),
+                      port_probe=lambda port: False, spawner=lambda argv: 1,
+                      log=lambda m: None)
+    _d, steps = agent.run_once()
+    assert steps and steps[-1].ok is False
+    assert "离开模式" in steps[-1].detail
+    assert "molt-sleep-task.ps1" in steps[-1].detail
+
+
+def test_suspend_failure_is_reported(tmp_path, monkeypatch):
+    mod = sys.modules["molt_agent_under_test"]
+    monkeypatch.setattr(mod, "_away_mode_enabled", lambda: False)
+    monkeypatch.setattr(mod, "_suspend_now", lambda: (False, "SetSuspendState 返回 False（5）"))
+    cfg = settings(shutdown_after_leave=True, execute=True, power_action="sleep")
+    st = {"latest_generation": {"generation": 15, "target_shell": "nas-shell",
+          "consumed_by": None, "pushed_by": "win-shell"}, "lease": None}
+    agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
+                      status_fetcher=lambda: st, runner=_recorder([]),
+                      port_probe=lambda port: False, spawner=lambda argv: 1,
+                      log=lambda m: None)
+    _d, steps = agent.run_once()
+    assert steps[-1].ok is False
+    assert "SetSuspendState" in steps[-1].detail
 
 
 def test_unknown_power_action_is_refused_not_guessed(tmp_path):
@@ -629,4 +664,6 @@ def test_unknown_power_action_is_refused_not_guessed(tmp_path):
     _d, steps = agent.run_once()
     assert steps and steps[-1].ok is False
     assert "只认 sleep / shutdown" in steps[-1].detail
-    assert not [c for c in calls if c and c[0] in ("shutdown", "rundll32.exe")]
+    assert not [c for c in calls if c and c[0] in ("shutdown", "rundll32.exe", "schtasks")]
+
+

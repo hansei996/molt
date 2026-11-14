@@ -50,6 +50,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 ENCODING = "utf-8-sig"
 CONFIG_FILENAME = "molt-agent.json"
 STATE_FILENAME = "molt-agent-state.json"
+SLEEP_TASK_NAME = "Molt-Sleep"
 DEFAULT_INTERVAL = 10.0
 DEFAULT_TIMEOUT = 15.0
 DEFAULT_PORT = 6199
@@ -428,14 +429,15 @@ class Agent:
         if action == "sleep":
             # 睡眠：会话不销毁，唤醒后一切照旧 —— 这是**不需要开机密码**的那条路。
             # 关机和睡眠的区别不是省不省电，是"回来的时候要不要有人在键盘前"。
-            argv = ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"]
-            try:
-                proc = self.runner(argv, capture_output=True, text=True, timeout=20)
-            except (OSError, subprocess.SubprocessError) as exc:
-                return StepResult("shutdown", False, f"起不来：{exc}")
-            code = getattr(proc, "returncode", 0)
-            if code != 0:
-                return StepResult("shutdown", False, f"退出码 {code}")
+            if _away_mode_enabled():
+                return StepResult(
+                    "shutdown", False,
+                    "这台机器开着「离开模式」（AwayModeEnabled=1）：睡眠请求会被翻译成"
+                    "「屏幕关掉、整机继续跑」，API 还返回成功 —— 看起来睡了其实没睡。"
+                    "要真睡，需要一次管理员：tools/molt-sleep-task.ps1 -DisableAwayMode")
+            ok, why = _suspend_now()
+            if not ok:
+                return StepResult("shutdown", False, why)
             return StepResult("shutdown", True,
                               f"机器睡着了（第 {generation} 代已经交给别人；唤醒靠魔术封包）")
         delay = int(self.settings.shutdown_delay_seconds)
@@ -656,6 +658,82 @@ def checkpoint_databases(data_dir: str) -> list:
             after = 0
         out.append((str(db.relative_to(root)), before, after))
     return out
+
+
+def _away_mode_enabled() -> bool:
+    """这台机器有没有开「离开模式」。
+
+    开着的话 SetSuspendState 会被翻译成 away mode：屏幕关掉、整机继续跑，
+    而 API 依然返回 TRUE。2026-11-15 真机上就是这样，Kernel-Power 59 写着
+    「系统正在进入离开模式」——**一次都没睡过**，但每次调用都报成功。
+    """
+    if os.name != "nt":                       # pragma: no cover
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SYSTEM\CurrentControlSet\Control\Session Manager\Power") as k:
+            value, _ = winreg.QueryValueEx(k, "AwayModeEnabled")
+            return int(value) != 0
+    except (OSError, ValueError):             # pragma: no cover - 读不到就当没开
+        return False
+
+
+def _suspend_now() -> tuple:
+    """真的把机器挂起。返回 (成功, 说明)。
+
+    为什么要先 AdjustTokenPrivileges：SetSuspendState 要 SeShutdownPrivilege，
+    而这个特权**在令牌里但是被禁用的** —— 普通进程解不开它，调用就静默失败。
+    shutdown.exe 自己会做这一步，所以它能用；我们照做。
+    """
+    if os.name != "nt":                       # pragma: no cover
+        return False, "只有 Windows 才这么睡"
+    import ctypes
+    import ctypes.wintypes as w
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = w.HANDLE
+    advapi.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE)]
+    advapi.OpenProcessToken.restype = w.BOOL
+    advapi.LookupPrivilegeValueW.argtypes = [w.LPCWSTR, w.LPCWSTR, ctypes.c_void_p]
+    advapi.LookupPrivilegeValueW.restype = w.BOOL
+    advapi.AdjustTokenPrivileges.argtypes = [w.HANDLE, w.BOOL, ctypes.c_void_p,
+                                             w.DWORD, ctypes.c_void_p, ctypes.c_void_p]
+    advapi.AdjustTokenPrivileges.restype = w.BOOL
+
+    class _Luid(ctypes.Structure):
+        _fields_ = [("LowPart", w.DWORD), ("HighPart", w.LONG)]
+
+    class _Laa(ctypes.Structure):
+        _fields_ = [("Luid", _Luid), ("Attributes", w.DWORD)]
+
+    class _Tp(ctypes.Structure):
+        _fields_ = [("PrivilegeCount", w.DWORD), ("Privileges", _Laa * 1)]
+
+    try:
+        hp = w.HANDLE()
+        if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x0020 | 0x0008,
+                                       ctypes.byref(hp)):
+            return False, f"OpenProcessToken 失败（{ctypes.get_last_error()}）"
+        luid = _Luid()
+        if not advapi.LookupPrivilegeValueW(None, "SeShutdownPrivilege", ctypes.byref(luid)):
+            return False, f"找不到 SeShutdownPrivilege（{ctypes.get_last_error()}）"
+        tp = _Tp()
+        tp.PrivilegeCount = 1
+        tp.Privileges[0].Luid = luid
+        tp.Privileges[0].Attributes = 0x0002      # SE_PRIVILEGE_ENABLED
+        advapi.AdjustTokenPrivileges(hp, False, ctypes.byref(tp), 0, None, None)
+        if ctypes.get_last_error() not in (0,):   # 1300 = 令牌里没有这个特权
+            return False, f"没能启用关机特权（{ctypes.get_last_error()}）"
+        powr = ctypes.WinDLL("powrprof", use_last_error=True)
+        powr.SetSuspendState.argtypes = [w.BOOLEAN, w.BOOLEAN, w.BOOLEAN]
+        powr.SetSuspendState.restype = w.BOOLEAN
+        if not powr.SetSuspendState(False, False, False):
+            return False, f"SetSuspendState 返回 False（{ctypes.get_last_error()}）"
+        return True, "已挂起"
+    except (OSError, AttributeError) as exc:
+        return False, f"挂起失败：{exc}"
 
 
 def _pid_alive(pid: int) -> bool:
