@@ -18,6 +18,21 @@
 
 ---
 
+## 装起来看它跑（两分钟）
+
+```bash
+pip install -e .
+molt init --role warden --root ./warden      # 立账本，生成 token 并打印 serve 命令
+molt init --role agent --out ./agent.json --shell my-box \
+    --data ./astrbot-data --warden-url http://<账本IP>:6186 --token <上一步的 token>
+molt doctor --config ./agent.json --role agent   # 自检：加载器读得过吗 / 连得上吗 / token 对吗
+```
+
+`molt init` 写出来的配置会**先交给守护进程自己的加载器读一遍**，读不过就不写盘 ——
+生成器自己认为对，不算数。装完不会自己动手（`execute: false`），要它动手得你改。
+
+完整路径见 [docs/INSTALL.md](docs/INSTALL.md)。
+
 ## 它解决什么问题
 
 你在 NAS 上养了一条 AI 伙伴。它有记忆、有人格、认得你。
@@ -238,6 +253,23 @@ molt recover --backup <名字> --data <目标 data 目录> --yes
 **16 个故障场景，16 个符合声称的行为**（`python tools/fault-matrix.py`，含打包中途死、改名失败、归档被改一字节、上传被截断、落位中途死、快照带非空 WAL、账本被截断、两壳抢租约、旧 epoch 写入、心跳停摆、时钟倒退、盘满、manifest 三种坏法、未完成标记两种状态）。
 
 有意思的是**第一次跑出来是 13/16，那些 FAIL 没有一条是产品的 bug** —— 全是注入脚本自己写错了（路由写成 `POST /archive` 而实际是 `PUT /archive/<N>`、目标目录没建、断言太宽）。详细复盘在 [`docs/FAULTS.md`](docs/FAULTS.md)，那比矩阵本身更值得读。
+
+## v0.5：让陌生人装得起来
+
+v0.4 修的是「看起来像成功的中间态」。v0.5 修的是另一件同样会骗人的事：**一份
+看起来对、但守护进程读不过的配置**，以及**一个装不起来却没有报错的环境**。
+
+| 加的东西 | 它替掉的是什么 |
+|---|---|
+| `molt init --role agent/homer/warden` | 人肉手写十几行 JSON、手抄 token |
+| 落盘前用真加载器验一遍 | 写出一份"看着对"但起不来的配置 |
+| 缺壳名就明确拒绝（不猜） | 猜错壳名 → 这台机器永远不动，且不报错 |
+| 已有配置默认不覆盖（`--force` 才覆盖，留 `.bak`） | 一次重跑把调通的配置冲掉 |
+| `molt doctor --config` | 401 / 连不上 / 读不过 三种失败混成一句「它不动」 |
+
+为什么不先做"第二宿主适配器"（原计划的 v0.5）：`PLAN.md` §4.2 原定通用化，
+但第二宿主在真实环境里没有消费者，而 v1.0 的验收标准（一条命令装起来）现在一条
+都没做。理由写在 [docs/V0.5-PLAN.md](docs/V0.5-PLAN.md) §0。
 
 ## 已知限制（诚实版）
 

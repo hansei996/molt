@@ -227,8 +227,11 @@ Kleppmann 那篇 `How to do distributed locking`（2016-02-08）里说得最狠�
 
 > **2026-11-15 更新**：括号里是实际状态。**v0.1–v0.4 已经全部完成**（v0.4 的
 > 16 个故障场景全过，见 [`docs/FAULTS.md`](FAULTS.md)；证据见 `docs/ARCH.md`
-> 与 `docs/SESSION-STATE.md`）。**下一个版本是 v0.5 通用化**（第二宿主适配器），
-> 任务台账待立。
+> 与 `docs/SESSION-STATE.md`）。**下一个版本是 v0.5 可安装可自检**：
+> `molt init` 生成配置（落盘前过真加载器）+ `molt doctor --config` 自检 +
+> [INSTALL.md](INSTALL.md) 十分钟路径。原定的「通用化（第二宿主适配器）」推到
+> v0.6，理由见 [V0.5-PLAN.md](V0.5-PLAN.md) §0：第二宿主没有真实消费者，
+> 而 v1.0 的验收标准（一条命令装起来）此前一条都没做。
 
 | 版本 | 目标 | 验收标准 | 预估 | 状态 |
 |---|---|---|---|---|
@@ -236,7 +239,7 @@ Kleppmann 那篇 `How to do distributed locking`（2016-02-08）里说得最狠�
 | **v0.2** 租约 | 证明互斥 | Warden + epoch；故意制造 split brain，验证旧 epoch 被拒 | 1 周 | ✅ 完成 |
 | **v0.3** 自动化 | 端到端可用 | QQ 一条命令完成迁徙/归巢，全程 < 2 分钟 | 2 周 | ✅ 完成（真机 20 秒） |
 | **v0.4** 硬化 | 故障注入 | 断电、断网、时钟漂移、库损坏注入，全部安全失败 | 2 周 | ✅ 完成（16 场景全过，见 [`docs/FAULTS.md`](FAULTS.md)） |
-| **v0.5** 通用化 | 脱离 AstrBot | 第二个 adapter（如 MaiBot / 纯 Python 宿主）跑通 | 3 周 | 未开始 |
+| **v0.5** 可安装可自检 | 陌生人装得起来 | `molt init` 生成三种角色配置（过真加载器才落盘）+ `molt doctor --config` 自检 + [INSTALL.md](INSTALL.md) 十分钟路径 | 1 周 | 🔧 进行中（T1/T2 完成，见 [V0.5-PLAN.md](V0.5-PLAN.md)） |
 | **v1.0** 开源发布 | 别人能用 | 完整文档、Docker 镜像、插件市场上架、CI、迁移日志可视化 | 2 周 | 部分（CI ✅、插件市场已提交待审） |
 
 **两个曾经的最大风险，现在都已实测排除**：

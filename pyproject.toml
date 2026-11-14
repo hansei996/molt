@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "molt"
-version = "0.4.0"
+version = "0.5.0"
 description = "让一个数字生命从一台机器，走进另一台机器；旧壳留下，魂走。"
 readme = "README.md"
 requires-python = ">=3.10"

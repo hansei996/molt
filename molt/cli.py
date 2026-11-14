@@ -35,7 +35,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import __version__
+from . import __version__, initcfg
 from .backend import LocalBackend, RemoteBackend, open_backend
 from .epoch import DEFAULT_LEASE_TTL_SECONDS
 from .errors import (
@@ -2059,6 +2059,140 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_init(args: argparse.Namespace) -> int:
+    """把「第一次装」这件事从 README 搬进代码。
+
+    它只做三件事：写一份**能被真正的加载器读通**的配置、生成一个不会被
+    shell 咬到的 token、把「下一步该敲什么」打印出来。它不猜壳名，也不
+    覆盖已有配置 —— 一份调通的配置比一份「更新过的」配置值钱。
+    """
+    role = str(getattr(args, "role", "") or "").strip()
+    if role not in ("agent", "homer", "warden"):
+        bad(f"不认识的角色：{role or '（空）'}")
+        dim("  只有 agent（Windows / 裸机壳）、homer（NAS / 容器壳）、warden（账本服务）")
+        return 2
+
+    head(f"初始化：{role}")
+
+    if role == "warden":
+        root = Path(getattr(args, "root", "") or DEFAULT_ROOT).expanduser()
+        token = str(getattr(args, "token", "") or "").strip() or initcfg.new_token()
+        root.mkdir(parents=True, exist_ok=True)
+        token_path = root / "warden.token"
+        token_path.write_text(token + "\n", encoding="utf-8")
+        try:
+            token_path.chmod(0o600)
+        except OSError:
+            pass
+        kv("根目录", root)
+        kv("token 文件", token_path)
+        kv("token", token)
+        info("下一步：")
+        dim(
+            f"  python3 -m molt.cli serve --root {root} --host 0.0.0.0 "
+            f"--port 6186 --token {token}"
+        )
+        dim("  然后交给一个守护进程（NAS 上用 tools/molt-supervise.py，它只补不杀）")
+        dim("  另外两台壳的配置里，warden_token 都填这个值")
+        return 0
+
+    shell = str(getattr(args, "shell", "") or "").strip()
+    if not shell:
+        bad("没有壳名，我不猜")
+        dim("  --shell 是账本里别人会写下的那个字符串（比如 desktop-h2kgiao）")
+        dim(f"  如果确认这台机器就叫这个名字，加 --shell {initcfg.hostname_shell_id()}")
+        return 2
+
+    data_dir = str(getattr(args, "data", "") or "").strip()
+    if not data_dir:
+        bad("没有 --data —— 落位目标是哪，这件事没有默认值")
+        return 2
+
+    warden_url = str(getattr(args, "warden_url", "") or "").strip()
+    if not warden_url:
+        bad("没有 --warden-url —— 账本在哪台机器上，这件事没有默认值")
+        return 2
+
+    warden_token = str(getattr(args, "token", "") or "").strip()
+    if not warden_token:
+        bad("没有 --token")
+        dim("  账本那台机器上的 <root>/warden.token 就是它；没有就先去那边跑 molt init --role warden")
+        return 2
+
+    molt_pkg = str(getattr(args, "molt_pkg", "") or "").strip()
+    if not molt_pkg:
+        # 默认就是这份代码自己所在的包根 —— 人在本仓库里跑 init 时不用再写一遍。
+        molt_pkg = str(Path(__file__).resolve().parent.parent)
+    python = str(getattr(args, "python", "") or "").strip() or sys.executable
+
+    default_out = "molt-agent.json" if role == "agent" else "molt-homer.json"
+    out = Path(str(getattr(args, "out", "") or default_out)).expanduser()
+
+    try:
+        payload = initcfg.build(
+            role=role,
+            out=out,
+            shell=shell,
+            data_dir=data_dir,
+            molt_pkg=molt_pkg,
+            python=python,
+            warden_url=warden_url,
+            warden_token=warden_token,
+            astrbot_python=str(getattr(args, "astrbot_python", "") or "").strip(),
+            boot_script=str(getattr(args, "boot_script", "") or "").strip(),
+            log_path=str(getattr(args, "log_path", "") or "").strip(),
+            platform_switch=str(getattr(args, "platform_switch", "") or "").strip(),
+            port=int(getattr(args, "port", DEFAULT_DASHBOARD_PORT) or DEFAULT_DASHBOARD_PORT),
+            container=str(getattr(args, "container", "") or "astrbot").strip(),
+            dashboard_host=str(getattr(args, "dashboard_host", "") or "").strip(),
+            dashboard_port=int(getattr(args, "dashboard_port", 0) or 0),
+        )
+    except NeedsHuman as e:
+        bad(str(e))
+        return 2
+
+    # 先写进旁边一个临时文件，用**守护进程自己的加载器**读一遍。
+    # 生成器自己认为对不算数 —— 这是 v0.4 那条「看起来像成功的中间态」的同一课。
+    probe = out.with_name(out.name + ".validate")
+    problems: List[str] = []
+    try:
+        initcfg.write_json_atomic(probe, payload, force=True)
+        problems = initcfg.validate_config(probe, kind=role, molt_pkg=molt_pkg)
+    except (NeedsHuman, Fatal) as e:
+        bad(f"验不过：{e}")
+        return 2
+    finally:
+        if probe.exists():
+            try:
+                probe.unlink()
+            except OSError:
+                pass
+
+    if problems:
+        bad("这份配置连它自己的加载器都过不了，不写盘：")
+        for p in problems:
+            dim(f"  - {p}")
+        return 2
+
+    try:
+        initcfg.write_json_atomic(out, payload, force=bool(getattr(args, "force", False)))
+    except NeedsHuman as e:
+        bad(str(e))
+        return 2
+
+    ok(f"已写：{out}")
+    kv("壳名", shell)
+    kv("data 目录", data_dir)
+    kv("账本", warden_url)
+    kv("python", python)
+    kv("execute", "false（先只看不动；确认壳名后再改成 true）")
+
+    head("下一步")
+    for line in initcfg.next_steps(role, out=out, python=python):
+        dim(f"  {line}")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     head("环境")
     ident = probe_identity()
@@ -2095,7 +2229,109 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except ImportError:
         dim(f"  {C.S_BULLET} pytest 未装（只影响跑测试）")
 
+    config = str(getattr(args, "config", "") or "").strip()
+    if config:
+        return _doctor_config(
+            Path(config).expanduser(),
+            role=str(getattr(args, "role", "") or "").strip(),
+            molt_pkg=str(getattr(args, "molt_pkg", "") or "").strip(),
+        )
+
     return 0
+
+
+def _doctor_config(path: Path, *, role: str, molt_pkg: str) -> int:
+    """检查一份**真实的**壳配置 —— 这是"陌生人装不起来"最常卡住的地方。
+
+    三件事分开报，因为它们的修法完全不同：
+
+      1. 这份配置自己读得过吗（用守护进程自己的加载器）
+      2. 它写的账本地址能连上吗、token 对吗（401 与连不上是两回事）
+      3. 它指向的目录真的存在吗
+    """
+    from . import initcfg
+
+    head("配置")
+    kv("文件", path)
+    if not path.is_file():
+        bad("不存在。先跑：molt init --role agent --out <这个路径> …")
+        return 2
+
+    if not role:
+        name = path.name.lower()
+        role = "homer" if "homer" in name else "agent"
+        dim(f"  {C.S_BULLET} 没给 --role，按文件名猜成 {role}（猜错就用 --role 指定）")
+    kv("角色", role)
+
+    pkg = molt_pkg or str(Path(__file__).resolve().parent.parent)
+    problems = initcfg.validate_config(path, kind=role, molt_pkg=pkg)
+    if problems:
+        bad("它自己的加载器读不过：")
+        for p in problems:
+            dim(f"  - {p}")
+        return 2
+    ok("守护进程的加载器读得过")
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        bad(f"读不出 JSON：{e}")
+        return 2
+    if not isinstance(raw, dict):
+        bad("顶层不是一个 JSON 对象")
+        return 2
+
+    data_dir = str(raw.get("data_dir") or "").strip()
+    if data_dir:
+        exists = Path(data_dir).exists()
+        (ok if exists else warn)(f"data 目录{'存在' if exists else '不存在'}：{data_dir}")
+        if not exists:
+            dim("  AstrBot 第一次启动才会创建它；落位之前它必须存在（或至少父目录存在）")
+
+    url = str(raw.get("warden_url") or "").strip()
+    token = str(raw.get("warden_token") or "").strip()
+    if not url:
+        bad("配置里没有 warden_url")
+        return 2
+
+    head("账本")
+    kv("地址", url)
+    reachable = _probe_warden(url, token)
+    if reachable is None:
+        bad("连不上（服务没起来 / 端口不对 / 被防火墙挡了）")
+        dim(f"  自己验一下：curl -sS -o /dev/null -w '%{{http_code}}' {url}/status")
+        return 2
+    if reachable == 401:
+        bad("连上了，但 token 不对（HTTP 401）")
+        dim("  token 在账本那台机器的 <root>/warden.token 里；把它抄进配置的 warden_token")
+        return 2
+    if reachable != 200:
+        bad(f"账本回了一个意料之外的 HTTP {reachable}")
+        return 2
+    ok("连得上，token 也对")
+
+    head("下一步")
+    dim("  这份配置可以用了。真正让它动手之前，先把里面的 execute 改成 true。")
+    return 0
+
+
+def _probe_warden(base: str, token: str, *, timeout: float = 5.0) -> Optional[int]:
+    """问一次 `/status`，返回 HTTP 状态码；连不上返回 None。
+
+    为什么单独写一个而不是用 `WardenClient`：这一条要能在**什么都还没装好**
+    的机器上跑（doctor 的整个意义就是这个），所以只用标准库、且把 401 与
+    "连不上"分开报 —— 这两种失败的修法完全不同。
+    """
+    req = urllib.request.Request(base.rstrip("/") + "/status", method="GET")
+    if token:
+        req.add_header("X-Molt-Token", token)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return int(getattr(resp, "status", 200))
+    except urllib.error.HTTPError as e:
+        return int(e.code)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -2323,9 +2559,40 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--root", help="Warden 根目录（本地模式）")
     s.set_defaults(func=cmd_recover)
 
+    # init
+    s = add("init", "生成一份能被它自己的加载器读通的配置")
+    s.add_argument(
+        "--role",
+        required=True,
+        choices=["agent", "homer", "warden"],
+        help="agent = Windows/裸机壳；homer = NAS/容器壳；warden = 账本服务",
+    )
+    s.add_argument("--out", help="配置文件写到哪（默认当前目录的 molt-agent.json / molt-homer.json）")
+    s.add_argument("--shell", help="这台壳在账本里的名字（不猜，必须给）")
+    s.add_argument("--data", help="AstrBot 的 data 目录")
+    s.add_argument("--root", help="warden 角色：账本根目录")
+    s.add_argument("--token", help="warden 要用的 token（warden 角色不给就自动生成一个）")
+    s.add_argument("--molt-pkg", dest="molt_pkg", help="源码根目录（默认就是这份代码自己）")
+    s.add_argument("--python", help="守护进程跑 land 用的 python")
+    s.add_argument("--astrbot-python", dest="astrbot_python", help="跑 AstrBot 的 python（venv）")
+    s.add_argument("--boot-script", dest="boot_script", help="tools/boot-keepalive.py 的路径")
+    s.add_argument("--log-path", dest="log_path", help="AstrBot 的日志文件")
+    s.add_argument("--platform-switch", dest="platform_switch", help="tools/platform-switch.py 的路径")
+    s.add_argument("--port", type=int, help="AstrBot dashboard 端口（默认 6199）")
+    s.add_argument("--container", help="homer 角色：容器名（默认 astrbot）")
+    s.add_argument("--dashboard-host", dest="dashboard_host", help="落位后 dashboard 监听地址")
+    s.add_argument("--dashboard-port", dest="dashboard_port", type=int, help="落位后 dashboard 端口")
+    s.add_argument("--force", action="store_true", help="覆盖已存在的配置（旧文件备份成 *.bak）")
+    s.set_defaults(func=cmd_init)
+
     # doctor
     s = add("doctor", "体检：把能查的都查一遍")
     s.add_argument("--root", help="Warden 根目录")
+    s.add_argument("--config", help="检查一份真实的壳配置（守护进程 json）")
+    s.add_argument(
+        "--role", choices=["agent", "homer"], help="配合 --config：这份配置是给谁的"
+    )
+    s.add_argument("--molt-pkg", dest="molt_pkg", help="源码根目录（默认就是这份代码自己）")
     s.set_defaults(func=cmd_doctor)
 
     # wake
