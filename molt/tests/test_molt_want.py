@@ -323,14 +323,20 @@ def test_the_utterance_source_shows_up_in_the_confirm_note(plugin_dir: Path) -> 
     m = mover(plugin_dir)
     cfg = _cfg(plugin_dir)
     reply = m.request_move(
-        cfg, target="nas-shell", reason="主人说去打会儿游戏", source="utterance"
+        cfg,
+        target="nas-shell",
+        reason="主人说去打会儿游戏",
+        source="utterance",
+        quote="去打会儿游戏吧",
+        said="你去打会儿游戏吧，我回 NAS 待着",
     )
     assert "nas-shell" in reply.text
     assert m._proposal is not None
     assert m._proposal[3] == "utterance"
     confirmed = m._confirm(cfg)
     assert confirmed.plan is not None
-    assert "这次是你那句话" in confirmed.text
+    assert "这次是因为你那句" in confirmed.text
+    assert "去打会儿游戏吧" in confirmed.text
 
 
 def test_a_trigger_this_version_does_not_understand_blocks_the_proposal(plugin_dir: Path) -> None:
@@ -343,13 +349,13 @@ def test_a_trigger_this_version_does_not_understand_blocks_the_proposal(plugin_d
     assert m._proposal is None
 
 
-def test_a_known_trigger_that_is_not_implemented_also_blocks(plugin_dir: Path) -> None:
-    """`schedule` 是认识的来源，但本版本没实装 —— 同样拒绝，不许装作它在工作。"""
+def test_a_schedule_it_cannot_read_blocks_the_proposal(plugin_dir: Path) -> None:
+    """`schedule` 已实装，但**读不懂的写法仍然阻塞** —— 不许当作"不到点"悄悄放行。"""
     m = mover(plugin_dir)
     cfg = _cfg(plugin_dir, triggers={"schedule": "每天 03:00"})
     reply = m.request_move(cfg, target="nas-shell", reason="")
     assert "triggers.schedule" in reply.text
-    assert "没有实装" in reply.text
+    assert "读不懂" in reply.text
     assert m._proposal is None
 
 
@@ -376,7 +382,14 @@ def test_a_proposal_only_ever_asks_and_never_runs(plugin_dir: Path) -> None:
     """提议存在，但**一个执行计划都没被造出来** —— 这是 C 的全部含义"""
     m = mover(plugin_dir)
     cfg = _cfg(plugin_dir)
-    reply = m.request_move(cfg, target="nas-shell", reason="这边随时会被关掉", source="utterance")
+    reply = m.request_move(
+        cfg,
+        target="nas-shell",
+        reason="这边随时会被关掉",
+        source="utterance",
+        quote="我一会儿要打游戏",
+        said="我一会儿要打游戏，你自己看着办",
+    )
     assert m.has_proposal() is True
     assert reply.plan is None, "提议阶段不许有执行计划"
     assert "/molt confirm" in reply.text
@@ -482,3 +495,151 @@ def test_it_refuses_to_guess_which_machine_to_shut_down(plugin_dir: Path) -> Non
     reply = m.handle("shutdown", sender="hansei")
     assert rec.posts == []
     assert "不猜" in reply.text
+
+
+# ------------------------------------------------------------------ 可归因与定时
+
+
+def _propose(m: MoltMover, cfg, **kw):
+    """`request_move` 的薄包装：测试里只关心"提没提成、为什么没提成"。"""
+    return m.request_move(cfg, **kw)
+
+
+def test_an_utterance_without_a_quote_is_refused(plugin_dir):
+    """说"这是主人那句话引出来的"，却拿不出那句话 —— 不许提。"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir)
+    reply = _propose(m, cfg, source="utterance", reason="他说要打游戏")
+    assert reply.plan is None
+    assert m.has_proposal() is False
+    assert "原话" in reply.text
+
+
+def test_an_utterance_quoting_words_the_human_never_said_is_refused(plugin_dir):
+    """引用必须能在**主人刚说的话**里找到 —— 编一句很像的话是最糟的那种糊弄。"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir)
+    reply = _propose(
+        m,
+        cfg,
+        source="utterance",
+        reason="他说要打游戏",
+        quote="你去 NAS 待着吧",
+        said="我一会儿要打会儿游戏，你自己看着办",
+    )
+    assert reply.plan is None
+    assert m.has_proposal() is False
+    assert "不在主人刚说的话里" in reply.text
+
+
+def test_a_quoted_utterance_keeps_the_quote_all_the_way_to_confirm(plugin_dir):
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir)
+    said = "我一会儿要打会儿游戏，\n你去 NAS 待着吧，先说一声"
+    reply = _propose(
+        m, cfg, source="utterance", reason="他要占显卡", quote="你去 NAS 待着吧", said=said
+    )
+    assert reply.plan is None, "提议阶段不许造执行计划"
+    assert m.has_proposal() is True
+    assert m._proposal[3] == "utterance"
+    assert m._proposal[4] == "你去 NAS 待着吧"
+
+    confirmed = m.handle("confirm", sender="hansei")
+    assert confirmed.plan is not None
+    # 确认文案必须把**那句原话**还给主人看，而不是只说"你那句话"
+    assert "你去 NAS 待着吧" in confirmed.text
+
+
+def test_a_quote_survives_extra_whitespace(plugin_dir):
+    """人打字会换行、会多空格；引用比对不能因此失配。"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir)
+    reply = _propose(
+        m,
+        cfg,
+        source="utterance",
+        quote="去打会儿   游戏吧",
+        said="好，那你去打会儿\n游戏吧，我回 NAS",
+    )
+    assert m.has_proposal() is True, reply.text
+
+
+def test_self_proposals_do_not_need_a_quote(plugin_dir):
+    """只有 `utterance` 这一档要证据；它自己想走不需要引用任何话。"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir)
+    reply = _propose(m, cfg, source="self", reason="这边随时会被关机")
+    assert m.has_proposal() is True
+    assert m._proposal[3] == "self"
+    assert m._proposal[4] == ""
+
+
+# -- 定时：判据是纯函数，边界都被钉住
+
+
+def test_schedule_accepts_the_short_and_the_long_form():
+    assert cmd.schedule_spec("23:30") == {"minutes": 23 * 60 + 30, "window": 30, "days": None}
+    assert cmd.schedule_spec(
+        {"at": "3:05", "window_minutes": 10, "days": ["mon", "五"]}
+    ) == {"minutes": 3 * 60 + 5, "window": 10, "days": {0, 4}}
+
+
+@pytest.mark.parametrize(
+    "broken",
+    ["25:00", "23:60", "2330", "", None, {"at": "23:30", "window_minutes": 0},
+     {"at": "23:30", "days": ["notaday"]}, {"at": "23:30", "days": []}, [1, 2]],
+)
+def test_schedule_rejects_what_it_cannot_read(broken):
+    assert cmd.schedule_spec(broken) is None
+    assert cmd.schedule_problem(broken) != ""
+
+
+def _local_ts(year, month, day, hour, minute):
+    import time as _t
+
+    return _t.mktime((year, month, day, hour, minute, 0, 0, 0, -1))
+
+
+def test_schedule_window_matches_and_expires():
+    # 2026-11-15 是周日
+    assert cmd.schedule_due("23:30", _local_ts(2026, 11, 15, 23, 30)) is True
+    assert cmd.schedule_due("23:30", _local_ts(2026, 11, 15, 23, 59)) is True
+    assert cmd.schedule_due("23:30", _local_ts(2026, 11, 16, 0, 0)) is False
+    assert cmd.schedule_due("23:30", _local_ts(2026, 11, 15, 22, 0)) is False
+
+
+def test_schedule_window_crosses_midnight():
+    """`23:45` + 30 分钟 覆盖到次日 00:15 —— 跨午夜必须算对。"""
+    assert cmd.schedule_due({"at": "23:45", "window_minutes": 30},
+                            _local_ts(2026, 11, 16, 0, 10)) is True
+    assert cmd.schedule_due({"at": "23:45", "window_minutes": 30},
+                            _local_ts(2026, 11, 16, 0, 20)) is False
+
+
+def test_schedule_days_filter_is_respected():
+    """2026-11-15 是周日（tm_wday=6）；只写周一就不该在周日到点。"""
+    sunday = _local_ts(2026, 11, 15, 23, 30)
+    assert cmd.schedule_due({"at": "23:30", "days": ["sun"]}, sunday) is True
+    assert cmd.schedule_due({"at": "23:30", "days": ["mon"]}, sunday) is False
+
+
+def test_schedule_says_i_dont_know_instead_of_guessing():
+    """判不了就返回 None —— 不许把"判不了"说成"不到点"。"""
+    assert cmd.schedule_due(None, _local_ts(2026, 11, 15, 23, 30)) is None
+    assert cmd.schedule_due("乱写的", _local_ts(2026, 11, 15, 23, 30)) is None
+
+
+def test_a_well_formed_schedule_no_longer_blocks_proposals(plugin_dir):
+    """判据实装之后，配了定时不该再让所有提议都失败（以前会）。"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir, triggers={"schedule": "23:30"})
+    reply = _propose(m, cfg, source="self", reason="测试")
+    assert m.has_proposal() is True, reply.text
+
+
+def test_a_broken_schedule_still_blocks_and_says_why(plugin_dir):
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir, triggers={"schedule": "25:99"})
+    reply = _propose(m, cfg, source="self", reason="测试")
+    assert m.has_proposal() is False
+    assert "读不懂" in reply.text

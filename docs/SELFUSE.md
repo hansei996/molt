@@ -284,6 +284,25 @@ print('host=', s['host'], 'speaking=', s['speaking'], 'platforms=', s['platforms
 
 ---
 
+## 在 Git Bash / MSYS2 里跑 `molt-tell`：`/molt` 会被改写
+
+如果你在 MSYS2（Git Bash、win-bash）里这样敲：
+
+```bash
+python tools/molt-tell.py --config ... "/molt cancel"
+```
+
+那个开头的 `/molt` 会被 bash 当成路径，改写成 `C:/Users/.../molt cancel`，
+于是它根本没到 AstrBot 的命令处理器手里 —— 你会看到模型在回答
+"你说的 molt 是哪个路径"，而不是"取消了，我不搬"。
+
+```bash
+export MSYS2_ARG_CONV_EXCL='*'      # 关掉这层路径改写
+```
+
+**判断方法**：命令生效时它的回复是模板式的（「取消了，我不搬。」「好，放着不关。」）；
+被改写时会变成一段试图理解你的闲聊。后者不是 molt 坏了，是参数没送到。
+
 ## 它现在在哪
 
 以前这个问题只能"问它"。现在有三条路，都不用问。

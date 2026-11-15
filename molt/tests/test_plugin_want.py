@@ -27,10 +27,20 @@ from astrbot_plugin_molt import command as cmd
 
 
 class _Event:
-    """工具只需要一个 event 占位；这里刻意什么都不给它。"""
+    """工具只需要一个 event 占位。
+
+    get_message_str() 是**真接口**（AstrMessageEvent 上就有），
+    插件用它把「你引的那句话」和「主人刚说的整句」对一遍。
+    """
+
+    def __init__(self, text: str = "") -> None:
+        self._text = text
 
     def get_sender_id(self) -> str:
         return "hansei"
+
+    def get_message_str(self) -> str:
+        return self._text
 
 
 class _FakeMover:
@@ -43,8 +53,11 @@ class _FakeMover:
     def settings(self) -> "cmd.Settings":
         return self._cfg
 
-    def request_move(self, cfg, *, target="", reason="", source="self"):
-        self.calls.append({"target": target, "reason": reason, "source": source})
+    def request_move(self, cfg, *, target="", reason="", source="self", quote="", said=""):
+        # quote/said 是 v0.6 的「可归因」证据：填 utterance 时必须交出原话。
+        self.calls.append(
+            {"target": target, "reason": reason, "source": source, "quote": quote}
+        )
         self._has = True
         return cmd.Reply(self._text)
 
@@ -60,7 +73,7 @@ def _plugin(mover: Optional[_FakeMover]):
     return plugin
 
 
-def _call(plugin, *, target: str = "", reason: str = "") -> str:
+def _call(plugin, *, target: str = "", reason: str = "", source: str = "self", quote: str = "") -> str:
     return asyncio.run(plugin.molt_propose_go_home(_Event(), target, reason))
 
 
@@ -98,7 +111,7 @@ def test_when_open_it_hands_the_request_over_verbatim(tmp_path: Path) -> None:
     text = _call(_plugin(mover), target="nas-shell", reason="这边要关机了")
     assert text == "我想搬去 nas-shell。"
     assert mover.calls == [
-        {"target": "nas-shell", "reason": "这边要关机了", "source": "self"}
+        {"target": "nas-shell", "reason": "这边要关机了", "source": "self", "quote": ""}
     ]
 
 
@@ -136,7 +149,7 @@ def test_the_tool_registration_survives_astrbot_docstring_parsing(tmp_path: Path
     params = [
         name for name in inspect.signature(func).parameters if name not in ("self", "event")
     ]
-    assert params == ["target", "reason", "source"]
+    assert params == ["target", "reason", "source", "quote"]
 
     # 2) 每个参数在 `Args:` 段里都有一行 `名字(类型): 说明`
     #    `inspect.getdoc` 会去掉公共缩进，所以这里只看"Args: 之后"那一段，不依赖缩进宽度。

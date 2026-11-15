@@ -128,6 +128,10 @@ class Settings:
     #: 容器里必须是 0.0.0.0（容器内监听 loopback 的话，映射出去的端口后面什么都没有）。
     dashboard_host: str = ""
     dashboard_port: int = 0
+    #: 要不要等账本里那张"允许关掉这台机器"的票。**注意 homer 永远不执行关机** ——
+    #: 它跑在账本所在的机器上，关掉它就是关掉整个 molt（见 `power_verdict`）。
+    #: 这个字段存在只是为了让两边的配置形状一致，`false` 也不会让 homer 关机。
+    power_requires_permission: bool = True
 
     @classmethod
     def load(cls, path: Path) -> "Settings":
@@ -217,6 +221,22 @@ class Warden:
         except Exception:  # noqa: BLE001 - 心跳永远不该把守护进程弄死
             return False
 
+    def power_ack(self, shell_id: str) -> bool:
+        """销掉一张关机票。失败只返回 False —— 心跳与销票都不该弄死守护进程。"""
+        payload = json.dumps({"shell": str(shell_id or "")}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base}/power/ack",
+            data=payload,
+            headers={"X-Molt-Token": self.token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            return bool(body.get("ok"))
+        except Exception:  # noqa: BLE001
+            return False
+
     def status(self) -> Dict[str, Any]:
         req = urllib.request.Request(
             f"{self.base}/status",
@@ -232,6 +252,33 @@ class Warden:
 
 
 # ---------------------------------------------------------------- 判决
+
+def power_verdict(*, requires_permission: bool, tickets: Any, shell: str) -> str:
+    """这台机器（账本宿主）该不该理会账本里那张关机票。
+
+    返回值只有三种，而且**故意没有 `"shutdown"` 这一档**：
+
+    - `"keep"`   —— 有一张明确的"留着"票
+    - `"refuse"` —— 有人要求关机/休眠，但我不能执行（我是账本所在的机器）
+    - `"ask"`    —— 没有票
+
+    为什么不给 homer 关机的能力：账本（`state.json` 与 `power.json`）就在这台机器的
+    文件系统上。把它关掉之后，另一台壳再也读不到"鱼现在在哪"——
+    它不会知道自己该接管，只会一直等。**一个把账本一起关掉的关机，不是"机器休息"，
+    是"整个 molt 停摆"。** 要关 NAS 只能由人直接关，并且接受 molt 一起停摆。
+    """
+    if not isinstance(tickets, dict):
+        tickets = {}
+    ticket = tickets.get(str(shell or "").strip())
+    if not isinstance(ticket, dict):
+        ticket = {}
+    action = str(ticket.get("action") or "").strip().lower()
+    if action == "keep":
+        return "keep"
+    if action in ("shutdown", "sleep"):
+        return "refuse"
+    return "ask"
+
 
 @dataclass
 class Decision:
@@ -362,6 +409,7 @@ class Homer:
     runner: Callable[..., subprocess.CompletedProcess] = _run
     status_fetcher: Optional[Callable[[], Dict[str, Any]]] = None
     log: Callable[[str], None] = _log_line
+    power_ack_sender: Optional[Callable[[str], bool]] = None
 
     # -- 路径与 argv
 
@@ -666,6 +714,21 @@ class Homer:
         self.log("  ✓ 已推一份中途备份（备份不是交接）")
         return True
 
+    def _ack_power(self) -> bool:
+        """把一张已经处理过的关机票划掉。
+
+        失败**不抛也不算致命**：票留着，下一轮会再说一次。
+        销票只是账本上的一行注记，不该有能力把交接流程带崩。
+        """
+        sender = self.power_ack_sender
+        if sender is None:
+            return False
+        try:
+            return bool(sender(self.settings.shell))
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"  ! 销票失败（不影响交接）：{exc}")
+            return False
+
     def maybe_backup(self, state: Dict[str, Any], status: Dict[str, Any]) -> None:
         """到点了就推一份备份。三个前提缺一不可。
         （和 `molt-agent.py` 里那份是同一条理由：不是给我这一代的、鱼没在
@@ -705,6 +768,28 @@ class Homer:
             return {"ok": False, "reason": decision.reason, "kind": "error"}
         if decision.kind == "idle":
             self.log(f"  [{decision.kind}] {decision.reason}")
+            # 「走」和「关」是两件事。这一代归对面了，那**这台机器关不关**
+            # 由账本里的一张票回答。homer 永远不执行关机（它是账本宿主），
+            # 但它要如实说出"我看到了票、我不执行"，而不是静默无视。
+            verdict = power_verdict(
+                requires_permission=bool(self.settings.power_requires_permission),
+                tickets=status.get("power"),
+                shell=self.settings.shell,
+            )
+            if verdict == "keep":
+                self.log("  · 你说过留着这台机器 —— 不关机")
+                self._ack_power()
+            elif verdict == "refuse":
+                ticket = (status.get("power") or {}).get(self.settings.shell) or {}
+                action = str(ticket.get("action") or "?")
+                mark = f"{self.settings.shell}:{action}:{ticket.get('generation')}"
+                if state.get("power_refused") != mark:
+                    self.log(
+                        f"  ! 账本里有一张「{action}」票，但我是账本所在的机器 —— "
+                        "关掉我就是关掉整个 molt。这条票我不执行，也不划掉它。"
+                    )
+                    state["power_refused"] = mark
+                    self.save_state(state)
             # 这一代不是给我的、而且已经被别人接走了 → 我不该还在说话。
             if self.should_stand_down(status):
                 running = self.container_running()
@@ -823,7 +908,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
 
     state_path = cfg_path.parent / STATE_FILENAME
-    homer = Homer(settings=settings, state_path=state_path)
+    homer = Homer(
+        settings=settings,
+        state_path=state_path,
+        power_ack_sender=Warden(settings.warden_url, settings.warden_token).power_ack,
+    )
     homer.run_forever(once=args.once)
     return 0
 

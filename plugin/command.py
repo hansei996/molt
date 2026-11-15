@@ -60,13 +60,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 #: 指令配置所在的文件名。和 `host_label.txt` 一样放在插件目录里：
 #: `data/plugins/**` 不在 `soul.py` 的 `COPY_ARTIFACTS` 里，所以它是**机器绑定**的。
@@ -106,6 +107,104 @@ MOVE_SOURCES: Dict[str, str] = {
     "utterance": "你那句话",
     "schedule": "到点了",
 }
+
+
+#: 定时触发的默认窗口：说 `23:30` 时，指的是 23:30 之后这半小时之内。
+#: 为什么不是"只在那一分钟"：家用机器的时钟、守护进程 10 秒一轮的轮询、
+#: 以及人不可能每次都把时刻掐到分钟，都让"恰好 23:30:00"变成一个不现实的判据。
+SCHEDULE_DEFAULT_WINDOW_MINUTES = 30
+
+#: 星期名 → Python 的 `tm_wday`（周一 = 0）。
+_WEEKDAYS = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+    "一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6,
+}
+
+
+def _parse_hhmm(text: Any) -> Optional[Tuple[int, int]]:
+    """`"23:30"` / `"3:05"` → `(23, 30)`；`"25:00"` 这种不合法返回 None。"""
+    raw = str(text or "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", raw)
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+def schedule_spec(trigger: Any) -> Optional[Dict[str, Any]]:
+    """把 `triggers.schedule` 归一成 `{"minutes": 当天第几分钟, "window": 分钟数, "days": set|None}`。
+
+    接受两种写法，因为人写配置的心情不一样：
+
+    - 短写：`"23:30"`
+    - 长写：`{"at": "23:30", "window_minutes": 45, "days": ["mon", "tue"]}`
+
+    解析不出来返回 None —— **调用方必须把它当成"我不知道"，不是"不到点"**。
+    """
+    if isinstance(trigger, str):
+        trigger = {"at": trigger}
+    if not isinstance(trigger, dict):
+        return None
+    at = _parse_hhmm(trigger.get("at"))
+    if at is None:
+        return None
+    window = trigger.get("window_minutes", SCHEDULE_DEFAULT_WINDOW_MINUTES)
+    try:
+        window = int(window)
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= window <= 24 * 60):
+        return None
+    days_raw = trigger.get("days")
+    days: Optional[Set[int]] = None
+    if days_raw is not None:
+        if not isinstance(days_raw, (list, tuple)) or not days_raw:
+            return None
+        days = set()
+        for item in days_raw:
+            if isinstance(item, int) and not isinstance(item, bool) and 0 <= item <= 6:
+                days.add(int(item))
+                continue
+            key = str(item or "").strip().lower()
+            if key in _WEEKDAYS:
+                days.add(_WEEKDAYS[key])
+                continue
+            if key.isdigit() and 0 <= int(key) <= 6:
+                days.add(int(key))
+                continue
+            return None
+    return {"minutes": at[0] * 60 + at[1], "window": window, "days": days}
+
+
+def schedule_problem(trigger: Any) -> str:
+    """这条定时规则能不能用；能用返回空串，不能用返回一句人话。"""
+    if schedule_spec(trigger) is not None:
+        return ""
+    return (
+        '要一个时刻，比如 `"23:30"` 或 '
+        '`{"at": "23:30", "window_minutes": 30, "days": ["mon"]}`，'
+        f"我读到的是 `{trigger!r}`"
+    )
+
+
+def schedule_due(trigger: Any, now: float) -> Optional[bool]:
+    """按**本机时区**判断"现在是不是在那个窗口里"。
+
+    返回 `None` 表示"判不了"（没配、或配坏了）—— 调用方不许把它当成 False 或 True。
+    窗口可以跨午夜（`"23:30"` + 30 分钟 = 到次日 00:00），所以比较是在"一天第几分钟"上做的。
+    """
+    spec = schedule_spec(trigger)
+    if spec is None:
+        return None
+    lt = time.localtime(now)
+    if spec["days"] is not None and lt.tm_wday not in spec["days"]:
+        return False
+    minutes = lt.tm_hour * 60 + lt.tm_min
+    start = int(spec["minutes"])
+    span = int(spec["window"])
+    return ((minutes - start) % (24 * 60)) < span
 
 
 def source_label(source: str) -> str:
@@ -618,6 +717,8 @@ class MoltMover:
         target: str = "",
         reason: str = "",
         source: str = SELF_PROPOSER,
+        quote: str = "",
+        said: str = "",
     ) -> Reply:
         """由**它自己**发起一次"我想搬"。只写提议，绝不执行。
 
@@ -682,6 +783,24 @@ class MoltMover:
                 "不认识的来源我不提。"
             )
 
+        quote_text = " ".join(str(quote or "").split())
+        if src == "utterance":
+            # 「主人那句话」是唯一一个**引用外部证据**的来源，所以它也是唯一一个
+            # 必须在当场核对证据的：编一句很像的话出来，比不给理由糟得多 ——
+            # 确认文案里那句「这次是因为你那句『…』」是要给人看的，
+            # 而人只会记得自己说过什么。
+            if not quote_text:
+                return Reply(
+                    "你说这是被主人那句话引出来的，但没告诉我是哪句话。\n"
+                    "把那句原话一起给我 —— 我要能在对话里指出它。"
+                )
+            said_text = " ".join(str(said or "").split())
+            if said_text and quote_text not in said_text:
+                return Reply(
+                    f"你引的那句话（{quote_text}）不在主人刚说的话里。\n"
+                    "我不拿一句对不上的话当依据。"
+                )
+
         blockers = self.move_policy_refusals(cfg, target=want, source=src)
         if blockers:
             return Reply(
@@ -691,7 +810,7 @@ class MoltMover:
             )
 
         ttl = int(cfg.self_propose_ttl_seconds)
-        self._proposal = (self._clock() + ttl, src, want, src)
+        self._proposal = (self._clock() + ttl, src, want, src, quote_text)
         why = str(reason or "").strip()
         return Reply(
             f"我想搬去 **{want}**。"
@@ -724,11 +843,13 @@ class MoltMover:
                         f"`triggers.{name}` 这个触发源这个版本还不认识"
                         f"（认识的有：{'、'.join(sorted(MOVE_SOURCES))}）"
                     )
-                else:
-                    out.append(
-                        f"`triggers.{name}` 已经写进配置了，但「{source_label(name)}」"
-                        "这个触发方式这个版本还没有实装 —— 我不想装作它已经在工作"
-                    )
+                elif name == "schedule":
+                    problem = schedule_problem(triggers.get(name))
+                    if problem:
+                        out.append(f"`triggers.schedule` 我读不懂：{problem}")
+                # 其余来源（human / self / utterance）只是"声明"，没有需要校验的形状：
+                # `human` 就是那两条命令，`self` 是工具调用，`utterance` 的可归因性
+                # 在 request_move 里逐次核对（引用必须能在原话里找到）。
         return out
 
     def _expired(self) -> bool:
@@ -769,12 +890,16 @@ class MoltMover:
         # 目标以**提议里记下的那个**为准：它自己挑的时候，配置里的 target 可能不是那台。
         wanted = self._proposal[2] if len(self._proposal) > 2 else ""
         wanted = str(wanted or "").strip() or cfg.target
+        # 那句原话要在清空提议**之前**取出来，否则确认文案里就只剩"你那句话"四个字。
+        quote_text = str(self._proposal[4] or "").strip() if len(self._proposal) > 4 else ""
         self._proposal = None
         plan = build_plan(cfg, target=wanted)
         self._pending = plan
         label = source_label(source)
         if source == SELF_PROPOSER:
             note = "\n（这次是我想走的，不是你说要走的 —— 但按下去的是你）"
+        elif source == "utterance" and quote_text:
+            note = f"\n（这次是因为你那句「{quote_text}」）"
         elif label:
             note = f"\n（这次是{label}）"
         elif was:
