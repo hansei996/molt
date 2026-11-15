@@ -1174,3 +1174,26 @@ molt sync-plugins --data /path/to/astrbot/data --shell <这台壳的名字> --fr
 1. **只同步两边都装了的插件。** 只在一边有的，不装代码、不写配置、不删配置。
 2. **结构差太多的默认跳过**（顶层键几乎不重合），那通常是两边插件版本不同；覆盖过去等于把对方不认识的键塞进去。页面上没有「强行写」的开关 —— 这是刻意的。
 3. **页面只写这台机器**。它不会去改对面那台；要改对面，去对面点。
+
+## `workbuddy/*` 那条 provider：为什么有时会消失
+
+它指向 `http://127.0.0.1:17863/v1` —— **回环地址**，永远指向"运行它的那台机器"。所以落位时的
+机器覆写层默认会删掉它（不删的话 AstrBot 启动会撞 `KeyError: 'type'`）。
+
+但这台机器上**确实跑着**那个服务时（`astrbot_plugin_workbuddy` 会自己起这个网关），可以点名保留：
+
+```ini
+# tools/molt-agent.json
+"keep_provider_sources": ["workbuddy"]
+```
+
+或手工落位时：`molt land --generation N --keep-provider-source workbuddy ...`
+
+前置条件（缺一样网关都不会监听）：`plugin_data/astrbot_plugin_workbuddy/credentials.enc` 存在
+（搬家时默认会带），且进程环境里有 `WORKBUDDY_MASTER_KEY`（Windows 上这条要由启动脚本注入，
+见 `G:\molt-fish\molt-agent.cmd` 里那行 `reg query`）。
+
+判断它活没活：
+```powershell
+netstat -ano | findstr :17863
+```
