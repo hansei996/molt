@@ -2793,14 +2793,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     _setup_console()
 
     raw = list(sys.argv[1:] if argv is None else argv)
-    if raw and raw[0] in _DAEMON_COMMANDS:
+
+    # 全局开关可以排在守护进程名字前面：`molt --no-color agent --config x`。
+    # 不剥掉它们，这一行会掉进 argparse 并报 `invalid choice: 'agent'` ——
+    # 一个"只差一个参数位置就全盘不认"的失败，而写它的人不会觉得自己写错了。
+    head = list(raw)
+    while head and head[0] in ("--no-color", "--color"):
+        head.pop(0)
+
+    if head and head[0] in _DAEMON_COMMANDS:
         # 装成 wheel 之后没有 tools/，所以这两条命令必须由包自己提供 ——
         # 否则 `pip install` 的人拿到一份配置，却没有一条能跑它的命令。
         import importlib
 
-        module = importlib.import_module(f"molt.daemon.{raw[0]}")
+        module = importlib.import_module(f"molt.daemon.{head[0]}")
         try:
-            return int(module.main(raw[1:]))
+            return int(module.main(head[1:]))
         except MoltError as e:
             bad(f"{type(e).__name__}: {e}")
             return 1

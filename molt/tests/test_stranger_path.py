@@ -146,3 +146,13 @@ def test_the_repo_shims_still_expose_the_real_objects():
         # 两类都各有一个"主体"，垫片把它们搬过来就得是同一对象
         assert getattr(module, "Agent", None) is getattr(impl, "Agent", None)
         assert getattr(module, "Homer", None) is getattr(impl, "Homer", None)
+
+def test_a_global_flag_before_the_daemon_name_still_dispatches() -> None:
+    # molt --no-color agent --config x 是很容易写出来的一行（全局开关在前）。
+    # 第一版只在 argv[0] 上认守护进程名字，于是这一行掉进 argparse 报
+    # invalid choice: 'agent' —— 装是装上了，跑却说不认识自己的命令。
+    from molt import cli as cli_module
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module.main(['--no-color', 'agent', '--help'])
+    assert excinfo.value.code == 0

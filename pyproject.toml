@@ -31,7 +31,7 @@ build-backend = "setuptools.build_meta"
 # 往 site-packages 里放一个 `molt/` 目录，后装的那个会盖掉先装的。判据很简单 ——
 # 装我们的之前先 `pip uninstall -y molt`（见 docs/INSTALL.md）。
 name = "molt-handoff"
-version = "1.1.0"
+version = "1.1.1"
 description = "让一个数字生命从一台机器，走进另一台机器；旧壳留下，魂走。"
 readme = "README.md"
 requires-python = ">=3.10"

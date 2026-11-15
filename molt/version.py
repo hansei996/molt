@@ -5,7 +5,7 @@ PROTOCOL_VERSION 是 Warden 与 Shell 之间的握手协议版本。它和软件
 而不是"尽力而为"——一个半新半旧的交接比不交接危险得多。
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 PROTOCOL_VERSION = 1
 
