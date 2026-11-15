@@ -24,14 +24,20 @@
 装一次就不用再管 —— 所以它最适合用镜像。
 
 ```bash
+git clone https://github.com/hansei996/molt && cd molt
+docker build -t molt:dev .
 docker run -d --name molt-warden -p 6186:6186 \
   -v molt-data:/var/lib/molt \
   -e MOLT_TOKEN="$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')" \
-  ghcr.io/hansei996/molt:latest
+  molt:dev
 ```
 
 镜像**没有 token 就不启动**。这是刻意的：容器里随机生成一个 token，意味着每次重启都换，
 所有壳一起 401，而症状看起来像网络问题。同一个 token 要抄进每台壳的配置里。
+
+> 预构建镜像 `ghcr.io/hansei996/molt` 还没推上去（需要一把 registry 凭据，
+> 见 [docs/V1.0-PLAN.md §2.2](docs/V1.0-PLAN.md)）。在那之前就走上面这三条 ——
+> 构建过程不需要网络，只有 `python:3.12-slim` 这一个基础镜像要拉一次。
 
 壳那侧仍然是 `pip install`（见下一节）—— 壳要的是它自己那台机器的路径、python、容器名，
 那些东西装进镜像等于把某台机器的细节固化进发行物。
