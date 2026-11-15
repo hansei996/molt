@@ -18,7 +18,8 @@
 ```bash
 git clone https://github.com/hansei996/molt
 cd molt
-pip install -e .          # 装出 `molt` 命令；或者直接用 `python -m molt.cli`
+pip install molt-handoff  # 装出 `molt` 命令；或者直接用 `python -m molt.cli`
+# 从仓库装： git clone … && cd molt && pip install -e .
 molt --version
 ```
 

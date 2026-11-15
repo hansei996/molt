@@ -17,8 +17,16 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "molt"
-version = "1.0.0"
+# 发行名是 `molt-handoff`，**不是** `molt` —— PyPI 上的 `molt` 已经被一个 2014 年的
+# Mustache 模板库占着（v0.1.1），pending publisher 提交时会直接报 "This project
+# already exists."。发行名与导入名可以不同：装的是 `molt-handoff`，`import molt`、
+# `python -m molt.cli`、`molt` 命令一个字都不变。
+#
+# 一个已知的小风险，写在明处：如果哪台机器上同时装着那个老的 `molt` 包，两个包都会
+# 往 site-packages 里放一个 `molt/` 目录，后装的那个会盖掉先装的。判据很简单 ——
+# 装我们的之前先 `pip uninstall -y molt`（见 docs/INSTALL.md）。
+name = "molt-handoff"
+version = "1.0.1"
 description = "让一个数字生命从一台机器，走进另一台机器；旧壳留下，魂走。"
 readme = "README.md"
 requires-python = ">=3.10"

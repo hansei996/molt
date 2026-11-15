@@ -71,13 +71,11 @@ molt timeline --warden-url http://<账本IP>:6186 --warden-token <token>
 
 ## 装起来看它跑（两分钟）
 
-> 预构建镜像与 PyPI 包**都还没发布**（缺凭据，见 `docs/V1.0-PLAN.md` §2.2）。
-> 所以下面两条路都是「先 clone 再本地构建/安装」——它们是真的能跑的，
-> CI 里每次都跑一遍。
-
-
 ```bash
-pip install -e .
+pip install molt-handoff        # 发行名是 molt-handoff；导入名/命令仍是 molt
+
+# 从仓库装（还没发版时用这条，等价）：
+#   git clone https://github.com/hansei996/molt && cd molt && pip install -e .
 molt init --role warden --root ./warden      # 立账本，生成 token 并打印 serve 命令
 molt init --role agent --out ./agent.json --shell my-box \
     --data ./astrbot-data --warden-url http://<账本IP>:6186 --token <上一步的 token>
@@ -408,7 +406,7 @@ Warden 必须能在 NAS 宿主上裸跑（实测那台 UGREEN-776B 只有 python
 
 ```bash
 git clone <repo> && cd molt
-pip install -e .        # 之后直接敲 molt
+pip install molt-handoff   # 发行名；之后直接敲 molt
 molt doctor             # 看这台机器能做什么
 molt shell              # 看"我是谁、我在哪"
 ```

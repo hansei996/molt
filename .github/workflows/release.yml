@@ -25,8 +25,23 @@ name: release
 #
 # ## PyPI 还没接
 #
-# 发包需要另一条凭据链，见 `docs/V1.0-PLAN.md` §2.2。等老大在「可信发布」与
-# 「repo secret」之间选一个，这里再加一个 `pypi` 作业。
+# ## PyPI：用可信发布（OIDC），仓库里一个 secret 都没有
+#
+# 发行名是 **`molt-handoff`**，不是 `molt` —— PyPI 上的 `molt` 已被一个 2014 年的
+# Mustache 模板库占着，pending publisher 会直接报 "This project already exists."。
+# 导入名与命令仍是 `molt`。
+#
+# 这条链上没有 token：PyPI 用 GitHub 签出的短期 OIDC 断言验「这次发布确实来自
+# 这个仓库的这个 workflow」。所以仓库设置里**不要**建 `PYPI_TOKEN`，建了也不会被读。
+#
+# 需要你在 PyPI 网页上建一次（只一次）：
+#   https://pypi.org/manage/account/publishing/ → Add a new pending publisher
+#     PyPI Project Name : molt-handoff
+#     Owner             : hansei996
+#     Repository name   : molt
+#     Workflow name     : release.yml
+#     Environment name  : pypi          ← 必须和下面 `environment.name` 一致
+# 名字对不上时 publish 会失败并说 "Trusted publishing exchange failure"，那不是 token 的问题。
 
 on:
   push:
@@ -120,3 +135,50 @@ jobs:
             echo "- 如果这是第一次发布，记得去 https://github.com/hansei996/molt/pkgs/container/molt"
             echo "  把包可见性改成 **Public**，否则陌生人 \`docker pull\` 会失败。"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  pypi:
+    name: 发布到 PyPI
+    # 只在真推 `v*` 标签时发。手动触发是"看看镜像链路通不通"，不该顺手把版本发出去 ——
+    # PyPI 上的版本号**发出去了就不能收回**，连删了都不允许重用同一个号。
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/molt-handoff/
+    # 走的是 repo secret（老大在 https://github.com/hansei996/molt/settings/secrets/actions
+    # 建了 `PYPI_TOKEN`），所以**不需要** `id-token: write` —— 权限按最小给：
+    # 这个作业只读代码、只读那个 secret。
+    #
+    # 另一条路（可信发布 / OIDC，仓库里零 secret）也不冲突：真要用它时，把下面
+    # `with: password` 删掉、加回 `id-token: write`、并在 PyPI 建 pending publisher。
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # 版本号与标签必须一致 —— 而且判据不是"我读了源码里的字符串"，是
+      # **PyPI 将会收到的那个文件名**。发出去的版本号不能收回（连删了都不许重发同一个号），
+      # 所以宁可在发之前多死一次。
+      - name: 构建，并用产物的文件名核对 tag / 版本 / 发行名
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME#v}"
+          python -m pip install --upgrade pip build
+          python -m build
+          ls -l dist/
+          test -f "dist/molt_handoff-${tag}-py3-none-any.whl" \
+            || { echo "::error::wheel 不叫 molt_handoff-${tag}（发行名或版本不对）"; exit 1; }
+          test -f "dist/molt_handoff-${tag}.tar.gz" \
+            || { echo "::error::sdist 不叫 molt_handoff-${tag}"; exit 1; }
+          echo "产物名与 tag 一致：molt_handoff-${tag}"
+
+      # PyPI 的 API token 用户名固定是 `__token__`（action 自己填），密码就是那把 token。
+      # 它在仓库 secret 里，日志里会被自动打码，我也读不到它。
+      - name: 发布到 PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
