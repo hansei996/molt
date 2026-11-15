@@ -61,6 +61,11 @@ molt timeline --warden-url http://<账本IP>:6186 --warden-token <token>
 
 ## 装起来看它跑（两分钟）
 
+> 预构建镜像与 PyPI 包**都还没发布**（缺凭据，见 `docs/V1.0-PLAN.md` §2.2）。
+> 所以下面两条路都是「先 clone 再本地构建/安装」——它们是真的能跑的，
+> CI 里每次都跑一遍。
+
+
 ```bash
 pip install -e .
 molt init --role warden --root ./warden      # 立账本，生成 token 并打印 serve 命令
