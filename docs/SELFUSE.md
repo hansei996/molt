@@ -615,8 +615,9 @@ injection_chars: 0
 
 **账号密码不用改**：`dashboard.username` 和 `pbkdf2_password` 是随灵魂一起搬过来的，原来那个密码直接能用。
 
-**但要重新登录一次**：`jwt_secret` 在每台新壳上都会被重新生成（覆写表第 6 条）。旧 cookie 在这边无效 ——
-共用同一个 secret 意味着攻破 Windows 就等于攻破 NAS，不值得图那点方便。
+**但要重新登录一次**：落在 Windows 壳上时 `jwt_secret` 会被重新生成（覆写表第 6 条）—— 共用同一个 secret 意味着攻破 Windows 就等于攻破 NAS，不值得图那点方便。旧 cookie 在这边无效。
+
+（回家方向目前**不换**：审计发现的不对称。要不要两侧都换、代价是那边 dashboard 掉一次登录，见 `docs/DECISIONS.md` D1.5。）
 
 **Windows 上只监听 `127.0.0.1`，这是刻意的**：
 NAS 上写 `0.0.0.0` 安全，是因为它在容器网络里隔离着；一台裸 Windows 上写 `0.0.0.0`

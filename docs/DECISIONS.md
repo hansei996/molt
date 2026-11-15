@@ -28,13 +28,33 @@
 **为什么不拍也能跑**：`schedule` 目前只是一个"配置了也不会触发"的诚实空壳；配了坏值
 会被 `move_policy_refusals` 拦住并说"读不懂"，不会静默失效。
 
+**说全一点（2026-11-15 审计）**：`schedule_due()` 这个"到点了吗"的纯函数**全仓库没有任何
+调用方** —— 只有测试在调它。这是 D1a 没拍板的直接后果，不是漏写：谁去敲这一下没定，
+就没有人该调用它。看到"判据已写好"时，请一起看到"但没有人问它"。
+
+### D1.5 落位回 NAS 时，要不要也换掉 `dashboard.jwt_secret`？
+
+审计（`docs/AUDIT.md` 第 6 条）发现文档说"换密钥是默认行为"，而代码里只有 Windows 路径换：
+
+| 落位方向 | `rotate_jwt` | 位置 |
+|---|---|---|
+| 落在 Windows 壳上 | **`True`（每次换）** | `molt/overlay.py:336`（`overlay_for_windows`） |
+| 落回 NAS 容器 | **`False`（不换，沿用上一台壳的密钥）** | `molt/cli.py:1723`（`cmd_land` 非 Windows 分支） |
+
+**代价对比**：换 → 那边 dashboard 上已登录的会话失效一次（要重新登录）；不换 → 从 Windows
+搬回来的快照里带着 Windows 的密钥，于是"攻破 Windows 等于攻破 NAS"这条**在回家方向上仍然成立**。
+
+**现在的默认**：不动（`False`），因为改它会让一个已登录的 dashboard 在鱼回家那一刻掉线。
+**我的建议**：两侧都换，接受一次重新登录 —— 但这条会影响你正在用的界面，所以等你点头。
+
+
 ### D2. L3 壳属性表 —— **已定案并落地（2026-11-15）**
 
 账本里每一代原本只记了"哪台壳"，没记"那台壳是什么"。现在它记了：
 
 | 字段 | 状态 | 落在哪里 |
 |---|---|---|
-| `role`（`nas`/`desktop`/`cloud`/`unknown`） | ✅ 已做，**参与判断** | 账本 `shells`、`GET /shells`、`POST /shell`、`molt declare`、`molt shells`、`/where` 的「是什么」列、`/molt where` 每行 |
+| `role`（`nas`/`desktop`/`cloud`/`unknown`） | ✅ 已做，**显示给人判断**（代码里没有一条 `if` 因它改变行为） | 账本 `shells`、`GET /shells`、`POST /shell`、`molt declare`、`molt shells`、`/where` 的「是什么」列、`/molt where` 每行 |
 | `wakeable`（能不能被 WOL 叫醒） | ✅ 已做，**真的拦住魔术封包** | 同上；另外 `molt migrate` 发封包前会查它（2026-11-15 补的，见下） |
 | `gpu`（型号，空串=确认没有） | 🟡 能填，**不参与任何判断** | 只显示 |
 | `cost_per_hour` | 🟡 能填，**不参与任何判断** | 只显示 |
@@ -64,6 +84,9 @@
 
 ## 二、等时机（不是决策，是得等一个真实场景）
 
+- **`v1.2.1` 的 tag / PyPI / ghcr** —— 代码已提交推送（`7aa6fe6`，CI 七个 job 全绿），
+  本地 wheel 用 `tools/rehearse-pypi.py --wheel` 在全新 venv 里 **17/17 通过**。
+  发布是外部可见动作，**等你明确说"发"** 才打 tag。
 - **`/molt shutdown` 的真机端到端**。代码路径全部走通（`power.json` 票据、`POST /power`、
   agent 的 `power_verdict`、homer 拒绝执行），但**从没在真机上真的关过一次机** ——
   要等鱼正好回家、机器正好可以关的那一次。在那之前它是"接口通了，端到端未验"。

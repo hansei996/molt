@@ -11,7 +11,7 @@
 > ✅ **优雅停机 = SIGINT**（SIGTERM 退出码 137 丢 WAL；SIGINT 退出码 0 且 WAL 归零）
 > ✅ **Windows 上也有等价的优雅停机信号**（`AttachConsole` + `GenerateConsoleCtrlEvent`；`os.kill(CTRL_BREAK)` 是假阳性）
 > ✅ **`molt migrate` 一条命令**（真机 1.4 秒：唤醒 → 拿租约 → 热备 → 打包 → **上传中转区** → 登记 → 还租约）
-> ✅ **`molt land` 落位 + 机器覆写层**（**7 处**自动改写，含**关掉平台适配器**——这条是公理 0 的护栏）
+> ✅ **`molt land` 落位 + 机器覆写层**（Windows 路径 **7 处**自动改写；非 Windows 路径只有 3 条 —— 关平台适配器与 `dashboard.host/port`，见 §6.6.4；含**关掉平台适配器**——这条是公理 0 的护栏）
 > ✅ **跨机字节传输已自动化**：源端 `migrate` PUT 归档 → Warden 中转区 → 目标端 `land --generation N` GET 下来。**中间不需要 scp、不需要共享盘、不需要第三套凭证**
 > ✅ **唤醒进了产品**（`molt wake`；`migrate` 里是**先唤醒再拿租约**，顺序有测试固定）
 > ✅ **中转区可清理**（`molt prune`；账本里记着的一律不删，默认只看不删）
@@ -734,7 +734,7 @@ Molt 的选择：**用 `dashboard.jwt_secret` 自己签**，而不是调 `/api/a
 - 理由二：标准库 `hmac` + `hashlib` + `base64` 手写 HS256 就够，**不引 PyJWT** —— Warden 必须能在什么都没装的 NAS 上跑（裸 python 3.10.7），这是 `server.py` / `wake.py` 一以贯之的约束
 - `DEFAULT_TOKEN_TTL = 300`（AstrBot 自己签的是 7 天；我们只要够一次迁徙用，短一点意味着泄漏窗口更小）
 
-**安全后果必须写清**：`overlay.py` 在落位时会重新生成 `jwt_secret`（§6.6），所以迁完之后源壳无法控制目标壳、反之亦然。***
+**安全后果必须写清**：`overlay.py` 在落位时**会**重新生成 `jwt_secret`（§6.6）—— 但 2026-11-15 审计发现这条只在**落在 Windows 壳上**时生效：`cmd_land` 的非 Windows 分支传的是 `rotate_jwt=False`（见 §6.6.4 与 `docs/DECISIONS.md` D1.5）。所以在回家方向上，「源壳无法控制目标壳」这句话**目前不成立**。***
 
 > **一个能远程 drain 对方的壳，等于一个能远程关掉它的后门。**
 
@@ -917,7 +917,7 @@ PRAGMA wal_checkpoint(TRUNCATE);
 
 实现：`molt/molt/overlay.py`（255 行），纯函数 `apply_overlay(config, ...)` 接收关键字形参，`deepcopy` 后改，**不改入参**，返回人类可读的 `notes["changes"]` 清单。
 
-#### 6.6.3 七处覆写，以及为什么每一处都不是可选的
+#### 6.6.3 七处覆写（Windows 路径），以及为什么每一处都不是可选的
 
 | # | 覆写 | 不做的后果（全部实测过） |
 |---|---|---|
@@ -945,7 +945,16 @@ PRAGMA wal_checkpoint(TRUNCATE);
 
 如果它跟着 soul 一起搬到 Windows，那么任何能读到 Windows 上这份配置的人（不需要管理员，普通用户就能读 `data/cmd_config.json`），都能**伪造 NAS dashboard 的有效 token**。
 
-**这条被做成默认行为而不是可选项**：`rotate_jwt=True` 是默认值，且 note 里写明理由。
+**默认值 `rotate_jwt=True`，但两条落位路径不一样**（2026-11-15 审计更正）：
+
+- **落在 Windows 壳上**：每次换（`overlay_for_windows` 传 `True`）。理由就是上面那段：
+  普通用户能读这份配置，密钥跟着 soul 过来等于让人伪造 NAS 的 token。
+- **落回 NAS 容器**：`molt/cli.py` 的 `cmd_land` 非 Windows 分支**显式传了 `rotate_jwt=False`**
+  （`molt/cli.py:1723`）—— 也就是说回家方向上这条防线**没有生效**。
+
+之前这里写的是"这条被做成默认行为而不是可选项"，与代码不符（`overlay.py` 的默认值是 `True`，
+但调用方可以传 `False`，而真有一个调用方这么传了）。要不要两侧都换进 `docs/DECISIONS.md` 的
+D1.5 —— 因为它会让一个已登录的 dashboard 在鱼回家那一刻掉线，那是产品取舍。
 
 #### 6.6.5 两个编码陷阱
 
@@ -3111,7 +3120,7 @@ bounce: 已启动 pid=7328
 | ~~**落位后忘了关 `platform[].enable`**~~ | ~~高~~ **已消除** | **2026-11-14 14:41 差一点就出事了**：三次 Windows 启动都真的发起了 QQ websocket 连接（`[QQOfficial] Websocket session starting.`），只因进程数秒内被杀才没变成双活。修法：`_disable_platform_adapters()` 作为覆写表第 0 条，两条预设都不给关闭便利；14:56 复验 `Loading IM platform adapter` / `QQOfficial` **零命中**（§6.6.7）。**这是本项目唯一一条"漏了直接违反公理 0"的检查项** |
 | ~~**`drain()` 找不到该关谁**~~ | ~~高~~ **已消除** | `WebChatAdapter` 由 `manager.py:116` 直接 append，**从不进 `_inst_map`**，`config.platform` 里也没有它 → 第一版 `/drain` 什么都没关却返 409。修法：`_classified()` 改用**实例身份**判据，webchat 归 `local_only`（§6.2.5–6.2.7，§13.6 第 12 条）。**17 个用例 + 10 个变异全抓** |
 | **`drain` 之后其实还在说话** | 中 | `drain_and_verify()` 轮询复核 `speaking`，仍为真就 `NeedsHuman("不要继续这次迁徙…公理 0")`。**必须复核**：`terminate_platform` 关不掉时只记一条 `logger.warning`，不抛（§6.2.9） |
-| **能远程 drain 对方的壳 = 一个能远程关掉它的后门** | 中 | `overlay.py` 落位时**重新生成 `dashboard.jwt_secret`** → 迁完之后源壳无法控制目标壳、反之亦然（§6.2.8）。JWT TTL 只有 300 秒（AstrBot 自己签 7 天） |
+| **能远程 drain 对方的壳 = 一个能远程关掉它的后门** | 中 | `overlay.py` 在**落在 Windows 壳上**时**重新生成 `dashboard.jwt_secret`** → 迁完之后源壳无法控制目标壳、反之亦然（§6.2.8）；回家方向目前不换，见 §6.6.4 / DECISIONS D1.5。JWT TTL 只有 300 秒（AstrBot 自己签 7 天） |
 | **`resume` 可能顺手把鱼放回线上** | 中 | `resume()` **只恢复配置里 `enable=true` 的**，`skipped_disabled` 显式报告跳过了谁。让这只鱼重新对外说话必须是人的决定，不是 resume 的副作用（§6.2.7） |
 | **`-wal` 非空时被当成普通文件搬走** | 中 | 已消除：`_sidecar_noise()` 在打包阶段 `Fatal`，`restore_into` 在落位后复查并清理（§13.6 第 7 条） |
 | **下载中途断开，半截文件落在正式文件名上** | 中 | 已消除：下载先写 `<dest>.part`，验过 sha256 才 `os.replace`。**变异测试证明这条不是废话**——去掉 `.part` 后 19 个测试全过，只有"中途断开"能区分（§13.8.4） |
