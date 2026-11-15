@@ -56,6 +56,60 @@ def compose_arrival_note(
     return f"（我刚搬到这台机器上 —— 中间睡了一觉。）\n"
 
 
+#: 旧壳多久没报心跳就不再问"要不要关它"。10 分钟：和 `/where` 的 stale 阈值同源。
+SHELL_STILL_UP_SECONDS = 600.0
+
+
+def compose_power_question(*, old_label: str = "", old_shell: str = "") -> str:
+    """旧壳还开着时，落地那句话后面追加的**问句**。
+
+    为什么要问：`/molt shutdown` 一直存在，但它要求人**先想到**去敲。
+    落地那一刻是唯一自然的提问时机 —— 人刚看着它从那边走到这边，
+    旧壳还亮着，正是"要不要关掉它"最不需要解释的时候。
+    措辞里给了**两个**出口（关 / 留着），因为这是一个真问题，不是一个提示。
+    """
+    name = (old_label or "").strip() or prettify_shell(old_shell)
+    if not name:
+        return ""
+    return f"（{name} 还开着 —— 要关它就回 /molt shutdown，留着就回 /molt keep。）\n"
+
+
+def should_ask_about_power(
+    status: Optional[Dict[str, Any]],
+    *,
+    shell: str,
+    from_shell: str,
+    fresh_seconds: float = SHELL_STILL_UP_SECONDS,
+) -> bool:
+    """该不该问那句「旧壳要不要关」。
+
+    三个条件缺一不可：①旧壳不是我自己 ②它现在还在报心跳（关机/断电的不问）
+    ③账本里还没有它的关机票（已经答过的不再问第二遍）。
+
+    **问不到就闭嘴**：读不到心跳、读不到票，一律不问 —— 宁可少问一次，
+    也不要对着一个已经关掉的机器反复说"它还开着"。
+    """
+    if not isinstance(status, dict):
+        return False
+    old = (from_shell or "").strip()
+    if not old or old == (shell or "").strip():
+        return False
+    beats = status.get("heartbeats") or {}
+    beat = beats.get(old) if isinstance(beats, dict) else None
+    if not isinstance(beat, dict):
+        return False
+    try:
+        age = float(beat.get("age_seconds"))
+    except (TypeError, ValueError):
+        return False
+    if age < 0 or age > fresh_seconds:
+        return False
+    power = status.get("power") or {}
+    if isinstance(power, dict) and old in power:
+        return False
+    return True
+
+
 def prettify_shell(shell: str) -> str:
     """`ugreen-776b-8b7896df` → `ugreen-776b`。
 

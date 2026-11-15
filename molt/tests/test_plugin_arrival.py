@@ -344,3 +344,78 @@ def test_plugin_stops_asking_after_three_failed_ledger_calls(tmp_path):
     for _ in range(6):
         _run(plugin)
     assert mover.ledger_calls == 3
+
+# --------------------------------------------------------------------------- 问一句"旧壳要不要关"
+
+
+def test_power_question_names_the_old_shell():
+    line = arrival.compose_power_question(old_label="DESKTOP-H2KGIAO")
+    assert "DESKTOP-H2KGIAO 还开着" in line
+    assert "/molt shutdown" in line
+    assert "/molt keep" in line, "这是真问题，必须给出「不关」的出口"
+
+
+def test_power_question_falls_back_to_the_shell_id():
+    line = arrival.compose_power_question(old_shell="desktop-h2kgiao")
+    assert "desktop-h2kgiao 还开着" in line
+
+
+def test_power_question_is_silent_without_a_name():
+    assert arrival.compose_power_question() == ""
+
+
+def _power_status(*, age=3.0, ticket=False):
+    st = _status(beats={"ugreen-776b-8b7896df": {"label": "UGREEN-776B", "age_seconds": age}})
+    if ticket:
+        st["power"] = {"ugreen-776b-8b7896df": {"action": "shutdown"}}
+    return st
+
+
+def test_ask_about_power_when_the_old_shell_is_still_up():
+    assert arrival.should_ask_about_power(
+        _power_status(), shell="desktop-h2kgiao", from_shell="ugreen-776b-8b7896df"
+    )
+
+
+def test_do_not_ask_about_a_shell_that_is_already_off():
+    """关机/断电的旧壳不问 —— 否则每次落地都会对着空气问一句。"""
+    assert not arrival.should_ask_about_power(
+        _power_status(age=3600), shell="desktop-h2kgiao", from_shell="ugreen-776b-8b7896df"
+    )
+
+
+def test_do_not_ask_twice_when_the_ticket_is_already_there():
+    assert not arrival.should_ask_about_power(
+        _power_status(ticket=True), shell="desktop-h2kgiao", from_shell="ugreen-776b-8b7896df"
+    )
+
+
+def test_do_not_ask_when_the_ledger_has_no_heartbeat_for_it():
+    st = _status()
+    assert not arrival.should_ask_about_power(
+        st, shell="desktop-h2kgiao", from_shell="ugreen-776b-8b7896df"
+    )
+
+
+def test_do_not_ask_about_myself():
+    assert not arrival.should_ask_about_power(
+        _power_status(), shell="ugreen-776b-8b7896df", from_shell="ugreen-776b-8b7896df"
+    )
+
+
+def test_do_not_ask_when_the_age_is_unreadable():
+    st = _power_status()
+    st["heartbeats"]["ugreen-776b-8b7896df"]["age_seconds"] = "not-a-number"
+    assert not arrival.should_ask_about_power(
+        st, shell="desktop-h2kgiao", from_shell="ugreen-776b-8b7896df"
+    )
+
+
+def test_plugin_appends_the_power_question_after_the_arrival_note(tmp_path):
+    mover = _FakeMover(_power_status())
+    plugin = _plugin(tmp_path, mover)
+    event = _run(plugin)
+    assert len(event.sent) == 1
+    assert "我刚从 UGREEN-776B 那边过来" in event.sent[0]
+    assert "还开着" in event.sent[0]
+    assert "/molt shutdown" in event.sent[0]

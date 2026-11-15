@@ -88,7 +88,9 @@ from .observed import (  # noqa: E402  (放在常量后面，读起来更顺)
 from .arrival import (  # noqa: E402
     ArrivalState,
     compose_arrival_note,
+    compose_power_question,
     pick_arrival,
+    should_ask_about_power,
 )
 
 OBSERVED_STATE_FILENAME = "observed_state.json"
@@ -324,6 +326,17 @@ class MoltControlPlugin(Star):
             from_label=str(arrival.get("from_label") or ""),
             from_shell=str(arrival.get("from_shell") or ""),
         ).strip()
+        # 旧壳还开着就问一句 —— 落地那一刻是唯一自然的提问时机。
+        # 已经答过（账本里有票）、旧壳已关（没有心跳）、或读不到心跳，都不问。
+        if should_ask_about_power(
+            status,
+            shell=shell,
+            from_shell=str(arrival.get("from_shell") or ""),
+        ):
+            note = note + compose_power_question(
+                old_label=str(arrival.get("from_label") or ""),
+                old_shell=str(arrival.get("from_shell") or ""),
+            ).strip()
         # **先不 mark。** 组装成功不等于送达 —— 这句话要通过平台发出去，
         # 而平台会不会收下，只有 send() 返回之后才知道。
         # 2026-11-15 的教训：第一版在这里就 mark 了，发送失败也被记成"说过"，
