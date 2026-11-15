@@ -37,8 +37,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional
-from urllib.parse import urljoin
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urljoin
 
 from .errors import (
     CapabilityMissing,
@@ -517,4 +517,70 @@ class WardenClient:
         return self._request(
             "POST", "/prune", {"keep_recent": int(keep_recent), "dry_run": bool(dry_run)}
         )
+
+    # -- 插件配置包 ------------------------------------------------------
+    #
+    # 这个包很小（几十 KB），所以整份放进内存发出去就够了 ——
+    # 不像归档那样要边读边发。
+
+    def publish_plugin_bundle(
+        self,
+        payload: bytes,
+        *,
+        shell: str,
+        sha256: str = "",
+        plugins: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        if not shell:
+            raise Fatal("上传插件配置包必须带壳名")
+        url = urljoin(self.base_url + "/", "plugin-configs")
+        headers = {
+            TOKEN_HEADER: self.token,
+            "Content-Type": "application/gzip",
+            "Content-Length": str(len(payload)),
+            "X-Molt-Shell": shell,
+        }
+        if sha256:
+            headers[  # 与归档同一个头，服务端会复核
+                "X-Molt-Sha256"
+            ] = sha256
+        if plugins:
+            # 壳名以外还要告诉账本"这包里有哪些插件"：
+            # 下载方据此先算交集，不必为了看一眼清单而解包。
+            headers["X-Molt-Plugins"] = ",".join(plugins)
+
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                return self._unwrap(body)
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                body = {"ok": False, "message": raw.decode("utf-8", "replace")}
+            raise self._to_error(body, e.code) from None
+        except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+            raise Fatal(f"上传插件配置包失败（{url}）：{e}") from e
+
+    def plugin_bundles(self) -> list:
+        return self._request("GET", "/plugin-configs").get("plugin_bundles", [])
+
+    def download_plugin_bundle(self, shell: str) -> bytes:
+        """取回某个壳的插件配置包（原始字节）。"""
+        url = urljoin(self.base_url + "/", f"plugin-configs/{quote(str(shell), safe='')}")
+        req = urllib.request.Request(url, headers={TOKEN_HEADER: self.token}, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                body = {"ok": False, "message": raw.decode("utf-8", "replace")}
+            raise self._to_error(body, e.code) from None
+        except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+            raise Fatal(f"下载插件配置包失败（{url}）：{e}") from e
 

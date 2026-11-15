@@ -222,6 +222,37 @@ class LocalBackend:
     def prune(self, *, keep_recent: int = 2, dry_run: bool = True) -> Dict[str, Any]:
         return self.warden.prune_archives(keep_recent=keep_recent, dry_run=dry_run)
 
+    # -- 插件配置包 ------------------------------------------------------
+
+    def publish_plugin_bundle(
+        self,
+        payload: bytes,
+        *,
+        shell: str,
+        sha256: str = "",
+        plugins: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """本地模式：写进 `plugin-configs/<壳名>.tar.gz`（先 `.part` 再改名）。"""
+        d = self.warden.plugin_bundle_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        part = d / f".incoming-{int(time.time() * 1000)}.part"
+        part.write_bytes(payload)
+        try:
+            return self.warden.store_plugin_bundle(
+                part, shell=shell, sha256=sha256, plugins=plugins
+            )
+        finally:
+            part.unlink(missing_ok=True)
+
+    def plugin_bundles(self) -> list:
+        return self.warden.list_plugin_bundles()
+
+    def plugin_bundle_bytes(self, shell: str) -> bytes:
+        path = self.warden.plugin_bundle_path(shell)
+        if not path.is_file():
+            raise Fatal(f"没有 {shell} 的插件配置包")
+        return path.read_bytes()
+
 
 class RemoteBackend:
     """壳在别处，Warden 在 NAS 上，走 HTTP。"""
@@ -354,6 +385,26 @@ class RemoteBackend:
 
     def prune_backups(self, *, keep_recent: int = 12, dry_run: bool = True) -> Dict[str, Any]:
         return self.client.prune_backups(keep_recent=keep_recent, dry_run=dry_run)
+
+    # -- 插件配置包 ------------------------------------------------------
+
+    def publish_plugin_bundle(
+        self,
+        payload: bytes,
+        *,
+        shell: str,
+        sha256: str = "",
+        plugins: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        return self.client.publish_plugin_bundle(
+            payload, shell=shell, sha256=sha256, plugins=plugins
+        )
+
+    def plugin_bundles(self) -> list:
+        return self.client.plugin_bundles()
+
+    def plugin_bundle_bytes(self, shell: str) -> bytes:
+        return self.client.download_plugin_bundle(shell)
 
 
 

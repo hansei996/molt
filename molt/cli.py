@@ -1,4 +1,4 @@
-﻿"""molt 命令行。
+"""molt 命令行。
 
 ## 为什么先做 CLI 而不是 API
 
@@ -24,6 +24,7 @@ API 在 v0.2 做（Warden 需要一个 HTTP 面给远端壳调用）。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import socket
@@ -35,7 +36,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import __version__, initcfg
+from . import __version__, initcfg, pluginsync
 from .backend import LocalBackend, RemoteBackend, open_backend
 from .language import move_count, move_count_after, snapshot_tag
 from .epoch import DEFAULT_LEASE_TTL_SECONDS
@@ -1326,6 +1327,195 @@ def cmd_backups(args: argparse.Namespace) -> int:
     print()
     kv("一共", f"{len(items)} 份 / {total / 1024 / 1024:.1f} MB")
     dim(f"  恢复：molt recover --backup <名字> --data <目标 data 目录>")
+    return 0
+
+
+def cmd_publish_plugins(args: argparse.Namespace) -> int:
+    """把这台壳的「插件配置」打包推给账本。
+
+    ## 为什么只装配置，不装代码
+
+    代码属于"这台机器装了什么"，配置属于"这只鱼喜欢什么"。
+    同步代码会让一台机器的插件版本变成另一台的决定 —— 而两边
+    本来就允许装不同的东西（比如 dsh_connector 只在 Windows 上有）。
+
+    所以这个包里只有 `config/<插件>_config.json`，一个插件一行，
+    别的一概不带：`plugin_data` 是运行时数据，也不会进这个包。
+    """
+    data_dir = Path(args.data).expanduser().resolve()
+    if not data_dir.is_dir():
+        bad(f"data 目录不存在：{data_dir}")
+        return 2
+
+    shell = args.shell or _default_shell_id()
+    plugins = pluginsync.list_plugins(data_dir)
+
+    head("发布插件配置")
+    kv("壳", shell)
+    kv("本机插件", len(plugins))
+
+    payload, manifest = pluginsync.make_bundle(data_dir, plugins)
+    configs = manifest.get("configs") or {}
+    if not configs:
+        warn("这台机器上还没有任何可同步的插件配置。")
+        dim("  只认 data/config/<插件>_config.json；装了插件但没配置过，就不在里面。")
+        dim("  也不用担心：这不会让另一台机器上已有的配置消失 —— 什么都不做就是不做事。")
+        return 0
+
+    kv("含配置的插件", len(configs))
+    kv("包", f"{len(payload) / 1024:.0f} KB")
+
+    try:
+        be = _backend(args)
+    except (NeedsHuman, Fatal, ValueError) as e:
+        bad(str(e))
+        return 2
+
+    digest = hashlib.sha256(payload).hexdigest()
+    try:
+        meta = be.publish_plugin_bundle(
+            payload, shell=shell, sha256=digest, plugins=sorted(configs)
+        )
+    except (NeedsHuman, Fatal, MoltError) as e:
+        bad(f"上传失败：{e}")
+        return 4
+
+    ok(f"已收进账本：{shell} 的插件配置包")
+    kv("字节", meta.get("bytes", len(payload)))
+    kv("含", f"{len(configs)} 个插件的配置")
+    dim("  另一边跑 molt sync-plugins 时，只会拿「两边都装了」的那几个。")
+    dim("  这个包不装插件代码、不装 plugin_data，也不会动另一边的独有插件。")
+    return 0
+
+
+def cmd_sync_plugins(args: argparse.Namespace) -> int:
+    """把另一台壳的插件配置同步到这台机器。
+
+    ## 主人定的规则（2026-11-15）
+
+    **只同步两边都装了的插件**。只在一边有的插件，两边都不动 ——
+    不装代码、不写配置、也不删配置。
+
+    三条理由：
+
+      - 给一个不存在的插件送配置不会报错，它只会安静躺着；等哪天
+        真装上了，它会带着**另一台机器**的配置启动
+      - "同步"一旦被理解成"让两边一样"，销毁就成了其中一步
+      - 有些值天然绑定机器（比如 dsh_connector 的 `http_base_url`），
+        带过去只会让人去查网卡
+
+    结构明显不一样的也默认跳过（`--force` 才写）：同一个插件在两台
+    机器上版本不同时，它的配置键会完全不同（真实例子：private_companion
+    一边 15 个键、一边 1008 个键），覆盖等于把对方不认识的东西塞进去。
+    """
+    data_dir = Path(args.data).expanduser().resolve()
+    if not data_dir.is_dir():
+        bad(f"data 目录不存在：{data_dir}")
+        return 2
+
+    try:
+        be = _backend(args)
+    except (NeedsHuman, Fatal, ValueError) as e:
+        bad(str(e))
+        return 2
+
+    try:
+        bundles = be.plugin_bundles()
+    except (NeedsHuman, Fatal, MoltError) as e:
+        bad(f"读不到账本上的插件配置包：{e}")
+        return 3
+
+    me = args.shell or _default_shell_id()
+    source = str(getattr(args, "source", "") or "auto")
+
+    head("同步插件配置")
+    kv("这台壳", me)
+
+    if source == "auto":
+        others = [b for b in bundles if str(b.get("shell") or "") != me]
+        if not others:
+            warn("账本里没有别的壳发布过插件配置。")
+            dim("  先在另一台机器上跑：molt publish-plugins --data <那边的 data 目录>")
+            return 0
+        others.sort(key=lambda b: int(b.get("created_at") or 0))
+        source = str(others[-1].get("shell") or "")
+        dim(f"  没给 --from，取最近的那一份：{source}")
+
+    kv("来自", source)
+
+    try:
+        payload = be.plugin_bundle_bytes(source)
+    except (NeedsHuman, Fatal, MoltError) as e:
+        bad(f"取不下来：{e}")
+        return 4
+
+    try:
+        remote_configs = pluginsync.parse_bundle(payload)
+    except (NeedsHuman, Fatal, MoltError) as e:
+        bad(f"这个包读不了：{e}")
+        return 4
+
+    local_plugins = pluginsync.list_plugins(data_dir)
+    local_configs = pluginsync.read_plugin_configs(data_dir, local_plugins)
+    # 清单里才有"那边装了哪些插件"；只用配置文件列表的话，"装了但没配置过"
+    # 会被误报成"那边没装"——那是两件完全不同的事。
+    manifest = pluginsync.read_bundle_manifest(payload)
+    manifest_plugins = [str(n) for n in (manifest.get("plugins") or [])]
+    remote_plugins = manifest_plugins or sorted(remote_configs)
+    plan = pluginsync.plan_sync(
+        remote_plugins=remote_plugins,
+        local_plugins=local_plugins,
+        remote_configs=remote_configs,
+        local_configs=local_configs,
+    )
+
+    print()
+    kv("两边都装了的插件", len(plan.common))
+    if not manifest_plugins:
+        dim("  （这个包里没有清单，只能按「哪些插件有配置」来判断）")
+    for name in sorted(plan.sync):
+        print(f"  {C.GRN}{C.S_OK}{C.R} {name}  {C.DIM}会写{C.R}")
+    for name in sorted(plan.unchanged):
+        print(f"  {C.DIM}·{C.R} {name}  {C.DIM}一样，不用动{C.R}")
+    for name in sorted(plan.suspect):
+        print(
+            f"  {C.YEL}{C.S_WARN}{C.R} {name}  "
+            f"{C.YEL}结构看起来不一样（可能两边插件版本不同）{C.R}"
+        )
+    for name in sorted(plan.no_remote_config):
+        print(f"  {C.DIM}·{C.R} {name}  {C.DIM}那边装了但没有配置 —— 保留这边的{C.R}")
+    for name in sorted(plan.only_remote):
+        print(f"  {C.DIM}·{C.R} {name}  {C.DIM}那边有、这边没装 —— 不装也不写{C.R}")
+    for name in sorted(plan.only_local):
+        print(f"  {C.DIM}·{C.R} {name}  {C.DIM}这边独有 —— 不动{C.R}")
+
+    if plan.suspect and not args.force:
+        print()
+        warn(f"{len(plan.suspect)} 个插件的配置结构差太多，默认跳过。")
+        dim("  这通常意味着两边的插件版本不同 —— 覆盖过去等于把对方不认识的键塞进去。")
+        dim("  确认真要覆盖就加 --force（原文件仍会备份成 *.molt-before-sync-*）。")
+    if plan.only_remote:
+        dim("  只在那边有的插件不会在这台机器上被安装、也不会写它的配置。")
+
+    if not args.apply:
+        print()
+        warn("空跑：一个字都没写。确认无误后加 --apply。")
+        return 0
+
+    try:
+        report = pluginsync.apply_plan(
+            data_dir, plan, dry_run=False, force=bool(args.force)
+        )
+    except (NeedsHuman, Fatal, MoltError) as e:
+        bad(f"写入失败：{e}")
+        return 4
+
+    print()
+    ok(f"写好了 {len(report.updated)} 个")
+    if report.backups:
+        kv("旧文件备份", f"{len(report.backups)} 个（*.molt-before-sync-*）")
+    kv("没动", f"{len(report.unchanged)} 个相同、{len(report.only_remote)} 个那边独有、{len(report.only_local)} 个这边独有")
+    dim("  AstrBot 读的是启动时载入的配置 —— 要让它生效还得重启那边（或等它下次重启）。")
     return 0
 
 
@@ -2756,6 +2946,42 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="跳过「目标 data 目录还活着」的检查")
     s.add_argument("--root", help="Warden 根目录（本地模式）")
     s.set_defaults(func=cmd_recover)
+
+    # publish-plugins
+    s = add(
+        "publish-plugins",
+        "把这台机器上「插件的配置」打包推给 Warden（只装配置，不装代码）",
+    )
+    s.add_argument("--data", required=True, help="AstrBot 的 data 目录")
+    s.add_argument("--shell", default="", help="这台壳的名字（默认用小写主机名）")
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.set_defaults(func=cmd_publish_plugins)
+
+    # sync-plugins
+    s = add(
+        "sync-plugins",
+        "把另一台壳的插件配置同步过来（只同步两边都装了的插件；默认空跑）",
+    )
+    s.add_argument("--data", required=True, help="AstrBot 的 data 目录")
+    s.add_argument(
+        "--shell",
+        default="",
+        help="这台壳的名字（只用来判断「哪一份不是自己的」，默认用小写主机名）",
+    )
+    s.add_argument(
+        "--from",
+        dest="source",
+        default="auto",
+        help="从哪个壳同步（默认 auto：取账本里最近一份不是自己的包）",
+    )
+    s.add_argument("--apply", action="store_true", help="真的写盘（不给只报告）")
+    s.add_argument(
+        "--force",
+        action="store_true",
+        help="连「结构看起来不一样」的也写（默认跳过，因为那通常意味着两边插件版本不同）",
+    )
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.set_defaults(func=cmd_sync_plugins)
 
     # init
     s = add("init", "生成一份能被它自己的加载器读通的配置")

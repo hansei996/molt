@@ -48,7 +48,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from .errors import Fatal, MoltError, NeedsHuman
@@ -64,6 +64,13 @@ ARCHIVE_ROUTE = re.compile(r"^/archive/(\d+)$")
 #: `POST /backup` 上传、`GET /backup/<name>` 下载。分开写而不是一个可选组：
 #: 上传时 URL 里没有名字（名字由服务端按时间戳和壳名生成），下载时必须有。
 BACKUP_NAME_ROUTE = re.compile(r"^/backup/([^/]+)$")
+
+#: `POST /plugin-configs` 上传、`GET /plugin-configs/<shell>` 下载。
+#: 与备份同形：上传时不带名字（服务端按壳名存），下载时必须点名。
+PLUGIN_BUNDLE_ROUTE = re.compile(r"^/plugin-configs/([^/]+)$")
+
+#: 插件配置包只是几十 KB 的 JSON，给 8 MB 已经是宽容上限。
+MAX_PLUGIN_BUNDLE_BYTES = 8 << 20
 
 
 
@@ -500,6 +507,17 @@ class WardenServer:
                     backup_dir=str(self.warden.backup_dir()),
                 )
 
+            # ---- GET /plugin-configs ----
+            # 各壳上传的插件配置包索引。它们既不是交接也不是备份：
+            # 是"每个壳的偏好清单"，只在有相同时才被取用。
+            if head == "plugin-configs" and method == "GET":
+                items = self.warden.list_plugin_bundles()
+                return _ok(
+                    plugin_bundles=items,
+                    total_bytes=sum(int(x.get("bytes") or 0) for x in items),
+                    dir=str(self.warden.plugin_bundle_dir()),
+                )
+
             # ---- POST /backups/prune ----
             if head == "backups" and method == "POST" and len(parts) == 2 and parts[1] == "prune":
                 try:
@@ -611,6 +629,65 @@ class WardenServer:
         return _Response(
             200,
             {"ok": True, "name": name, "bytes": path.stat().st_size},
+            stream_path=path,
+        )
+
+    # -- 插件配置包的字节传输 --------------------------------------------
+
+    def accept_plugin_bundle(
+        self, tmp_path: Path, claimed_sha: str, shell: str, plugins: Optional[List[str]] = None
+    ) -> _Response:
+        """收下某个壳上传的插件配置包。
+
+        它比归档小得多（几十 KB），但规矩一样：**先算哈希，再落位**。
+        这个包里装的是"哪些插件、它们的配置长什么样" —— 如果传坏了却
+        被收下，另一台机器会照着它去改自己的配置文件。
+        """
+        if not shell:
+            tmp_path.unlink(missing_ok=True)
+            return _err(400, "缺少壳名（X-Molt-Shell）", "bad_request")
+        if not tmp_path.is_file():
+            return _err(400, "没有收到插件配置包", "bad_request")
+        size = tmp_path.stat().st_size
+        if size == 0:
+            tmp_path.unlink(missing_ok=True)
+            return _err(400, "插件配置包是空的", "bad_request")
+
+        digest = hashlib.sha256()
+        with open(tmp_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+        got = digest.hexdigest()
+        if claimed_sha and claimed_sha.lower() != got:
+            tmp_path.unlink(missing_ok=True)
+            return _err(
+                400,
+                f"插件配置包指纹不符：声明 {claimed_sha[:16]}…，实际 {got[:16]}…。"
+                "这份包已丢弃。",
+                "checksum_mismatch",
+            )
+
+        try:
+            meta = self.warden.store_plugin_bundle(
+                tmp_path, shell=shell, sha256=got, plugins=plugins
+            )
+        except MoltError as e:
+            tmp_path.unlink(missing_ok=True)
+            status, kind = _classify(e)
+            return _err(status, str(e), kind)
+        return _ok(plugin_bundle=meta)
+
+    def stream_plugin_bundle(self, shell: str) -> _Response:
+        try:
+            path = self.warden.plugin_bundle_path(shell)
+        except MoltError as e:
+            status, kind = _classify(e)
+            return _err(status, str(e), kind)
+        if not path.is_file():
+            return _err(404, f"没有 {shell} 的插件配置包", "not_found")
+        return _Response(
+            200,
+            {"ok": True, "shell": shell, "bytes": path.stat().st_size},
             stream_path=path,
         )
 
@@ -822,6 +899,69 @@ class WardenServer:
                     raise
                 self._send(resp)
 
+            def _receive_plugin_bundle(self) -> None:
+                """把请求体写进 `plugin-configs/` 下的临时文件，再交给 Warden 收下。
+
+                与备份同一套：临时文件和最终文件同目录，最后一步 `os.replace`
+                才是原子的。
+                """
+                shell = str(self.headers.get("X-Molt-Shell") or "").strip()
+                if not shell:
+                    self._send(_err(400, "缺少壳名（X-Molt-Shell）", "bad_request"))
+                    return
+                length = int(self.headers.get("Content-Length") or 0)
+                if length <= 0:
+                    self._send(_err(400, "没有 Content-Length 或长度为 0", "bad_request"))
+                    return
+                if length > MAX_PLUGIN_BUNDLE_BYTES:
+                    self._send(
+                        _err(
+                            413,
+                            f"插件配置包 {length} 字节超过上限 {MAX_PLUGIN_BUNDLE_BYTES} 字节。",
+                            "too_large",
+                        )
+                    )
+                    return
+
+                target_dir = server.warden.plugin_bundle_dir()
+                target_dir.mkdir(parents=True, exist_ok=True)
+                fd, tmp_name = tempfile.mkstemp(
+                    dir=str(target_dir), prefix=".plugin-bundle-", suffix=".part"
+                )
+                tmp_path = Path(tmp_name)
+                try:
+                    remaining = length
+                    with os.fdopen(fd, "wb") as fh:
+                        while remaining > 0:
+                            chunk = self.rfile.read(min(1 << 20, remaining))
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            remaining -= len(chunk)
+                    if remaining != 0:
+                        tmp_path.unlink(missing_ok=True)
+                        self._send(
+                            _err(
+                                400,
+                                f"上传中断：还差 {remaining} 字节没收到。这份包已丢弃。",
+                                "incomplete",
+                            )
+                        )
+                        return
+                    raw_plugins = str(self.headers.get("X-Molt-Plugins") or "")
+                    plugins = [p for p in raw_plugins.split(",") if p]
+                    self._send(
+                        server.accept_plugin_bundle(
+                            tmp_path,
+                            self.headers.get(SHA_HEADER, ""),
+                            shell,
+                            plugins,
+                        )
+                    )
+                except Exception:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
+
             def _receive_backup(self) -> None:
                 """把请求体写进 `backups/` 下的临时文件，再交给 Warden 收下。
 
@@ -922,6 +1062,24 @@ class WardenServer:
                         self._send(server.stream_backup(mb.group(1)))
                         return
                     self._send(_err(405, "下载备份请用 GET", "bad_method"))
+                    return
+
+                # 插件配置包：`/plugin-configs` 收 POST（上传）**和 GET（列表）**，
+                # `/plugin-configs/<shell>` 只收 GET（下载）。理由同上：
+                # 一个 GET 不该能触发一次写。
+                #
+                # 这里只拦 POST；GET 落到下面的 `dispatch()` 去拿列表 ——
+                # 第一版把 GET 也拦成 405，症状是"列表端点明明写了却永远
+                # 回「请用 POST」"，而两边看起来都像对的。
+                if parsed.path.rstrip("/") == "/plugin-configs" and method == "POST":
+                    self._receive_plugin_bundle()
+                    return
+                mp = PLUGIN_BUNDLE_ROUTE.match(parsed.path)
+                if mp is not None:
+                    if method == "GET":
+                        self._send(server.stream_plugin_bundle(mp.group(1)))
+                        return
+                    self._send(_err(405, "下载插件配置包请用 GET", "bad_method"))
                     return
 
                 body = self._read_body() if method in ("POST", "PUT") else None

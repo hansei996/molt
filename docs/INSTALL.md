@@ -19,7 +19,7 @@
 
 ```bash
 pip install molt-handoff   # 装出发行包；导入名和命令都还是 molt
-molt --version             # 应该打印 molt 1.2.1（或更新）
+molt --version             # 应该打印 molt 1.3.0（或更新）
 ```
 
 只有想改代码、或者还没发版时才需要仓库：
@@ -337,3 +337,21 @@ molt init --role homer \
 ```bash
 molt homer --config ./molt-homer.json --once
 ```
+
+
+## 6.6 插件配置在两端不一样（可选）
+
+`data/plugins/**` 与 `data/config/**` **不随快照迁徙**，所以同一个插件在两台壳上各留一份
+配置。molt 只同步**两边都装了**的插件，其余一律不动：
+
+```bash
+# 在来源那台：打包 9 份配置传进账本
+molt publish-plugins --data ./astrbot-data --shell my-laptop --warden-url http://<账本>:6186 --warden-token <token>
+
+# 在另一台：先空跑，逐条看它会写什么 / 为什么不动
+molt sync-plugins --data ./astrbot-data --shell nas-box --from my-laptop
+molt sync-plugins --data ./astrbot-data --shell nas-box --from my-laptop --apply
+```
+
+不带 `--apply` 时一个字都不写。旧配置留成 `*.molt-before-sync-<时间戳>`，不会丢。
+只在一边装了的插件不会被安装、也不会有配置被写过去。

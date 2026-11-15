@@ -214,7 +214,7 @@ Firecracker 官方原文要求 "**identical**" 的软硬件配置，且不支持
 
 ## 文档
 
-- [docs/DECISIONS.md](docs/DECISIONS.md) —— **等你的三件事**（`schedule` 的两个产品决定、`jwt_secret` 要不要两侧都换、L3 壳属性表的现状），以及两件等时机的（`v1.2.1` 发不发、`/molt shutdown` 端到端）
+- [docs/DECISIONS.md](docs/DECISIONS.md) —— **等你的三件事**（`schedule` 的两个产品决定、`jwt_secret` 要不要两侧都换、L3 壳属性表的现状），以及两件等时机的（`v1.3.0` 发不发、`/molt shutdown` 端到端）
 - [docs/AUDIT.md](docs/AUDIT.md) —— **断言审计**：文档里每一句"它会……"都能指到代码里改变行为的那一行吗？指不到的已经改掉了
 
 | 文件 | 内容 |

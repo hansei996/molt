@@ -96,6 +96,10 @@ _ARCHIVE_NAME_RE = re.compile(r"^gen-(\d{6})\.tar\.gz$")
 #: 不含斜杠/反斜杠/冒号，因此 `..` 之类的路径穿越拼不出来。
 _BACKUP_NAME_RE = re.compile(r"^backup-[0-9T-]+-[A-Za-z0-9_-]+(-[0-9]+)?\.tar\.gz$")
 
+#: 插件配置包按壳名存（`plugin-configs/<slug>.tar.gz`）。壳名会进 URL，
+#: 所以形状必须比"slug 之后大概像样"更严 —— 小写字母数字开头，长度 ≤ 64。
+_PLUGIN_SHELL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
 #: 默认保留多少份中途备份。12 份 × 约 4.5 MB ≈ 54 MB，
 #: 按十分钟一次算是两小时的历史；按一小时一次算就是半天。
 DEFAULT_BACKUP_KEEP = 12
@@ -1417,6 +1421,116 @@ class Warden:
                         or time.strftime(
                             "%Y-%m-%d %H:%M:%S", time.localtime(p.stat().st_mtime)
                         )
+                    ),
+                }
+            )
+        return out
+
+    # -- 插件配置包 ------------------------------------------------------
+    #
+    # 和 `backups/`、`archives/` 都是归档，但语义完全不同：
+    #
+    #   - `archives/` 是**交接**，账本里记着代次，是鱼本身
+    #   - `backups/`  是**中途快照**，不进账本
+    #   - 这里存的是**每个壳的一份偏好**（`config/*_config.json`），
+    #     它不参与迁徙，也永远不会覆盖一份没经过人看一眼的配置
+    #
+    # 每个壳只保留最新的一份（按壳名覆盖）。理由：这是"配置"，不是历史；
+    # 留十份旧配置只会让人不知道该信哪一份，而它想解决的问题
+    # （"我在这台机器上调好了，回那边还要再调一遍"）只需要最新那份。
+
+    def plugin_bundle_dir(self) -> Path:
+        return self.root / "plugin-configs"
+
+    def _plugin_shell_slug(self, shell: str) -> str:
+        """把壳名变成一个能安全当文件名的字符串。
+
+        壳名会出现在 URL 里（`GET /plugin-configs/<shell>`），所以它必须
+        先过一遍 slug，再由正则确认形状 —— 不是"拼一下看看"。
+        """
+        slug = _slugify(shell or "").lower()
+        if not slug or not _PLUGIN_SHELL_RE.match(slug):
+            raise NeedsHuman(f"壳名不能用作文件名：{shell!r}")
+        return slug
+
+    def plugin_bundle_path(self, shell: str) -> Path:
+        return self.plugin_bundle_dir() / f"{self._plugin_shell_slug(shell)}.tar.gz"
+
+    def _plugin_bundle_meta_path(self, shell: str) -> Path:
+        return self.plugin_bundle_dir() / f"{self._plugin_shell_slug(shell)}.json"
+
+    def store_plugin_bundle(
+        self,
+        source: Path,
+        *,
+        shell: str,
+        sha256: str = "",
+        plugins: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """收下某个壳上传的插件配置包（同一个壳的旧包被替换）。"""
+        src = Path(source)
+        if not src.is_file():
+            raise Fatal(f"要收下的插件配置包不存在：{src}")
+
+        d = self.plugin_bundle_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        dest = self.plugin_bundle_path(shell)
+
+        actual = sha256_of(src)
+        if sha256 and sha256.lower() != actual.lower():
+            raise Fatal(
+                f"插件配置包指纹不符：声称 {sha256[:16]}…，实际 {actual[:16]}…。"
+                "这份文件已丢弃，没有收下。"
+            )
+
+        total = src.stat().st_size
+        os.replace(src, dest)
+
+        meta = {
+            "shell": shell,
+            "bytes": total,
+            "sha256": actual,
+            "plugins": sorted(plugins or []),
+            "updated_at": time.time(),
+            "updated_at_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _atomic_write_json(self._plugin_bundle_meta_path(shell), meta)
+        self.append_log(
+            "INFO",
+            f"收下插件配置包：{shell}（{total} 字节，{len(meta['plugins'])} 个插件）",
+        )
+        return meta
+
+    def list_plugin_bundles(self) -> List[Dict[str, Any]]:
+        """列出各壳的插件配置包。**盘上有文件才算数** —— 索引不能单独成立。"""
+        d = self.plugin_bundle_dir()
+        if not d.is_dir():
+            return []
+        out: List[Dict[str, Any]] = []
+        for p in sorted(d.glob("*.tar.gz")):
+            meta: Dict[str, Any] = {}
+            # `p.stem` 是 `desktop-h2kgiao.tar`（去掉了 `.gz`），所以不能直接拼
+            mp = d / (p.name[: -len(".tar.gz")] + ".json")
+            if mp.is_file():
+                try:
+                    meta = json.loads(mp.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    meta = {}
+            try:
+                total = p.stat().st_size
+                mtime = p.stat().st_mtime
+            except OSError:  # pragma: no cover
+                continue
+            out.append(
+                {
+                    "shell": str(meta.get("shell") or p.name[: -len(".tar.gz")]),
+                    "bytes": int(meta.get("bytes") or total),
+                    "sha256": str(meta.get("sha256") or ""),
+                    "plugins": list(meta.get("plugins") or []),
+                    "updated_at": float(meta.get("updated_at") or mtime),
+                    "updated_at_readable": str(
+                        meta.get("updated_at_readable")
+                        or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
                     ),
                 }
             )

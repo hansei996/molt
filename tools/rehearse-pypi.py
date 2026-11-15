@@ -200,6 +200,38 @@ def walk(version: str, *, keep: bool, wheel: str = "") -> int:
         rc, out = run([str(exe), "--no-color", "agent", "--config", "./agent.json", "--once"], cwd=root)
         record("molt --no-color agent --once 能跑", rc == 0 and "idle" in out, out.strip()[-1200:])
 
+        # 1.3 起多了插件配置同步。这一段必须走**装出来的** exe，而且必须真的
+        # 落一次盘：只验 --help 存在，验不出"发出去的包里有没有那个模块"。
+        left = root / "left"
+        right = root / "right"
+        for where, body in ((left, '{"who": "left"}'), (right, '{"who": "right"}')):
+            (where / "plugins" / "alpha").mkdir(parents=True, exist_ok=True)
+            (where / "config").mkdir(parents=True, exist_ok=True)
+            (where / "config" / "alpha_config.json").write_text(body, encoding="utf-8")
+        # 右边还有一个只有它自己装的插件 —— 它两边的配置都不许被碰
+        (right / "plugins" / "only_here").mkdir(parents=True, exist_ok=True)
+        (right / "config" / "only_here_config.json").write_text('{"x": 1}', encoding="utf-8")
+
+        rc, out = run([str(exe), "--no-color", "publish-plugins",
+                       "--data", str(left), "--shell", "left-box",
+                       "--warden-url", f"http://127.0.0.1:{port}", "--warden-token", token], cwd=root)
+        record("molt publish-plugins 把配置收进账本", rc == 0 and "已收进账本" in out, out.strip()[-800:])
+
+        rc, out = run([str(exe), "--no-color", "sync-plugins",
+                       "--data", str(right), "--shell", "right-box", "--from", "left-box",
+                       "--warden-url", f"http://127.0.0.1:{port}", "--warden-token", token], cwd=root)
+        record("molt sync-plugins 空跑一个字都不写",
+               rc == 0 and "一个字都没写" in out and '"right"' in (right / "config" / "alpha_config.json").read_text(encoding="utf-8"),
+               out.strip()[-1200:])
+
+        rc, out = run([str(exe), "--no-color", "sync-plugins",
+                       "--data", str(right), "--shell", "right-box", "--from", "left-box", "--apply",
+                       "--warden-url", f"http://127.0.0.1:{port}", "--warden-token", token], cwd=root)
+        after = (right / "config" / "alpha_config.json").read_text(encoding="utf-8")
+        record("molt sync-plugins --apply 只写两边都装了的那个",
+               rc == 0 and '"left"' in after and (right / "config" / "only_here_config.json").is_file(),
+               out.strip()[-1200:] + f" | alpha={after!r}")
+
         rc, out = run([str(exe), "--no-color", "timeline", "--demo", "--out", "./demo.html"], cwd=root)
         demo = root / "demo.html"
         record("timeline --demo 出一页（陌生人唯一看得见的东西）",
