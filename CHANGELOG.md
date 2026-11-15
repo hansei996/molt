@@ -8,9 +8,19 @@
 ---
 
 
-- 落位时的机器覆写层新增 `--keep-provider-source <id>`（agent 侧 `keep_provider_sources`）：
-  指向回环地址的 provider 默认仍会被删，但那台机器上真的跑着该服务时可以点名保留。
-  同批把 `plugin_data/astrbot_plugin_workbuddy` 纳入搬家名单（WorkBuddy 的登录凭据）。
+## [1.3.1] - 2026-11-15
+
+### 新增
+- `molt land --keep-provider-source <id>`（agent 配置 `keep_provider_sources`）：
+  指回环地址的 provider 默认仍会被删，但那台机器上真的跑着该服务时可以点名保留。
+- `plugin_data/astrbot_plugin_workbuddy` 纳入搬家名单（WorkBuddy 的登录凭据 + 调度状态，16 KB）。
+
+### 为什么
+`workbuddy` 的 `api_base` 是 `http://127.0.0.1:17863/v1`，覆写层一直按"Windows 上没有
+这个服务"把它删掉。真机发现那个网关是 `astrbot_plugin_workbuddy` 自己起的 —— 两台都装了
+插件，缺的只是 `plugin_data` 里的凭据和 `WORKBUDDY_MASTER_KEY`。补齐之后 17863 真的在听。
+
+---
 
 ## [未发布] v1.3.0
 
