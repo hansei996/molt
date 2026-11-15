@@ -112,6 +112,39 @@ def test_tool_call_events_are_not_speech():
     assert _collect(lines) == ["我这边没有存下记录。"]
 
 
+def test_tool_json_that_arrives_as_plain_text_is_not_speech():
+    """真机上挡不住的那一种：工具调用被当成 `plain` 片段发出来。
+
+    2026-11-15 13:11 实测原文（`molt_propose_go_home` 那次）：
+
+        {"id": "call_00_KIhM...", "name": "molt_propose_go_home", "args": {...}}
+
+    …它冒充它说的话出现在我的终端里。只按事件类型过滤（上面那条用例）挡不住它。
+    """
+    lines = [
+        _sse(
+            type="plain",
+            data='{"id": "call_00_KIhM", "name": "molt_propose_go_home", "args": {"target": ""}}',
+        ),
+        _sse(
+            type="plain",
+            data='{"id": "call_00_KIhM", "ts": 1794719376.86, "result": "我想搬去 X。"}',
+        ),
+        _sse(type="plain", data="想。"),
+    ]
+    assert _collect(lines) == ["想。"]
+
+
+def test_a_real_json_sentence_is_still_speech():
+    """它真的说一句 JSON，那不是工具活动，不该被吞掉。
+
+    判据是**键的组合**而不是"像不像 JSON" —— 这条用例就是为了钉住这个区别：
+    只要过滤条件放松成"以 { 开头就丢"，这里就会红。
+    """
+    lines = [_sse(type="plain", data='{"a": 1} 这是我说的一个对象。')]
+    assert _collect(lines) == ['{"a": 1} 这是我说的一个对象。']
+
+
 def test_bookkeeping_events_are_dropped():
     lines = [
         _sse(type="session_id", data="abc"),

@@ -121,6 +121,35 @@ def parse_sse_line(line: str) -> Optional[dict]:
     return obj if isinstance(obj, dict) else None
 
 
+def _looks_like_tool_payload(text: str) -> bool:
+    """这段"正文"其实是工具调用/返回的 JSON 吗。
+
+    AstrBot 在 webchat 的流里把工具活动也当成 `plain` 片段发出来，
+    所以只按事件类型过滤（`kind not in ("plain","complete")`）挡不住它：
+    真机上就看见一串
+
+        {"id": "call_00_KIhM...", "name": "molt_propose_go_home", "args": {...}}
+
+    冒充它说的话。判据用**键的组合**而不是"像不像 JSON"：
+    它完全可能真的说一句 `{"a": 1}`，那不是工具活动，不该被吞掉。
+    """
+    body = text.strip()
+    if not (body.startswith("{") and body.endswith("}")):
+        return False
+    try:
+        obj = json.loads(body)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    keys = set(obj)
+    return bool(
+        {"name", "args"} <= keys  # 调用
+        or {"id", "result"} <= keys  # 返回
+        or {"id", "name"} <= keys  # 另一种记法的调用
+    )
+
+
 def text_of(event: dict, *, include_reasoning: bool = False) -> str:
     """从一条事件里取出可读文本；取不到就返回空串。
 
@@ -130,18 +159,25 @@ def text_of(event: dict, *, include_reasoning: bool = False) -> str:
     reasoning，于是 `--show-reasoning` 那位先生拿到的是一个**永远空的**过滤器 ——
     参数被解析、被打印、被传进来，然后什么都没发生。**一个从来不起作用的开关，
     看起来和"这次它没思考"一模一样。**
+
+    工具调用的 JSON 也在这里丢掉（见 `_looks_like_tool_payload`）：
+    **工具在内部干活的事，不该冒充它说的话。**
     """
     if event.get("chain_type") == "reasoning" and not include_reasoning:
         return ""
     data = event.get("data")
+    piece = ""
     if isinstance(data, str):
-        return data
-    if isinstance(data, dict):
+        piece = data
+    elif isinstance(data, dict):
         for key in ("text", "content", "message"):
             value = data.get(key)
             if isinstance(value, str):
-                return value
-    return ""
+                piece = value
+                break
+    if piece and _looks_like_tool_payload(piece):
+        return ""
+    return piece
 
 
 def iter_reply(lines: Iterable[bytes], *, show_reasoning: bool, verbose: bool) -> Iterable[str]:
