@@ -27,6 +27,25 @@ molt --version
 
 ---
 
+## 0.5 账本用 docker 跑（可选，最省事）
+
+如果你只是想要一个账本，不想管 python 环境：
+
+```bash
+docker run -d --name molt-warden -p 6186:6186 \
+  -v molt-data:/var/lib/molt \
+  -e MOLT_TOKEN="$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')" \
+  ghcr.io/hansei996/molt:latest
+```
+
+- 没设 `MOLT_TOKEN` 时容器会**拒绝启动**（退出码 78）并打印怎么配。这不是故障。
+- 数据在 `molt-data` 这个 named volume 里；换机器时搬它。
+- 自己构建：`docker build -t molt:dev .`（构建过程不需要网络）。
+
+壳那侧仍然按下面第 1、2、3 步走 —— 壳跑在你要搬去的那台机器上，不是容器里。
+
+---
+
 ## 1. 甲：先把账本立起来
 
 ```bash

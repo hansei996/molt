@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "molt"
-version = "0.5.0"
+version = "1.0.0"
 description = "让一个数字生命从一台机器，走进另一台机器；旧壳留下，魂走。"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,7 +32,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "molt contributors" }]
 keywords = ["astrbot", "migration", "sqlite", "wake-on-lan", "handoff", "agent"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
@@ -52,8 +52,8 @@ dev = ["pytest>=8"]
 molt = "molt.cli:main"
 
 [project.urls]
-Documentation = "https://github.com/molt-dev/molt/blob/main/docs/ARCH.md"
-Source = "https://github.com/molt-dev/molt"
+Documentation = "https://github.com/hansei996/molt/blob/main/docs/ARCH.md"
+Source = "https://github.com/hansei996/molt"
 
 [tool.setuptools]
 packages = ["molt"]

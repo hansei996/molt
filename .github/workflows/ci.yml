@@ -1,13 +1,28 @@
-name: tests
+name: ci
+
+# ## 为什么在 Windows 和 Linux 上都跑
+#
+# 这个项目的一半 bug 是「换机才暴露」的（路径分隔符、控制台编码、文件句柄
+# 语义、sqlite 的 sidecar 行为）。只在一种系统上绿的测试，对这里的价值有限 ——
+# 真机上抓出来的那些 bug 里有一半属于这一类。
+#
+# ## 为什么还要 docker 和「陌生人演练」两个 job
+#
+# `pytest` 绿只说明**函数**是对的。v1.0 的验收标准是「陌生人照文档能一条命令
+# 装起来」和「能看见迁移过程」——那两件事都不在 pytest 的射程里，必须各有一
+# 个 job 去真的做一遍：构建镜像并把它跑起来、从零目录按 INSTALL.md 走一遍。
+#
+# 这两个 job 的价值是**它们会红**。红的时候不许合并，而不是"先合了以后再说"。
 
 on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  pytest:
+  test:
     name: py${{ matrix.python }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -22,17 +37,93 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      # 这个项目运行时零依赖，测试也只需要 pytest。
-      # 跑得慢的话该怀疑的是代码，不是环境。
+      # 项目运行时零依赖，测试只额外需要 pytest。
+      # 一旦有了依赖，这一步要换成 pip install -e ".[dev]"。
       - name: Install pytest
         run: python -m pip install --upgrade pip pytest
+
+      - name: Show shell identity (诊断用)
+        run: python -m molt.cli shell || true
 
       - name: Run tests
         run: python -m pytest -q
 
-      # 打包也要能过：有 pyproject 但装不起来的仓库，
-      # 别人 `pip install .` 的第一分钟就会失败。
+  package:
+    name: wheel 能装能跑
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # 有 pyproject 但装不起来的仓库，别人 `pip install .` 的第一分钟就会失败。
+      # 所以这里不是"构建一个 wheel"就完事，而是**装进一个干净环境再跑一次**。
       - name: Build wheel
         run: |
-          python -m pip install --upgrade build
+          python -m pip install --upgrade pip build
           python -m build --wheel
+
+      - name: Install the wheel into a clean venv and run it
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/python -m pip install --upgrade pip
+          /tmp/venv/bin/python -m pip install dist/*.whl
+          /tmp/venv/bin/molt --version
+          /tmp/venv/bin/molt --help | head -5
+
+  rehearsal:
+    name: 陌生人照 INSTALL.md 走一遍
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # `tools/rehearse-install.py` 在一个全新临时目录里跑五步：
+      # 起账本 → 生成壳配置 → doctor 自检 → 空跑一轮。
+      # 一条命令都不许卡住；卡住就说明文档或 CLI 有一个是假的。
+      - name: Rehearse the documented install
+        run: python tools/rehearse-install.py
+
+  docker:
+    name: 镜像能构建、能跑、缺 token 会拒绝启动
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t molt:ci .
+
+      # 「没有 token 就拒绝启动」是刻意的：容器里随机生成 token 意味着
+      # 每次重启都换一个，所有壳一起 401，而症状看起来像网络问题。
+      - name: Refuses to start without a token
+        run: |
+          set +e
+          docker run --rm molt:ci
+          code=$?
+          set -e
+          echo "exit=$code"
+          test "$code" = "78"
+
+      - name: Starts with a token and answers
+        run: |
+          docker run -d --name molt-ci -p 6186:6186 \
+            -e MOLT_TOKEN=ci-token-1234567890 molt:ci
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null -H "X-Molt-Token: ci-token-1234567890" \
+                 http://127.0.0.1:6186/status; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS -H "X-Molt-Token: ci-token-1234567890" http://127.0.0.1:6186/status
+          # 时间轴要能从容器里出来，而且是 HTML
+          curl -fsS "http://127.0.0.1:6186/timeline?token=ci-token-1234567890" | head -3
+          # 没 token 必须 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:6186/status)" = "401"
+          docker logs molt-ci
+          docker rm -f molt-ci

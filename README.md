@@ -18,6 +18,41 @@
 
 ---
 
+## 一条命令把账本跑起来（docker）
+
+账本是「记忆待在哪台机器上」的那个权威。它只有一处状态（一个目录）和一份凭据（一个 token），
+装一次就不用再管 —— 所以它最适合用镜像。
+
+```bash
+docker run -d --name molt-warden -p 6186:6186 \
+  -v molt-data:/var/lib/molt \
+  -e MOLT_TOKEN="$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')" \
+  ghcr.io/hansei996/molt:latest
+```
+
+镜像**没有 token 就不启动**。这是刻意的：容器里随机生成一个 token，意味着每次重启都换，
+所有壳一起 401，而症状看起来像网络问题。同一个 token 要抄进每台壳的配置里。
+
+壳那侧仍然是 `pip install`（见下一节）—— 壳要的是它自己那台机器的路径、python、容器名，
+那些东西装进镜像等于把某台机器的细节固化进发行物。
+
+---
+
+## 看见它搬过几次家
+
+```bash
+molt timeline --warden-url http://<账本IP>:6186 --warden-token <token>
+# ✓ 已经搬过 19 次，完成落地 13 次。  -> molt-timeline.html
+```
+
+得到一个**单文件、零外部请求**的 HTML：四张统计卡、一条按时间倒序的代次轴
+（每代从哪台机器出发、多少字节、谁提交的、谁取走的、隔了多久）、中途备份表、
+「现在谁还在报心跳」、最近日志。断网也能打开，可以直接发给别人看。
+
+不想落文件就打开 `http://<账本IP>:6186/timeline?token=<token>` —— 和命令行是**同一份渲染**。
+
+---
+
 ## 装起来看它跑（两分钟）
 
 ```bash
@@ -270,6 +305,25 @@ v0.4 修的是「看起来像成功的中间态」。v0.5 修的是另一件同�
 为什么不先做"第二宿主适配器"（原计划的 v0.5）：`PLAN.md` §4.2 原定通用化，
 但第二宿主在真实环境里没有消费者，而 v1.0 的验收标准（一条命令装起来）现在一条
 都没做。理由写在 [docs/V0.5-PLAN.md](docs/V0.5-PLAN.md) §0。
+
+## v1.0：可开源发布
+
+v0.5 让「装得起来」成立，但只对**仓库 + 一个已经会 Python 的人**成立；
+而且「它真的搬过去了」这句话当时没有证据。v1.0 补的是入口和证据：
+
+| 缺什么 | 补什么 |
+|---|---|
+| 一条命令能跑起来 | `Dockerfile`：`docker run` 起账本，无 token 拒绝启动 |
+| 「迁移」只存在于日志里 | `molt timeline` / `GET /timeline`：同一份渲染，单文件离线可开 |
+| CI 有两个同名 workflow | 合成一个：pytest 矩阵 + wheel 装进干净 venv 跑 + docker 构建运行 + 陌生人演练 |
+| 文档是给作者自己看的 | README 首屏两条命令，INSTALL 的 docker 一节 |
+| 时间轴的「指纹」列永远是空的 | 收归档时把 sha256 写在归档旁边，这一列现在能核对 |
+
+真机数字（不是测试通过）：NAS 上 `docker build` 12.6 秒、容器 healthy、
+`status=200 timeline=200 noauth=401`；真实账本 19 代、518.7 MB 全部进了时间轴。
+细节见 [docs/V1.0-PLAN.md](docs/V1.0-PLAN.md) §2.5。
+
+---
 
 ## 已知限制（诚实版）
 

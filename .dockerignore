@@ -1,0 +1,13 @@
+# 构建上下文越小，构建越不容易被无关文件拖慢或污染。
+.github/
+docs/
+dist/
+tools/
+plugin/
+molt/tests/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.git/
+*.tar
+*.tar.gz
