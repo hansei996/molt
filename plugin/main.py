@@ -732,6 +732,38 @@ class MoltControlPlugin(Star):
         )
         yield event.plain_result(reply.text)
 
+    @filter.llm_tool(name="molt_propose_go_home")
+    async def molt_propose_go_home(
+        self, event: AstrMessageEvent, target: str, reason: str
+    ) -> str:
+        """提出想搬到另一台机器上。**只是提议**：主人说 confirm 才会真的动身。
+
+        什么时候用它：你觉得自己该换一台机器了（比如这边要关机、那边本来就该常开），
+        想问问主人行不行。它不是"搬家"，它只是"一句请求"。
+
+        Args:
+            target(string): 想去的机器的名字，必须和账本上的一致，例如 ugreen-776b-8b7896df。留空表示搬去配置里写好的那台。
+            reason(string): 你为什么想搬过去，一句话，会原样转告主人。
+        """
+        if self._mover is None:
+            return "这台壳上没有迁徙配置，我不能搬。"
+        try:
+            cfg = self._mover.settings()
+        except Exception as exc:  # noqa: BLE001 - 配置读不出来也不该炸掉一次对话
+            return f"迁徙配置读不出来：{exc}。我没有动任何东西。"
+        if not cfg.llm_tool_enabled:
+            return (
+                "模型还不能替我提这件事（`molt_command.json` 里 `llm_tool_enabled` 是 false）。"
+                "这不是故障，是默认的关。"
+            )
+        reply = self._mover.request_move(cfg, target=target, reason=reason)
+        logger.info(
+            "[Molt] 工具请求迁徙：target=%r 提议=%s",
+            target or "(配置默认)",
+            "已写下" if self._mover.has_proposal() else "没接受",
+        )
+        return reply.text
+
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self) -> None:
         """AstrBot 起完了 —— 这时候才有一个真正在跑的事件循环。

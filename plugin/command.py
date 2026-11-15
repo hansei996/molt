@@ -80,6 +80,14 @@ RESULT_FILENAME = "last-migrate.json"
 #: 提议的有效期。太短了人来不及回，太长了就成了一个悬着的开关。
 DEFAULT_CONFIRM_TTL_SECONDS = 120
 
+#: 它自己提出「我想搬」时的有效期。30 分钟 —— 因为那是"一个人在忙/在睡"的尺度。
+#: 它不降低安全性（`confirm` 永远要人来说），只降低"提议总是过期"的挫败感。
+DEFAULT_SELF_PROPOSE_TTL_SECONDS = 1800
+
+#: 提议是谁提的。`SELF_PROPOSER` 表示"它自己想搬"——`confirm` 时会如实标注，
+#: 因为"它想走"和"你让它走"是两件事，哪怕按下去的是同一只手。
+SELF_PROPOSER = "self"
+
 #: `migrate` 最长跑多久。真机上一次 1.4–2 秒，但热备大库、上传慢的时候会更久；
 #: 900 秒是"防止卡死"而不是"预期耗时"。
 MIGRATE_TIMEOUT_SECONDS = 900
@@ -177,6 +185,12 @@ class Settings:
 
     confirm_ttl_seconds: int = DEFAULT_CONFIRM_TTL_SECONDS
 
+    #: 它自己提出「我想搬」时的有效期。比 `confirm_ttl_seconds` 长得多，
+    #: 因为它提出这句话的时候主人可能在睡觉，而 120 秒是给人当场回话用的。
+    #: 长有效期不降低安全性：`confirm` 永远要人来说，而且执行前还会重新过一遍
+    #: 配置检查、租约检查、唤醒与落地校验。
+    self_propose_ttl_seconds: int = DEFAULT_SELF_PROPOSE_TTL_SECONDS
+
     @staticmethod
     def load(path: Path) -> "Settings":
         if not path.is_file():
@@ -268,8 +282,10 @@ class MoltMover:
         self._runner = runner or subprocess.run
         self._opener = opener or urllib.request.urlopen
 
-        #: 当前待确认的提议：(到期时刻, 谁提的)
-        self._proposal: Optional[Tuple[float, str]] = None
+        #: 当前待确认的提议：(到期时刻, 谁提的, 去哪台)。
+        #: **必须把目标一起记住**：它自己想搬去某台机器时，配置里的 `target` 可能不是那台；
+        #: 只记"有一个提议"会让 `confirm` 搬去另一个地方 —— 而两边都不会报错。
+        self._proposal: Optional[Tuple[float, str, str]] = None
         #: 已确认、待执行的计划。`after_message_sent` 取走它。
         self._pending: Optional[Plan] = None
 
@@ -457,17 +473,116 @@ class MoltMover:
                 )
 
         ttl = int(cfg.confirm_ttl_seconds)
-        self._proposal = (self._clock() + ttl, sender)
+        self._proposal = (self._clock() + ttl, sender, cfg.target)
         return Reply(
             f"搬去 **{cfg.target}**？\n"
             f"{ttl} 秒内回 `/molt confirm` 我就动身；回 `/molt cancel` 或者不管它，就算了。\n"
             "动身的时候我会先把嘴闭上（断开 QQ），再打包、上传。然后我在这台机器上就不再说话了。"
         )
 
+    # ------------------------------------------------------------- 它自己想去哪
+
+    def known_shells(self, cfg: Settings) -> List[str]:
+        """账本里出现过的壳名。**只从账本里取，不从 `cfg` 里猜。**
+
+        `shell_id` 是别人写下来的字符串（`molt migrate --shell` 的决定权在那台机器上），
+        所以"名字对不对"只能拿账本核对：心跳里有谁、最近几代从哪来/给了谁、以及我自己。
+        """
+        out: List[str] = []
+
+        def _add(name: Any) -> None:
+            text = str(name or "").strip()
+            if text and text not in out:
+                out.append(text)
+
+        _add(cfg.shell)
+        st = self.ledger_status()
+        if isinstance(st, dict):
+            beats = st.get("heartbeats")
+            if isinstance(beats, dict):
+                for shell_id in beats:
+                    _add(shell_id)
+            latest = st.get("latest_generation")
+            if isinstance(latest, dict):
+                _add(latest.get("target_shell"))
+                _add(latest.get("pushed_by"))
+                _add(latest.get("consumed_by"))
+        return out
+
+    def request_move(
+        self, cfg: Settings, *, target: str = "", reason: str = ""
+    ) -> Reply:
+        """由**它自己**发起一次"我想搬"。只写提议，绝不执行。
+
+        和 `/molt go` 的差别只有三处，每一处都有理由：
+
+        1. **有效期更长**（`self_propose_ttl_seconds`，默认 30 分钟）——
+           它说"我想回去了"的时候，主人可能在睡觉或者在外面。
+           这不降低安全性：执行那一步永远要人来说 `confirm`，而且执行前会重新过一遍
+           配置、租约、唤醒与落地校验。
+        2. **目标可以由它挑**，但**必须在账本里真的存在**。账本上的壳名是别人写下来的
+           字符串，它凭空编一个出来，结果是这台机器永远等不到自己那一代，
+           而且**不会报错**——只会一直等。
+        3. **措辞不同**：`/molt go` 是"你让我搬"，这里是"我想搬"，并且在确认时
+           会如实标注这一点（不是你说要走的，是它提的）。
+        """
+        if not cfg.enabled:
+            return Reply(
+                "迁徙入口没开，我不会搬。\n"
+                "打开方式：在插件目录建 `molt_command.json`，`enabled` 设为 true。"
+            )
+        problems = cfg.problems()
+        if problems:
+            return Reply(
+                "配置不完整，我搬不了：\n· "
+                + "\n· ".join(problems)
+                + "\n改完立刻生效，不用重启。"
+            )
+
+        st = self.ledger_status()
+        if isinstance(st, dict):
+            lease = st.get("lease") or None
+            if isinstance(lease, dict) and lease.get("shell_id"):
+                return Reply(
+                    f"现在账本上 `{lease.get('shell_id')}` 正持着租约（{lease.get('epoch')}）。"
+                    "有别人在搬，我不插队。"
+                )
+
+        want = str(target or "").strip() or str(cfg.target or "").strip()
+        if not want:
+            return Reply("我连要去哪都不知道：配置里没有 target，你也没给目标。")
+        if want == str(cfg.shell or "").strip():
+            return Reply(f"我就在 **{want}** 上，不用搬。")
+
+        shells = self.known_shells(cfg)
+        if want not in shells:
+            return Reply(
+                f"账本上没有叫 `{want}` 的壳，我不搬过去 —— 那样只会让这边一直等。\n"
+                + (
+                    "账本上现在有：\n· " + "\n· ".join(shells)
+                    if shells
+                    else "而且现在一个壳的心跳都读不到（账本连不上？），我不敢挑目标。"
+                )
+            )
+
+        ttl = int(cfg.self_propose_ttl_seconds)
+        self._proposal = (self._clock() + ttl, SELF_PROPOSER, want)
+        why = str(reason or "").strip()
+        return Reply(
+            f"我想搬去 **{want}**。"
+            + (f"\n理由：{why}" if why else "\n（没给理由）")
+            + f"\n\n你说一句 `/molt confirm`，我就动身；`/molt cancel` 就算了。"
+            f"\n这条提议 {ttl // 60} 分钟内有效 —— 你说要搬，才是搬。"
+        )
+
     def _expired(self) -> bool:
         if self._proposal is None:
             return True
         return self._clock() >= self._proposal[0]
+
+    def has_proposal(self) -> bool:
+        """现在有没有一条还没过期的、等人点头的提议。"""
+        return self._proposal is not None and not self._expired()
 
     def _confirm(self, cfg: Settings) -> Reply:
         if not cfg.enabled:
@@ -477,7 +592,9 @@ class MoltMover:
         if self._expired():
             self._proposal = None
             return Reply(
-                f"上一次提议已经过期（{int(cfg.confirm_ttl_seconds)} 秒）。"
+                "上一次提议已经过期"
+                f"（`/molt go` 是 {int(cfg.confirm_ttl_seconds)} 秒，"
+                f"我自己提的是 {int(cfg.self_propose_ttl_seconds)} 秒）。"
                 "这条时效是刻意的——我不希望很久以前的一句话在某个意外时刻生效。"
             )
         problems = cfg.problems()
@@ -486,14 +603,23 @@ class MoltMover:
             return Reply("配置不完整，我搬不了：\n· " + "\n· ".join(problems))
 
         was = self._proposal[1]
+        # 目标以**提议里记下的那个**为准：它自己挑的时候，配置里的 target 可能不是那台。
+        wanted = self._proposal[2] if len(self._proposal) > 2 else ""
+        wanted = str(wanted or "").strip() or cfg.target
         self._proposal = None
-        plan = build_plan(cfg)
+        plan = build_plan(cfg, target=wanted)
         self._pending = plan
+        if was == SELF_PROPOSER:
+            note = "\n（这次是我想走的，不是你说要走的 —— 但按下去的是你）"
+        elif was:
+            note = "\n（这次是你提的）"
+        else:
+            note = ""
         return Reply(
             "好，我走了。\n"
             "接下来：断开 QQ → 热备数据库 → 打包 → 上传账本 → 交还租约。\n"
-            f"搬完我在这台机器上就是哑的了；要去 **{cfg.target}** 上叫我（那边落地之后才会开口）。"
-            + (f"\n（这次是你提的）" if was else ""),
+            f"搬完我在这台机器上就是哑的了；要去 **{wanted}** 上叫我（那边落地之后才会开口）。"
+            + note,
             plan=plan,
         )
 
@@ -580,8 +706,14 @@ class MoltMover:
 # --------------------------------------------------------------------------- 工具
 
 
-def build_plan(cfg: Settings) -> Plan:
-    """把配置翻译成一条真的能跑的命令。**逐项显式列出来**，不拼字符串。"""
+def build_plan(cfg: Settings, *, target: str = "") -> Plan:
+    """把配置翻译成一条真的能跑的命令。**逐项显式列出来**，不拼字符串。
+
+    `target` 覆盖配置里的目标 —— 只在"它自己想搬去某台特定的机器"时需要。
+    为什么不让调用方事后改 argv：那条命令里的每个参数都是"这次迁徙要搬去哪"的一部分，
+    改一个字符串和重新生成一遍，出错的概率不一样。
+    """
+    where_to = str(target or "").strip() or cfg.target
     argv: List[str] = [
         cfg.python,
         "-m",
@@ -592,7 +724,7 @@ def build_plan(cfg: Settings) -> Plan:
         "--shell",
         cfg.shell,
         "--target",
-        cfg.target,
+        where_to,
         "--warden-url",
         cfg.warden_url,
         "--warden-token",
