@@ -226,8 +226,10 @@ molt sync-plugins   --data <data 目录> --shell <这台壳> --from <来源壳> 
 
 ## 文档
 
-- [docs/DECISIONS.md](docs/DECISIONS.md) —— **等你的三件事**（`schedule` 的两个产品决定、`jwt_secret` 要不要两侧都换、L3 壳属性表的现状），以及两件等时机的（`v1.3.0` 发不发、`/molt shutdown` 端到端）
+- [docs/DECISIONS.md](docs/DECISIONS.md) —— **等你拍板的、已定案的、等时机的**（`schedule` 的两个产品决定、`jwt_secret` 要不要两侧都换、写完配置要不要一键重载插件；以及 `v1.3.0` 发不发、`/molt shutdown` 端到端）
 - [docs/AUDIT.md](docs/AUDIT.md) —— **断言审计**：文档里每一句"它会……"都能指到代码里改变行为的那一行吗？指不到的已经改掉了
+- [CHANGELOG.md](CHANGELOG.md) —— 每个版本**行为变了什么**，以及插件配置同步**怎么用、怎么回滚**
+- [docs/V1.3-REVIEW.md](docs/V1.3-REVIEW.md) —— dashboard 同步页的**人工验证清单**：照着点一遍，看结论里的数字对不对（真正的回归保护仍是那几条 pytest，这一页管它们管不到的那半）
 
 | 文件 | 内容 |
 |---|---|

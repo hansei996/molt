@@ -37,6 +37,39 @@
 | 15 | 配置里 `shutdown_after_leave: true` 意味着"走了就关" | `molt/daemon/agent.py:1004` 还要过 `power_verdict()`；没票 → `ask` → 不关 | 🟡 文档补一句：**这个字段只管"要不要考虑关机"，关不关另有一张票** |
 | 16 | `consumed` 不参与 fencing | `molt/epoch.py:164 accept_write()` 只比 `claimed_epoch` 与 `current_epoch` | ✅ |
 
+## 第二批：v1.3.0 的插件配置同步与面板（2026-11-15 晚）
+
+v1.3.0 加了一整块新功能（同步规则 + 账本端点 + dashboard 页面），于是又多出一批"它会……"。
+同样的方法：**先 grep 到那一行，再看它有没有测试**。
+
+| # | 文档 / 页面里的断言 | 代码里的一行 | 结论 |
+|---|---|---|---|
+| 17 | **只同步两边都装了的插件** | `molt/pluginsync.py:192` `for plugin in sorted(remote & local)`；交集外只进 `only_remote` / `only_local` 两个列表 | ✅ `test_pluginsync.py::test_only_the_plugins_both_sides_have_are_planned` / `::test_a_plan_never_mentions_a_plugin_outside_the_intersection` |
+| 18 | **默认空跑，`--apply` 才写** | `molt/pluginsync.py:268` `if dry_run: report.would_update.append(...); continue`；CLI 只有给了 `--apply` 才传 `dry_run=False` | ✅ `::test_a_dry_run_writes_nothing` |
+| 19 | **结构差太多默认跳过** | `molt/pluginsync.py:201` `_looks_like_a_different_schema(...)` → 进 `suspect`，`apply_plan` 只在 `force=True` 时并入待写 | ✅ `::test_a_completely_different_schema_is_suspect_not_silently_written` / `::test_force_writes_the_suspect_ones` |
+| 20 | **旧配置留备份，不删** | `molt/pluginsync.py:275-283`：`os.replace(dst, bak)`，备份失败抛 `NeedsHuman`（"同步不该以删掉一份还能用的配置为前提"） | ✅ `::test_the_old_config_is_kept_before_being_replaced` |
+| 21 | **包里只有配置与清单，不装代码、不装 `plugin_data`** | `molt/pluginsync.py::make_bundle` 只写 `config/<插件>_config.json` + `manifest.json`；`parse_bundle` 的白名单正则也只认这个形状 | ✅ `::test_the_bundle_contains_configs_and_nothing_else` |
+| 22 | **每个壳只保留最新一份**（配置不是历史） | `molt/warden.py::store_plugin_bundle` 用固定文件名 `plugin-configs/<slug>.tar.gz` + `os.replace` | ✅ **本次审计补的**：`::test_publishing_twice_keeps_only_the_newest_bundle`（此前只靠"文件名恰好没加时间戳"，谁改成备份式命名就会静默变成谎话） |
+| 23 | **写之前必须 `confirm: true`** | `plugin/sync_api.py::apply` 没拿到真值 → `error_response(..., 400)`；页面按钮另外由 `syncApplyButton()` 把关 | ✅ `test_plugin_sync_api.py::test_apply_without_confirm_is_refused_and_writes_nothing`（400 + 文件未变） |
+| 24 | **写完只要重启 AstrBot 才生效** | 页面脚注原话。真相是 `astrbot/core/star/star_manager.py:1167` 构造 `AstrBotConfig(config_path=...)` —— **插件载入时**读一次，所以**重载插件就够**（`POST /api/plugin/reload`） | 🟡 措辞过严：改成"要重新载入那些插件"。已补 `tools/reload-plugin.py`（自签 JWT → 重载，实跑 `HTTP 200 重载成功`），页面脚注同步改 |
+| 25 | **`GET /plugin-configs` 列清单** | `molt/server.py::_handle` 只拦 `POST /plugin-configs`，GET 落到 `dispatch()` | ✅ 曾经两边各自"对"、合起来永远 405 —— 已有**真起服务**的回归测试 `test_pluginsync.py::test_get_slash_plugin_configs_lists_instead_of_405`（"只在 dispatch 层测是抓不到这种错的"） |
+| 26 | **页面四块功能**（发布 / 预览 / 应用 / 状态） | `plugin/views/sync/app.js` 里四个 endpoint | ✅ `test_plugin_bundle.py::test_the_sync_page_is_actually_wired`；另有人工清单 `docs/V1.3-REVIEW.md` |
+
+### 第二批的新形态：**测试全绿，页面在骗人**
+
+第 24 条之外，v1.3.0 还撞到一个第一次出现的形态：
+
+> `do_publish` 返回的 `plugins` 是数字，页面写 `(res.plugins || []).length` —— 横幅打出
+> 「已发布，账本收下了（**undefined** 个插件的配置 · 33 KB）」。
+
+没有异常、没有日志、pytest 全绿。**后端对、前端对、接口形状错**。所以：
+
+- 前端拿到的字段形状，也要有一条测试（现在 `test_plugin_bundle.py::test_the_publish_summary_survives_a_number_or_a_list` 钉着）；
+- 但字段形状只是下限。**"人能看懂"这件事只能由人去看一遍** —— 那一遍写成可重跑的清单
+  （`docs/V1.3-REVIEW.md`），每一格记"当时页面上真出现的字"，不记"感觉挺好"。
+
+---
+
 ## 这类谎言的共同形态
 
 三次（`role` 的 `unknown`、`wakeable` 的 `False`、`rotate_jwt` 的"默认"）都是**同一个句式**：

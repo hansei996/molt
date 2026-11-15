@@ -591,6 +591,33 @@ def test_syncing_from_a_bundle_without_a_manifest_falls_back_to_configs(
     assert plan.sync == {"alpha": b'{"a": 1}'}
 
 
+def test_publishing_twice_keeps_only_the_newest_bundle(srv: WardenServer) -> None:
+    """同一个壳发布两次：账本里只留最新一份。
+
+    `docs/ARCH.md` §14.12 与 `docs/SELFUSE.md` 都写着"每个壳只保留最新一份（配置不是历史）"。
+    2026-11-15 的断言审计发现这条**没有任何测试钉着** —— 它靠的是 `os.replace` 恰好同名覆盖，
+    哪天有人把目标文件名加上时间戳（像备份那样），文档会立刻变成谎话，而不会有任何东西变红。
+    """
+    first = _tar_with(("config/alpha_config.json", b'{"k": 1}'))
+    second = _tar_with(("config/alpha_config.json", b'{"k": 2}'))
+
+    assert srv.accept_plugin_bundle(_tmp_file(first), "", "desk", ["alpha"]).status == 200
+    assert srv.accept_plugin_bundle(_tmp_file(second), "", "desk", ["alpha"]).status == 200
+
+    listing = srv.dispatch("GET", "/plugin-configs", None)
+    assert listing.status == 200
+    bundles = listing.payload["plugin_bundles"]
+    assert len(bundles) == 1, f"同一个壳应该只留一份，实际 {len(bundles)} 份"
+    assert bundles[0]["shell"] == "desk"
+    # 留下的是**新的那一份**，不是先到的那一份
+    assert bundles[0]["bytes"] == len(second)
+
+    got = srv.stream_plugin_bundle("desk")
+    assert got.status == 200
+    payload = got.stream_path.read_bytes()
+    assert pluginsync.parse_bundle(payload)["alpha"] == b'{"k": 2}'
+
+
 def _strip_manifest(payload: bytes) -> bytes:
     """把包里的 manifest.json 摘掉，模拟旧版本打的包。"""
     import io

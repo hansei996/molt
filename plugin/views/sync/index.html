@@ -86,7 +86,8 @@
 
       <p class="foot">
         结构差太多的（顶层键几乎不重合）默认跳过 —— 那通常是两边插件版本不同，覆盖过去等于把对方不认识的键塞进去。
-        写完要重启 AstrBot 才生效：它读的是启动时载入的配置。
+        写完要让 AstrBot <b>重新载入那些插件</b>才生效（插件配置是插件载入时从磁盘读的）：
+        重载插件（`POST /api/plugin/reload`）就够了，掉线更久的是整机重启。
       </p>
     </main>
     <script type="module" src="./app.js"></script>
