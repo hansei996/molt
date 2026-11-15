@@ -110,6 +110,21 @@ molt agent --config ./agent.json --once      # 空跑一轮：只读账本、只
 
 完整路径见 [docs/INSTALL.md](docs/INSTALL.md)。
 
+### 这套流程是被验证过的，而且能重跑
+
+2026-11-15 有一轮「陌生人冷启动复核」：建全新 venv、**只从 PyPI 装下载来的轮子**、
+照 `docs/INSTALL.md` 一步一步敲。它抓到了三个"本机永远看不见"的 bug，其中一个是
+守护进程住在仓库里而不进 wheel —— 于是 `pip install` 的人连 `molt init --role agent`
+都过不去。现在这套证词和修法都在 [docs/V1.1-REVIEW.md](docs/V1.1-REVIEW.md)。
+
+验证本身也是可重跑的：
+
+```bash
+python tools/rehearse-pypi.py        # 装 PyPI 上最新的，走完十三个检查点
+```
+
+它不读仓库里的任何代码，只碰下载来的那个轮子 —— 这正是它有用的原因。
+
 ## 它解决什么问题
 
 你在 NAS 上养了一条 AI 伙伴。它有记忆、有人格、认得你。
