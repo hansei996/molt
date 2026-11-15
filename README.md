@@ -214,6 +214,8 @@ Firecracker 官方原文要求 "**identical**" 的软硬件配置，且不支持
 
 ## 文档
 
+- [docs/DECISIONS.md](docs/DECISIONS.md) —— **等你的两件事**（`schedule` 的两个产品决定、L3 壳属性表），以及一件等时机的（`/molt shutdown` 端到端）
+
 | 文件 | 内容 |
 |---|---|
 | [`docs/ARCH.md`](docs/ARCH.md) | **技术方案**（2,730 行）：为什么共享 SQLite 是错的、三层架构、交接协议、AstrBot 代码级接缝（含**控制面**）、机器覆写层、安全模型、Windows 落地、性能预算、备选方案、演进路线、23 条验证清单、风险台账 |
