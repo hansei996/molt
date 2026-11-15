@@ -301,30 +301,53 @@ def test_snapshot_without_platform_manager():
 
 
 def test_api_registers_five_endpoints():
-    """`_register_api_if_available` 必须真的注册五条，不多不少。
+    """`_register_api_if_available` 必须真的注册控制面那五条。
 
     第五条 `/observe` 是 2026-11-15 加的：AstrBot 交给插件的那个事件循环不一定是
     在跑的那个，所以"每 30 秒自己看一眼账本"的后台任务在真机上从来没跑起来
     （详见 `docs/ARCH.md` §13.15）。改成由外部敲一下 —— **请求处理器一定跑在
     服务循环上**，这条路才靠得住。
+
+    2026-11-15 又多了四条 `/sync/*`（dashboard 里那个「插件配置同步」页面）。
+    这里断言"这五条都在且方法对"，而不是"总共只有五条" —— 后一种写法在每加
+    一页时都会红一次，而它红的理由跟控制面一点关系都没有。
     """
     from astrbot_plugin_molt.main import MoltControlPlugin
 
     plugin, _, ctx = _plugin([QQ])
     MoltControlPlugin._register_api_if_available(plugin)
     routes = [r["route"] for r in ctx.registered]
-    assert sorted(routes) == sorted([
+    for route in (
         "/astrbot_plugin_molt/status",
         "/astrbot_plugin_molt/drain",
         "/astrbot_plugin_molt/resume",
         "/astrbot_plugin_molt/checkpoint",
         "/astrbot_plugin_molt/observe",
-    ])
+    ):
+        assert route in routes
     # 方法必须对：只有 status 是 GET，/resume 是唯一能让它重新开口的
     by_route = {r["route"].rsplit("/", 1)[-1]: r for r in ctx.registered}
     assert by_route["status"]["methods"] == ["GET"]
     for name in ("drain", "resume", "checkpoint", "observe"):
         assert by_route[name]["methods"] == ["POST"]
+
+
+def test_api_registers_the_sync_page_endpoints():
+    """同步页面的四条端点必须注册在同一个前缀下，否则页面调不到自己。
+
+    `views/sync/app.js` 里的 `bridge.apiGet("sync/state")` 会被 dashboard 拼成
+    `/astrbot_plugin_molt/sync/state` —— 前缀少一段，页面就会一直白在那里。
+    """
+    from astrbot_plugin_molt.main import MoltControlPlugin
+
+    plugin, _, ctx = _plugin([QQ])
+    MoltControlPlugin._register_api_if_available(plugin)
+    by_path = {r["route"]: r for r in ctx.registered}
+
+    assert by_path["/astrbot_plugin_molt/sync/state"]["methods"] == ["GET"]
+    assert by_path["/astrbot_plugin_molt/sync/preview"]["methods"] == ["GET"]
+    assert by_path["/astrbot_plugin_molt/sync/publish"]["methods"] == ["POST"]
+    assert by_path["/astrbot_plugin_molt/sync/apply"]["methods"] == ["POST"]
 
 def test_platform_configs_includes_disabled_entries():
     """`_platform_configs()` 必须返回**全部**条目，包括 enable=false 的。

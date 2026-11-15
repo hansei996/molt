@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Molt · 插件配置同步</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="head">
+        <div>
+          <h1>插件配置同步</h1>
+          <p class="sub">
+            只同步<strong>两边都装了</strong>的插件。只在一边有的，不装代码、不写配置、不删配置。
+          </p>
+        </div>
+        <button id="refresh" class="ghost" type="button">刷新</button>
+      </header>
+
+      <section class="card" id="identity">
+        <div class="kv"><span>这台壳</span><b id="shell">—</b></div>
+        <div class="kv"><span>数据目录</span><code id="data-dir">—</code></div>
+        <div class="kv"><span>本机已装插件</span><b id="plugin-count">—</b></div>
+        <p class="hint" id="data-hint"></p>
+      </section>
+
+      <section class="card">
+        <h2>1 · 把这台的配置发布到账本</h2>
+        <p class="hint">
+          打包 <code>data/config/&lt;插件&gt;_config.json</code>（含一份清单，让对面知道这台装了哪些插件），
+          不打包插件代码、也不打包 <code>plugin_data</code>。
+        </p>
+        <div class="row">
+          <button id="publish" class="primary" type="button">发布这台</button>
+          <span class="result" id="publish-result"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>2 · 选择从哪台壳同步</h2>
+        <p class="hint">预览是空跑 —— 一个字都不会写。真正写要再点一次，并且勾上确认。</p>
+        <div id="peers" class="peers"></div>
+      </section>
+
+      <section class="card" id="preview-card" hidden>
+        <h2>3 · 预览：<code id="preview-source"></code></h2>
+        <p class="counts" id="counts"></p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>插件</th><th>会怎么处理</th><th>说明</th></tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div class="row apply-row">
+          <label class="check">
+            <input type="checkbox" id="confirm" />
+            <span>我确认覆盖这台机器上的插件配置（旧文件会留 <code>*.molt-before-sync-*</code> 备份）</span>
+          </label>
+          <button id="apply" class="primary" type="button" disabled>同步过来</button>
+          <span class="result" id="apply-result"></span>
+        </div>
+      </section>
+
+      <p class="foot" id="foot">
+        结构差太多的（顶层键几乎不重合）默认跳过 —— 那通常是两边插件版本不同，覆盖过去等于把对方不认识的键塞进去。
+      </p>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

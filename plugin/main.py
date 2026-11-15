@@ -709,6 +709,18 @@ class MoltControlPlugin(Star):
             self._api = None
             logger.warning("[Molt] 控制面 API 注册失败：%s", exc, exc_info=True)
 
+        # dashboard 里的「插件配置同步」页面（views/sync/）。
+        # 它和控制面是两件事：控制面管"闭不闭嘴"，这个管"配置一不一样"，
+        # 所以注册失败也不该把控制面一起拖下水。
+        try:
+            from .sync_api import MoltSyncApi
+
+            self._sync_api = MoltSyncApi(self)
+            self._sync_api.register_routes()
+        except Exception as exc:  # pragma: no cover
+            self._sync_api = None
+            logger.warning("[Molt] 同步页面 API 注册失败：%s", exc, exc_info=True)
+
     # ------------------------------------------------------------ 聊天指令（薄层）
 
     # 这一节全部是**壳**：取参数 → 交给 command.py → 说出去。

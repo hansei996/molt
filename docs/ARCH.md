@@ -3725,3 +3725,22 @@ CLI 侧保留「不可唤醒」，但测试里的两条断言必须分开写。
 1 份"那边有这边没装"。
 
 **教训句**：同步的默认动作必须是"不动"。会删东西的同步，第一次跑就会有人丢配置。
+
+
+### 14.13 插件配置同步有了页面：把「一条命令」变成「点两下」（2026-11-15）
+
+命令行那版是给脚本和迁徙用的。可配置是**人在调**的东西 —— 刚改完一个插件的模型名，想立刻推到另一台，这时候去敲 `python -m molt.cli sync-plugins --data ... --warden-url ...` 是不合理的。所以补一个 dashboard 页面。
+
+**只用 AstrBot 的三个公开接缝**：
+
+- `views/<name>/index.html` —— dashboard 会把插件目录下的 `views/` 扫成插件页面，标题取 `metadata.yaml` 的 `display_name`（这里是「Molt 蜕壳 · 控制面」）。
+- 页面里的 bridge `window.AstrBotPluginView`（别名 `AstrBotPluginPage`），`bridge.apiGet(endpoint, params)` / `bridge.apiPost(endpoint, body)`，endpoint 是**插件内相对路径**（`sync/state`，不带插件名前缀）。SDK 由 AstrBot 自动注入（`/api/plugin/page/bridge-sdk.js?asset_token=...`），页面里不用引。
+- 后端 `context.register_web_api(f"{prefix}/sync/...", handler, ["GET"], "desc")`，dashboard 把它转发到 `/api/v1/plugins/extensions/<plugin_name>/sync/...`。
+
+**页面只做四个动作**：`state`（只读）、`publish`（把这台的配置发到账本）、`preview`（空跑，一个字都不写）、`apply`（真写）。`apply` 必须带 `confirm=true`，页面上就是那个「我确认覆盖」勾选框 —— 它不是装饰：不勾，按钮是 `disabled` 的。
+
+**规则不在页面里重写**。`plugin/sync_api.py` 的四个函数直接调用 `molt.pluginsync` 里那一套纯函数（`plan_sync` / `apply_plan` / `make_bundle` / `parse_bundle`），所以页面上看到的「会写 / 一样 / 结构看起来不一样 / 那边有这边没装 / 这边独有」，和命令行看到的是**同一份判断**。多写一遍就会出现两套规则，然后它们慢慢分叉。
+
+**一条真实教训**：打包脚本原来是手写文件名的，漏掉了 `sync_api.py`、`arrival.py`、`observed.py` —— 它不报错，只是那几个功能在别人的机器上不存在。现在 `dist/_rebuild_bundle.py` 改成扫目录（`plugin/*.py` + `views/**` + `metadata.yaml` + `molt/*.py`），并且 `molt/tests/test_plugin_bundle.py` 里有一条专门钉住「插件 import 的每个 `molt` 子模块都必须有 vendored 副本」。
+
+判据：全量 `1038 passed`；真机 `POST /api/plugin/reload` 之后 `GET /api/v1/plugins/extensions/astrbot_plugin_molt/sync/state` 返回 200（`shell=desktop-h2kgiao`、10 个插件、9 份配置）；页面 `/api/v1/plugins/astrbot_plugin_molt/pages/sync` 返回标题「Molt · 插件配置同步」。

@@ -136,11 +136,47 @@ def _install_astrbot_stub() -> None:
     event.MessageEventResult = MessageEventResult
     event.filter = event_filter
 
-    astrbot.api = api
-    api.star = star
-    api.util = util
-    api.event = event
+    # ---- astrbot.api.web ------------------------------------------------------
+    # 新版 AstrBot 推荐插件用 `astrbot.api.web` 读请求、造响应（见
+    # docs/zh/dev/star/guides/plugin-pages.md）。`plugin/sync_api.py` 就写在这个
+    # 公开接口上，所以桩要复现它的三样东西：能读 query/json 的 request、
+    # json_response、error_response。
+    #
+    # 桩故意做成**可写的全局**：测试直接改 `web.request.query` /
+    # `web.request._json` 来模拟一次请求，比在测试里造一个假的框架省事得多，
+    # 而且正好也盯住了"插件只用了这三个名字"这件事。
+    import json as _json
 
+    web = types.ModuleType("astrbot.api.web")
+
+    class _StubPluginRequest:
+        def __init__(self):
+            self.query = {}
+            self.username = "tester"
+            self._json = {}
+
+        async def json(self, default=None):
+            return self._json if self._json is not None else default
+
+    class _StubWebResponse:
+        def __init__(self, payload, status_code=200):
+            self.json = payload
+            self.payload = payload
+            self.status_code = status_code
+            self.body = _json.dumps(payload, ensure_ascii=False)
+
+    def _json_response(data=None, *, status_code=200, headers=None):
+        return _StubWebResponse({} if data is None else data, status_code)
+
+    def _error_response(message, *, status_code=400, data=None, headers=None):
+        return _StubWebResponse(
+            {"status": "error", "message": message, "data": data}, status_code
+        )
+
+    web.request = _StubPluginRequest()
+    web.json_response = _json_response
+    web.error_response = _error_response
+    api.web = web
     sys.modules["astrbot"] = astrbot
     sys.modules["astrbot.api"] = api
     sys.modules["astrbot.api.star"] = star
@@ -148,6 +184,7 @@ def _install_astrbot_stub() -> None:
     sys.modules["astrbot.api.message_components"] = message_components
     sys.modules["astrbot.api.event"] = event
     sys.modules["astrbot.api.event.filter"] = event_filter
+    sys.modules["astrbot.api.web"] = web
 
 
 def _install_quart_stub() -> None:
