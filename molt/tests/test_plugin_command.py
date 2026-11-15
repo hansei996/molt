@@ -304,7 +304,7 @@ def test_incomplete_config_refuses_go(plugin_dir):
 
 def test_lease_held_refuses_go(plugin_dir, pkg_dir):
     write_cfg(plugin_dir, molt_pkg=str(pkg_dir))
-    ledger = FakeLedger({"status": {"lease": {"shell_id": "someone-else", "epoch": 9}}})
+    ledger = FakeLedger({"status": {"lease": {"holder": "someone-else", "state": "active", "epoch": 9}}})
     m = mover(plugin_dir, opener=ledger)
     reply = m.handle("go")
     assert "someone-else" in reply.text

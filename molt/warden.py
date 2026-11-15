@@ -54,6 +54,14 @@ from typing import Any, Dict, List, Optional
 # 留这么宽的余量是为了不把一次 GC、一次休眠唤醒误报成鱼死了。
 HEARTBEAT_STALE_SECONDS = 600
 
+#: 一个壳能是什么。**收窄到四个值**是为了让「按角色判断」可靠 ——
+#: 自由文本的 role 最后一定会变成 `role in ("nas", "NAS", "nas-box", "NAS机")`
+#: 这种东西，而它只会在出事的那天被发现有漏洞。
+SHELL_ROLES = ("nas", "desktop", "cloud", "unknown")
+
+#: 账本给每个壳记的字段（`label` 在这里是"声明"，心跳里的那份是"自报"）。
+SHELL_ATTR_FIELDS = ("role", "gpu", "wakeable", "cost_per_hour", "label")
+
 
 from .epoch import (
     DEFAULT_LEASE_TTL_SECONDS,
@@ -453,6 +461,10 @@ class Warden:
         # 心跳：谁在什么时候还活着。这是账本唯一一处'谁说自己在跑'的地方 ——
         # 账本的其它字段记的是'谁取走了快照'，不是'谁现在还在'。
         self._heartbeats: Dict[str, Dict[str, Any]] = {}
+        # 壳属性：这台机器**是什么**（NAS / 桌面 / 有没有显卡 / 能不能被叫醒）。
+        # 和心跳分开存：心跳回答"现在谁还在"，属性回答"那台机器能干什么"。
+        # 一台关机一周的机器，属性照样该在 —— 它不会因为没人上报就变成未知。
+        self._shells: Dict[str, Dict[str, Any]] = {}
         self._loaded = False
 
     def _lock(self, timeout: float = 30.0) -> "_InterProcessLock":
@@ -477,6 +489,7 @@ class Warden:
             self._state = FencedState()
             self._generations = []
             self._heartbeats = {}
+            self._shells = {}
             self._loaded = True
             return
 
@@ -503,6 +516,9 @@ class Warden:
         self._heartbeats = {
             str(k): dict(v) for k, v in (raw.get("heartbeats") or {}).items()
         }
+        self._shells = {
+            str(k): dict(v) for k, v in (raw.get("shells") or {}).items()
+        }
         self._loaded = True
 
     def _ensure_loaded(self) -> None:
@@ -520,6 +536,7 @@ class Warden:
             "fenced_state": self._state.to_dict(),
             "generations": [g.to_dict() for g in self._generations],
             "heartbeats": self._heartbeats,
+            "shells": self._shells,
         }
 
     def save(self) -> None:
@@ -642,6 +659,7 @@ class Warden:
             ),
             "checked_at": now,
             "heartbeats": self._heartbeat_view(now),
+            "shells": self.shells_view(),
             "power": self.power_view(),
         }
 
@@ -718,6 +736,135 @@ class Warden:
                 "stale": age > HEARTBEAT_STALE_SECONDS,
             }
         return out
+
+    # ------------------------------------------------------------ 壳属性
+    #
+    # 心跳回答「现在谁还在」，属性回答「那台机器能干什么」。这是两件事：
+    # 账本原来只知道壳的**名字**（`ugreen-776b-8b7896df`），于是所有"按机器
+    # 能力做判断"的地方都只能靠壳名猜 —— 而壳名是人随手起的，改一次就失效，
+    # 且失效时**不会报错**，只会安静地判断错。
+    #
+    # 四个字段的选择理由（每一个都对应一句现在说不出的话）：
+    #   role          —— "回 NAS" 这句话里的 NAS 是哪台？
+    #   gpu           —— "去打会儿游戏吧" 这句话它接不接得住？
+    #   wakeable      —— 提议去一台睡着的机器之前，要不要先发魔术封包？
+    #   cost_per_hour —— 两台都能跑的时候，哪台更该醒着？
+    #
+    # 这里**只存事实，不做判断**。判断留给用它的地方（插件 / CLI / 未来的策略），
+    # 这样"我认为 NAS 没有显卡"这种猜测永远不会被写进账本。
+
+    def _validate_shell_attr(self, key: str, value: Any) -> Any:
+        if key == "role":
+            role = str(value or "").strip().lower()
+            if role not in SHELL_ROLES:
+                raise NeedsHuman(
+                    f"不认识的 role：{value!r}（可选：{' / '.join(SHELL_ROLES)}）"
+                )
+            return role
+        if key == "gpu":
+            # 自由文本，但**空字符串是合法的**：它的意思是"确认过，没有显卡"，
+            # 和"没填过"必须区分 —— 前者可以用来拒绝"去打游戏"，后者不能。
+            return str(value or "").strip()[:40]
+        if key == "wakeable":
+            if isinstance(value, bool):
+                return value
+            raise NeedsHuman(f"wakeable 只接受 true/false，收到 {value!r}")
+        if key == "cost_per_hour":
+            if value is None or value == "":
+                return 0.0
+            try:
+                cost = float(value)
+            except (TypeError, ValueError):
+                raise NeedsHuman(f"cost_per_hour 要一个数字，收到 {value!r}")
+            if cost < 0 or cost > 10000:
+                raise NeedsHuman(f"cost_per_hour 不像一笔钱：{value!r}")
+            return round(cost, 4)
+        if key == "label":
+            return str(value or "").strip()[:80]
+        raise NeedsHuman(f"不认识的壳属性：{key}")
+
+    def set_shell(
+        self,
+        shell_id: str,
+        *,
+        role: Any = None,
+        gpu: Any = None,
+        wakeable: Any = None,
+        cost_per_hour: Any = None,
+        label: Any = None,
+        by: str = "",
+    ) -> Dict[str, Any]:
+        """登记/更新一个壳的属性。**局部更新**：只改传进来的字段。
+
+        为什么是局部：守护进程启动时只声明它自己知道的那几个（role/wakeable），
+        而 `gpu`/`cost_per_hour` 往往是人后来手填的。整份覆盖会让每次重启
+        都把手工填的字段抹成默认值 —— 那种 bug 的形态是"跑一阵之后就没了"。
+        """
+        shell_id = str(shell_id or "").strip()
+        if not shell_id:
+            raise NeedsHuman("登记壳属性必须带 shell_id")
+
+        wanted: Dict[str, Any] = {}
+        for key, value in (
+            ("role", role),
+            ("gpu", gpu),
+            ("wakeable", wakeable),
+            ("cost_per_hour", cost_per_hour),
+            ("label", label),
+        ):
+            if value is None:
+                continue
+            wanted[key] = self._validate_shell_attr(key, value)
+
+        with self._lock():
+            self._reload_locked()
+            now = time.time()
+            previous = dict(self._shells.get(shell_id) or {})
+            merged = {**previous, **wanted}
+            merged["updated_at"] = now
+            merged["updated_at_readable"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            merged["updated_by"] = str(by or "")[:80]
+            self._shells[shell_id] = merged
+            # 只留最近 32 个壳：这是"这台机器是什么"，不是历史。真到 32 个壳
+            # 的时候，人早该发现自己的部署描述里有一堆不再存在的机器。
+            if len(self._shells) > 32:
+                oldest = sorted(
+                    self._shells.items(),
+                    key=lambda kv: kv[1].get("updated_at", 0),
+                )
+                for key, _ in oldest[: len(self._shells) - 32]:
+                    self._shells.pop(key, None)
+            self.save()
+
+        changed = ", ".join(f"{k}={merged.get(k)!r}" for k in sorted(wanted)) or "无变化"
+        self.append_log(
+            "INFO", f"壳属性：{shell_id} <- {changed}（{by or '未署名'}）"
+        )
+        return self.shells_view()[shell_id]
+
+    def shells_view(self) -> Dict[str, Dict[str, Any]]:
+        """每个壳是什么。**没登记过就不出现** —— 不编默认值。
+
+        「默认 role=unknown」听起来无害，实际后果是：任何按 role 判断的代码
+        都会把"我不知道"当成"我确认过它不是 NAS"。缺席必须能被看见。
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        self._ensure_loaded()
+        for shell_id, attrs in self._shells.items():
+            item = {
+                "role": attrs.get("role", ""),
+                "gpu": attrs.get("gpu", ""),
+                "wakeable": bool(attrs.get("wakeable", False)),
+                "cost_per_hour": attrs.get("cost_per_hour", 0.0),
+                "label": str(attrs.get("label") or ""),
+                "updated_at": attrs.get("updated_at", 0),
+                "updated_at_readable": attrs.get("updated_at_readable", ""),
+                "updated_by": attrs.get("updated_by", ""),
+                "declared": "role" in attrs,
+            }
+            out[shell_id] = item
+        return out
+
 
     # ---------------------------------------------------------------- 租约
 

@@ -54,7 +54,7 @@ from urllib.parse import parse_qs, urlparse
 from .errors import Fatal, MoltError, NeedsHuman
 from .render import render_timeline
 from .version import PROTOCOL_VERSION, __version__
-from .warden import Warden
+from .warden import SHELL_ATTR_FIELDS, Warden
 
 
 TOKEN_HEADER = "X-Molt-Token"
@@ -112,6 +112,7 @@ def _where_html(status: Dict[str, Any]) -> str:
         return _html.escape(str(text if text is not None else ""))
 
     rows = []
+    shells = status.get("shells") or {}
     for shell_id, beat in sorted(beats.items(), key=lambda kv: kv[1].get("age_seconds", 0)):
         stale = beat.get("stale")
         color = "#b42318" if stale else "#067647"
@@ -122,17 +123,28 @@ def _where_html(status: Dict[str, Any]) -> str:
             if label
             else f"<b>{esc(shell_id)}</b>"
         )
+        # 这个壳是什么 —— 没登记过就写「没登记」，**不猜**。
+        # 猜一个 role 出来，等于把"我不知道"伪装成"我知道"。
+        attrs = shells.get(shell_id) or {}
+        role = str(attrs.get("role") or "").strip()
+        if role:
+            role_html = esc(role)
+            if attrs.get("gpu"):
+                role_html += f' <span style="color:#98a2b3;font-size:12px">{esc(attrs["gpu"])}</span>'
+        else:
+            role_html = '<span style="color:#98a2b3">没登记</span>'
         rows.append(
             "<tr>"
             f"<td>{name}</td>"
             f'<td style="color:{color};font-weight:600">{word}</td>'
+            f"<td>{role_html}</td>"
             f"<td>{esc(beat.get('age_readable', ''))}</td>"
             f"<td>{esc(beat.get('generation', ''))}</td>"
             f"<td>{esc(beat.get('note', ''))}</td>"
             "</tr>"
         )
     if not rows:
-        rows.append('<tr><td colspan="5" style="color:#667085">还没有任何壳发过心跳</td></tr>')
+        rows.append('<tr><td colspan="6" style="color:#667085">还没有任何壳发过心跳</td></tr>')
 
     lease_text = (
         f"被 <b>{esc(lease.get('holder'))}</b> 持有（还剩 {esc(lease.get('remaining_seconds'))} 秒）"
@@ -169,7 +181,7 @@ def _where_html(status: Dict[str, Any]) -> str:
   <h1>鱼现在在哪</h1>
   <p class="sub">数据来自各个壳自己上报的心跳。心跳超过 10 分钟没更新就算「哑了」。</p>
   <table>
-    <thead><tr><th>壳</th><th>状态</th><th>最后心跳</th><th>代</th><th>说明</th></tr></thead>
+    <thead><tr><th>壳</th><th>状态</th><th>是什么</th><th>最后心跳</th><th>代</th><th>说明</th></tr></thead>
     <tbody>{''.join(rows)}</tbody>
   </table>
   <div class="meta">
@@ -300,6 +312,38 @@ class WardenServer:
                     label=str(body.get("label") or ""),
                 )
                 return _ok(heartbeat=beat)
+
+            # ---- POST /shell ----（登记"这台机器是什么"，不是"它现在在不在"）
+            if head == "shell" and parts[1:2] == [] and method == "POST":
+                shell_id = str(body.get("shell") or "").strip()
+                if not shell_id:
+                    return _err(400, "缺少 shell", "bad_request")
+                # 只认白名单里的字段：账本里不该出现一个谁都能塞键的字典。
+                unknown = [
+                    key
+                    for key in body
+                    if key not in SHELL_ATTR_FIELDS + ("shell", "by")
+                ]
+                if unknown:
+                    return _err(
+                        400,
+                        f"不认识的壳属性：{', '.join(sorted(unknown))}",
+                        "bad_request",
+                    )
+                attrs = self.warden.set_shell(
+                    shell_id,
+                    role=body.get("role"),
+                    gpu=body.get("gpu"),
+                    wakeable=body.get("wakeable"),
+                    cost_per_hour=body.get("cost_per_hour"),
+                    label=body.get("label"),
+                    by=str(body.get("by") or ""),
+                )
+                return _ok(shell=attrs)
+
+            # ---- GET /shells ----
+            if head == "shells" and method == "GET":
+                return _ok(shells=self.warden.shells_view())
 
             # ---- POST /power ----（「走」和「关」是两件事，这是第二件）
             if head == "power" and parts[1:2] == [] and method == "POST":

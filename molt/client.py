@@ -201,6 +201,40 @@ class WardenClient:
     def history(self) -> Dict[str, Any]:
         return self._request("GET", "/history").get("history", {})
 
+    def set_shell(
+        self,
+        shell_id: str,
+        *,
+        role: Optional[str] = None,
+        gpu: Optional[str] = None,
+        wakeable: Optional[bool] = None,
+        cost_per_hour: Optional[float] = None,
+        label: Optional[str] = None,
+        by: str = "",
+    ) -> Dict[str, Any]:
+        """登记"这台机器是什么"。**只传你想声明的字段** —— 没传的保持原样。
+
+        这是局部更新，不是整份覆盖：守护进程启动时只声明它知道的那几个，
+        而 gpu / cost_per_hour 往往是人事后手填的。整份覆盖会让手工填的
+        字段在下次重启时消失，而那种 bug 的形态是"跑一阵之后就不见了"。
+        """
+        body: Dict[str, Any] = {"shell": shell_id}
+        for key, value in (
+            ("role", role),
+            ("gpu", gpu),
+            ("wakeable", wakeable),
+            ("cost_per_hour", cost_per_hour),
+            ("label", label),
+        ):
+            if value is not None:
+                body[key] = value
+        if by:
+            body["by"] = by
+        return self._request("POST", "/shell", body).get("shell", {})
+
+    def shells(self) -> Dict[str, Dict[str, Any]]:
+        return self._request("GET", "/shells").get("shells", {})
+
     def acquire(self, shell_id: str, ttl_seconds: Optional[int] = None) -> Dict[str, Any]:
         body: Dict[str, Any] = {"shell_id": shell_id}
         if ttl_seconds is not None:

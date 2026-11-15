@@ -1841,6 +1841,85 @@ def _human_size(n: int) -> str:
     return f"{size:.1f} GB"
 
 
+def cmd_shells(args: argparse.Namespace) -> int:
+    """账本里登记的「每台壳是什么」。
+
+    和 `molt shell` 的区别：`molt shell` 是**在本地探测这台机器**（进程、
+    路径、依赖能不能跑），不联网；这一条是**从账本读回来的声明**（这台
+    机器自称是什么）。两者会不一致 —— 而那种不一致本身就是要看的东西。
+    """
+    be = _backend(args)
+    shells = be.shells()
+    if args.json:
+        print(json.dumps(shells, ensure_ascii=False, indent=2))
+        return 0
+    if not shells:
+        warn("账本里还没有任何壳的属性。")
+        dim("  守护进程启动时会自己声明（molt init 已经把 role 写进配置）；")
+        dim("  也可以手动登记：molt declare --role nas --shell <壳名> --warden-url … --token …")
+        return 0
+    head("账本里的壳")
+    for shell_id, attrs in sorted(shells.items()):
+        role = attrs.get("role") or "（没登记）"
+        bits = [f"{C.CYA}{shell_id}{C.R}", role]
+        if attrs.get("gpu"):
+            bits.append(f"gpu={attrs['gpu']}")
+        if attrs.get("wakeable"):
+            bits.append("可唤醒")
+        cost = attrs.get("cost_per_hour")
+        if cost:
+            bits.append(f"{cost}/小时")
+        print("  " + "  ".join(bits))
+        if attrs.get("updated_at_readable"):
+            dim(f"      {attrs['updated_at_readable']} 由 {attrs.get('updated_by') or '未署名'} 登记")
+    return 0
+
+
+def cmd_declare(args: argparse.Namespace) -> int:
+    """登记「这台机器是什么」。
+
+    `role` 收窄成四个值（nas / desktop / cloud / unknown）是刻意的：自由文本
+    最后一定会变成 `role in ("nas", "NAS", "nas-box")` 这种东西，而它只在
+    出事的那天被发现有漏洞。`gpu` 则是自由文本 —— 因为"什么算能打游戏"
+    只有人知道，程序不该替人下这个定义。
+    """
+    shell_id = str(getattr(args, "shell", "") or "").strip()
+    if not shell_id:
+        bad("没有 --shell —— 账本里给哪台机器登记，这件事没有默认值")
+        return 2
+
+    attrs: Dict[str, object] = {}
+    if args.role is not None:
+        attrs["role"] = args.role
+    if args.gpu is not None:
+        attrs["gpu"] = args.gpu
+    if args.wakeable:
+        attrs["wakeable"] = True
+    if args.cost_per_hour is not None:
+        attrs["cost_per_hour"] = args.cost_per_hour
+    if args.label is not None:
+        attrs["label"] = args.label
+    if not attrs:
+        bad("什么都没给 —— 至少要 --role / --gpu / --wakeable / --cost-per-hour 之一")
+        return 2
+
+    be = _backend(args)
+    try:
+        got = be.set_shell(shell_id, by=args.by or "", **attrs)
+    except NeedsHuman as exc:
+        bad(str(exc))
+        return 4
+
+    head("已登记")
+    kv("壳", got.get("shell", shell_id) or shell_id)
+    for key in ("role", "gpu", "wakeable", "cost_per_hour", "label"):
+        if key in attrs:
+            kv(key, got.get(key))
+    dim("  这是**声明**，不是探测：账本只记你说它是什么。")
+    dim("  看全部：molt shells --warden-url … --token …")
+    return 0
+
+
 def cmd_timeline(args: argparse.Namespace) -> int:
     """把「它搬过几次家」渲染成一页 HTML（或打出 JSON）。
 
@@ -2724,6 +2803,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="真的删。不给这个开关只报告不删",
     )
     s.set_defaults(func=cmd_prune)
+
+    # shells
+    s = add("shells", "列出账本里登记的壳属性（每台机器自称是什么）")
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.add_argument("--json", action="store_true", help="打成 JSON（给脚本用）")
+    s.set_defaults(func=cmd_shells)
+
+    # declare
+    s = add("declare", "登记「这台机器是什么」：role / gpu / 能不能被叫醒 / 每小时多少钱")
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.add_argument("--shell", required=True, help="哪台壳（与账本里的 target_shell 一致）")
+    s.add_argument("--role", choices=("nas", "desktop", "cloud", "unknown"), help="这台机器的角色")
+    s.add_argument(
+        "--gpu",
+        help="显卡（自由文本，比如 4070TiS；给空串表示「确认过，没有显卡」）",
+    )
+    s.add_argument(
+        "--wakeable",
+        action="store_true",
+        help="这台机器能被魔术封包叫醒（发 WOL 之前要知道这件事）",
+    )
+    s.add_argument(
+        "--cost-per-hour",
+        dest="cost_per_hour",
+        type=float,
+        help="醒着一小时多少钱（云主机/电费；用来排序「哪台更该醒着」）",
+    )
+    s.add_argument("--label", help="给人看的名字（不填就用壳名）")
+    s.add_argument("--by", help="署名（写进账本的日志，方便事后追）")
+    s.set_defaults(func=cmd_declare)
 
     # timeline
     s = add(

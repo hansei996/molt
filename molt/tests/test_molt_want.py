@@ -202,7 +202,10 @@ def test_it_refuses_a_target_the_ledger_has_never_heard_of(plugin_dir: Path) -> 
 def test_it_does_not_queue_when_someone_else_holds_the_lease(plugin_dir: Path) -> None:
     payload = {
         "status": {
-            "lease": {"shell_id": "nas-shell", "epoch": 7},
+            # 账本的租约视图字段是 holder / state / epoch —— 不是 shell_id。
+            # 这两条用例原来用 `shell_id`，于是它们测的是"守卫永不触发"：
+            # 而那种红与绿的区别，正好是我这次要修的那个 bug。
+            "lease": {"holder": "nas-shell", "state": "active", "epoch": 7},
             "heartbeats": {"win-shell": {}, "nas-shell": {}},
             "latest_generation": {"target_shell": "nas-shell"},
         }

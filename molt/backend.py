@@ -75,6 +75,12 @@ class LocalBackend:
     def history(self) -> Dict[str, Any]:
         return self.warden.history()
 
+    def set_shell(self, shell_id: str, **attrs: Any) -> Dict[str, Any]:
+        return self.warden.set_shell(shell_id, **attrs)
+
+    def shells(self) -> Dict[str, Dict[str, Any]]:
+        return self.warden.shells_view()
+
     def where(self) -> str:
         return f"本地 {self.warden.root}"
 
@@ -264,6 +270,12 @@ class RemoteBackend:
 
     def history(self) -> Dict[str, Any]:
         return self.client.history()
+
+    def set_shell(self, shell_id: str, **attrs: Any) -> Dict[str, Any]:
+        return self.client.set_shell(shell_id, **attrs)
+
+    def shells(self) -> Dict[str, Dict[str, Any]]:
+        return self.client.shells()
 
     def where(self) -> str:
         return f"远端 {self.client.base_url}"

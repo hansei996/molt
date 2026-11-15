@@ -207,6 +207,24 @@ def schedule_due(trigger: Any, now: float) -> Optional[bool]:
     return ((minutes - start) % (24 * 60)) < span
 
 
+def _shell_what(attrs: Dict[str, Any]) -> str:
+    """把一条壳属性压成一句人话（`nas · 4070TiS`）。没登记就返回空串。
+
+    返回空串而不是「unknown」：调用方拼进句子里时，空串会让那句话**少一段**，
+    而 "unknown" 会让它读起来像"这是个已知的事实"。
+    """
+    role = str(attrs.get("role") or "").strip()
+    if not role:
+        return ""
+    bits = [role]
+    gpu = str(attrs.get("gpu") or "").strip()
+    if gpu:
+        bits.append(gpu)
+    if attrs.get("wakeable"):
+        bits.append("可唤醒")
+    return " · ".join(bits)
+
+
 def source_label(source: str) -> str:
     """把触发源翻成一句能嵌进确认文案的话；不认识就返回空串。
 
@@ -496,6 +514,7 @@ class MoltMover:
         """「鱼现在在哪」——不用问它，看一眼就知道。"""
         me = self._self_label()
         beats = st.get("heartbeats")
+        shells = st.get("shells") if isinstance(st.get("shells"), dict) else {}
         lines = [f"我现在在 **{me}**。"]
         if not isinstance(beats, dict) or not beats:
             lines.append("其它壳还没有上报过心跳，所以只知道我自己在哪。")
@@ -509,7 +528,11 @@ class MoltMover:
             age = beat.get("age_readable") or ""
             state = "哑了" if beat.get("stale") else "在跑"
             mark = "（就是我）" if str(shell_id) == me else ""
-            others.append(f"· {shell_id}{mark}：{state}，最后心跳 {age}")
+            # 这个壳是什么。**没登记就不写** —— 编一个 role 出来，
+            # 等于把"我不知道"说成"我知道"，而这句话会被拿去决定搬去哪。
+            what = _shell_what(shells.get(str(shell_id)) or {})
+            tail = f"，{what}" if what else ""
+            others.append(f"· {shell_id}{mark}：{state}{tail}，最后心跳 {age}")
         if others:
             lines.append("")
             lines.extend(others)
@@ -667,9 +690,13 @@ class MoltMover:
         st = self.ledger_status()
         if isinstance(st, dict):
             lease = st.get("lease") or None
-            if isinstance(lease, dict) and lease.get("shell_id"):
+            # 字段名是 `holder`，不是 `shell_id`（账本的租约视图只有 holder /
+            # state / epoch / remaining_seconds）。读一个永远不存在的键，
+            # 等于这个守卫从来没装过 —— 而它看起来和"确实没人在搬"一模一样。
+            holder = lease.get("holder") if isinstance(lease, dict) else None
+            if holder and lease.get("state") == "active":
                 return Reply(
-                    f"现在账本上 `{lease.get('shell_id')}` 正持着租约（{lease.get('epoch')}）。"
+                    f"现在账本上 `{holder}` 正持着租约（epoch {lease.get('epoch')}）。"
                     "有别人在搬，我不插队。"
                 )
 
@@ -750,9 +777,13 @@ class MoltMover:
         st = self.ledger_status()
         if isinstance(st, dict):
             lease = st.get("lease") or None
-            if isinstance(lease, dict) and lease.get("shell_id"):
+            # 字段名是 `holder`，不是 `shell_id`（账本的租约视图只有 holder /
+            # state / epoch / remaining_seconds）。读一个永远不存在的键，
+            # 等于这个守卫从来没装过 —— 而它看起来和"确实没人在搬"一模一样。
+            holder = lease.get("holder") if isinstance(lease, dict) else None
+            if holder and lease.get("state") == "active":
                 return Reply(
-                    f"现在账本上 `{lease.get('shell_id')}` 正持着租约（{lease.get('epoch')}）。"
+                    f"现在账本上 `{holder}` 正持着租约（epoch {lease.get('epoch')}）。"
                     "有别人在搬，我不插队。"
                 )
 
@@ -812,8 +843,15 @@ class MoltMover:
         ttl = int(cfg.self_propose_ttl_seconds)
         self._proposal = (self._clock() + ttl, src, want, src, quote_text)
         why = str(reason or "").strip()
+        # 目标那台机器是什么。账本里有声明就写，没有就**不编** ——
+        # 一句"搬去 nas-1（存疑）"远好过"搬去 nas-1（NAS）"这种凭空断言。
+        attrs = None
+        if isinstance(st, dict) and isinstance(st.get("shells"), dict):
+            attrs = st["shells"].get(want)
+        what = _shell_what(attrs or {}) if isinstance(attrs, dict) else ""
         return Reply(
             f"我想搬去 **{want}**。"
+            + (f"\n那边是：{what}" if what else "")
             + (f"\n理由：{why}" if why else "\n（没给理由）")
             + f"\n\n你说一句 `/molt confirm`，我就动身；`/molt cancel` 就算了。"
             f"\n这条提议 {ttl // 60} 分钟内有效 —— 你说要搬，才是搬。"

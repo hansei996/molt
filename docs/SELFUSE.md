@@ -303,6 +303,41 @@ export MSYS2_ARG_CONV_EXCL='*'      # 关掉这层路径改写
 **判断方法**：命令生效时它的回复是模板式的（「取消了，我不搬。」「好，放着不关。」）；
 被改写时会变成一段试图理解你的闲聊。后者不是 molt 坏了，是参数没送到。
 
+## 账本里的壳属性：它知道"那台机器是什么"
+
+心跳只回答"现在谁还在报"。要知道那台机器**能干什么**（是不是 NAS、有没有显卡、
+能不能被 WOL 叫醒），得在账本里登记：
+
+```bash
+molt declare --shell ugreen-776b-8b7896df --role nas --by lead
+molt declare --shell desktop-h2kgiao --role desktop --gpu 4070TiS --wakeable --by lead
+molt shells
+```
+
+```
+my-box  desktop  gpu=4070TiS  可唤醒  0.12/小时
+        2026-11-15 16:34:41 由 lead 登记
+```
+
+三条注意：
+
+- **这是声明，不是探测。** `molt shell`（单数）看的才是本机实际情况。两者不一致时，
+  不一致本身就是要看的东西。
+- **`role` 只能填 `nas` / `desktop` / `cloud` / `unknown`。** 填别的东西会被 argparse
+  直接拒（`invalid choice`），不会写进账本 —— 因为自由文本最后一定会变成
+  `role in ("nas","NAS","nas-box","NAS机")` 这种东西。
+- **没登记就不显示。** `/where` 那一列会写"没登记"，`/molt where` 那句会少一段 ——
+  它不会替你编一个 `unknown`。
+
+守护进程会在启动时声明**一次**（来自配置里的 `"shell_attrs"`）：
+
+```json
+"shell_attrs": {"role": "desktop", "wakeable": true}
+```
+
+声明失败不影响搬家，只会记一行：「壳属性没送进账本（不影响搬家；role 相关判断会退回
+「没登记」）」。
+
 ## 它现在在哪
 
 以前这个问题只能"问它"。现在有三条路，都不用问。

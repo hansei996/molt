@@ -19,7 +19,7 @@
 
 ```bash
 pip install molt-handoff   # 装出发行包；导入名和命令都还是 molt
-molt --version             # 应该打印 molt 1.1.1（或更新）
+molt --version             # 应该打印 molt 1.2.0（或更新）
 ```
 
 只有想改代码、或者还没发版时才需要仓库：
@@ -257,6 +257,24 @@ molt migrate --data <data> --shell my-windows-box \
 ```bash
 molt land --generation N --data <data> --warden-url … --warden-token …
 ```
+
+---
+
+## 6.5 让账本知道这两台机器是什么（可选，但建议做）
+
+```bash
+molt declare --warden-url http://192.168.50.50:6186 --warden-token <token> \
+  --shell <甲那个壳名> --role nas --by you
+molt declare --warden-url http://192.168.50.50:6186 --warden-token <token> \
+  --shell <乙那个壳名> --role desktop --wakeable --gpu 4070TiS --by you
+molt shells --warden-url http://192.168.50.50:6186 --warden-token <token>
+```
+
+不填也能跑：`request_move` 只会校验"目标壳在账本里出现过"。填了之后，`/where` 会多一列
+「是什么」，`/molt where` 与提议文案里会多一句「那边是：nas · 可唤醒」。
+
+**这是声明，不是探测** —— `molt shell` 才是看本机。守护进程启动时也会按配置里的
+`"shell_attrs"` 声明一次（`molt init` 已经填好 `role`）。
 
 ---
 

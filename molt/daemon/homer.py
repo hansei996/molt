@@ -111,6 +111,9 @@ class ConfigError(Exception):
 class Settings:
     execute: bool = False
     shell: str = ""
+    #: 这台机器是什么（声明）：role / gpu / wakeable / cost_per_hour。
+    #: homer 通常声明 `{"role": "nas"}` —— 账本就在它上面。
+    shell_attrs: dict = field(default_factory=dict)
     container: str = "astrbot"
     data_dir: str = "/mnt/dm-0/astrbot/data"
     molt_pkg: str = "/mnt/dm-0/astrbot/_molt/pkg"
@@ -219,6 +222,27 @@ class Warden:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return 200 <= resp.status < 300
         except Exception:  # noqa: BLE001 - 心跳永远不该把守护进程弄死
+            return False
+
+    def set_shell(self, shell_id: str, attrs: dict, *, by: str = "") -> bool:
+        """声明「这台机器是什么」。失败只返回 False，绝不抛。
+
+        与心跳分开：心跳每 10 秒一次，这是启动时一次。**它不该因为
+        "role 写错了"就让账本宿主起不来** —— 记一行日志，人自己会看见。
+        """
+        if not shell_id or not attrs:
+            return False
+        payload = json.dumps({"shell": shell_id, **attrs, "by": by}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base}/shell",
+            data=payload,
+            headers={"X-Molt-Token": self.token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return 200 <= resp.status < 300
+        except Exception:  # noqa: BLE001 - 声明失败不该把守护进程弄死
             return False
 
     def power_ack(self, shell_id: str) -> bool:
@@ -410,6 +434,9 @@ class Homer:
     status_fetcher: Optional[Callable[[], Dict[str, Any]]] = None
     log: Callable[[str], None] = _log_line
     power_ack_sender: Optional[Callable[[str], bool]] = None
+    #: 启动时声明「这台机器是什么」。不注入就不声明（测试与 dry-run 用）。
+    shell_attr_sender: Optional[Callable[..., bool]] = None
+    _shell_declared: bool = False
 
     # -- 路径与 argv
 
@@ -862,7 +889,32 @@ class Homer:
                 "kind": "land", "generation": generation,
                 "switched": switched, "started": started}
 
+    def _declare_shell(self) -> None:
+        """把配置里的「这台机器是什么」交给账本。只做一次，失败要出声。
+
+        homer 就是账本所在的那台机器，所以它的 role 通常是 `nas` ——
+        而这句话现在只有人知道，账本只知道一个壳名。
+        """
+        if self._shell_declared or self.shell_attr_sender is None:
+            return
+        attrs = dict(self.settings.shell_attrs or {})
+        if not attrs or not self.settings.shell:
+            self._shell_declared = True
+            return
+        try:
+            ok = bool(self.shell_attr_sender(self.settings.shell, attrs, by="homer"))
+        except Exception as exc:  # noqa: BLE001 - 声明失败不该把守护进程弄死
+            ok = False
+            self.log(f"  ! 声明壳属性时出错：{exc}")
+        if ok:
+            self.log(f"· 已声明这台壳是什么：{', '.join(sorted(attrs))}")
+        else:
+            self.log("  ! 壳属性没送进账本（不影响交接；role 相关判断会退回「没登记」）")
+        self._shell_declared = True
+
     def run_forever(self, *, once: bool = False) -> None:
+        # 「这台机器是什么」只声明一次。它是事实，不是心跳。
+        self._declare_shell()
         while True:
             try:
                 Warden(self.settings.warden_url, self.settings.warden_token).heartbeat(
@@ -912,6 +964,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         settings=settings,
         state_path=state_path,
         power_ack_sender=Warden(settings.warden_url, settings.warden_token).power_ack,
+        shell_attr_sender=Warden(settings.warden_url, settings.warden_token).set_shell,
     )
     homer.run_forever(once=args.once)
     return 0

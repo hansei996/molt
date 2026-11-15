@@ -103,6 +103,10 @@ class Settings:
     power_requires_permission: bool = True
     shutdown_delay_seconds: int = 60
     timeout: float = DEFAULT_TIMEOUT
+    #: 这台机器**是什么**（声明，不是探测）：role / gpu / wakeable / cost_per_hour。
+    #: 空字典 = 不声明。声明失败只记一行日志 —— 一台能正常搬家的机器
+    #: 不该因为"角色没填好"就罢工。
+    shell_attrs: dict = field(default_factory=dict)
     #: 这台壳自己的 dashboard 监听地址/端口。留空 = 保持快照里原样。
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = DEFAULT_PORT
@@ -199,6 +203,27 @@ class Warden:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return 200 <= resp.status < 300
         except Exception:  # noqa: BLE001 - 心跳永远不该把守护进程弄死
+            return False
+
+    def set_shell(self, shell_id: str, attrs: dict, *, by: str = "") -> bool:
+        """声明「这台机器是什么」。失败只返回 False，绝不抛。
+
+        与心跳分开：心跳每 10 秒一次，这是启动时一次。**它不该因为
+        "role 写错了"就让一台能搬家的机器起不来** —— 记一行日志，人自己会看见。
+        """
+        if not shell_id or not attrs:
+            return False
+        body = json.dumps({"shell": shell_id, **attrs, "by": by}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/shell",
+            data=body,
+            headers={"Content-Type": "application/json", "X-Molt-Token": self.token},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return 200 <= resp.status < 300
+        except Exception:  # noqa: BLE001 - 声明失败不该把守护进程弄死
             return False
 
     def power_ack(self, shell_id: str) -> bool:
@@ -405,6 +430,10 @@ class Agent:
     heartbeat_sender: Optional[Callable[..., bool]] = None
     #: 票用掉之后撕掉它。不注入就不撕（测试与 dry-run 用）。
     power_ack_sender: Optional[Callable[[str], bool]] = None
+    #: 启动时声明「这台机器是什么」。不注入就不声明（测试与 dry-run 用）。
+    shell_attr_sender: Optional[Callable[..., bool]] = None
+    #: 已经声明过没有 —— 只声明一次，不是每轮都发。
+    _shell_declared: bool = False
     port_probe: Optional[Callable[..., bool]] = None
     _probe_takes_port: Optional[bool] = None
     spawner: Optional[Callable[[list, str], int]] = None
@@ -422,6 +451,30 @@ class Agent:
             self.power_ack_sender(self.settings.shell)
         except Exception:  # noqa: BLE001 - 撕票失败不影响已经做出的决定
             pass
+
+    def _declare_shell(self) -> None:
+        """把配置里那几行「这台机器是什么」交给账本。只做一次。
+
+        失败要**说出来**：声明没成功，账本里就查不到这台壳是什么，
+        之后所有按 role 判断的地方都会退回"没登记"。一条日志远好过
+        一个人三天后才发现"我明明填过 role"。
+        """
+        if self._shell_declared or self.shell_attr_sender is None:
+            return
+        attrs = dict(self.settings.shell_attrs or {})
+        if not attrs or not self.settings.shell:
+            self._shell_declared = True
+            return
+        try:
+            ok = bool(self.shell_attr_sender(self.settings.shell, attrs, by="agent"))
+        except Exception as exc:  # noqa: BLE001 - 声明失败不该把守护进程弄死
+            ok = False
+            self.log(f"  ! 声明壳属性时出错：{exc}")
+        if ok:
+            self.log(f"· 已声明这台壳是什么：{', '.join(sorted(attrs))}")
+        else:
+            self.log("  ! 壳属性没送进账本（不影响搬家；role 相关判断会退回「没登记」）")
+        self._shell_declared = True
 
     def _send_heartbeat(self) -> None:
         if self.heartbeat_sender is None:
@@ -1124,6 +1177,8 @@ class Agent:
         return decision, steps
 
     def run_forever(self, *, once: bool = False) -> int:
+        # 「这台机器是什么」只声明一次，不是每轮都发 —— 它是事实，不是心跳。
+        self._declare_shell()
         while True:
             # 每轮先报一次「我还在」。它失败也不影响这一轮做什么。
             self._send_heartbeat()
@@ -1417,6 +1472,7 @@ def main(argv: Optional[list] = None) -> int:
         status_fetcher=warden.status,
         heartbeat_sender=warden.heartbeat,
         power_ack_sender=warden.power_ack,
+        shell_attr_sender=warden.set_shell,
         port_probe=lambda port: _port_open("127.0.0.1", port),
         spawner=_default_spawn,
         pid_probe=lambda: _listening_pid(settings.port),

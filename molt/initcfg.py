@@ -62,6 +62,7 @@ def agent_template(
     log_path: str = "",
     platform_switch: str = "",
     port: int = 6199,
+    shell_attrs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Windows / 裸机壳的配置。
 
@@ -89,6 +90,9 @@ def agent_template(
         "dashboard_host": "127.0.0.1",
         "dashboard_port": int(port),
         "boot_extra": [],
+        # 这台机器是什么。默认 `{"role": "desktop"}`：init 是给"壳"生成配置的，
+        # 而壳十有八九是某人的电脑。填错也不致命 —— 声明失败只是一行日志。
+        "shell_attrs": dict(shell_attrs or {"role": "desktop"}),
     }
 
 
@@ -104,6 +108,7 @@ def homer_template(
     platform_switch: str = "",
     dashboard_host: str = "0.0.0.0",
     dashboard_port: int = 6185,
+    shell_attrs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """NAS / 容器壳的配置。
 
@@ -124,6 +129,8 @@ def homer_template(
         "backup_interval": 600.0,
         "dashboard_host": dashboard_host,
         "dashboard_port": int(dashboard_port),
+        # homer 跑在账本所在的那台机器上，所以默认就是 nas。
+        "shell_attrs": dict(shell_attrs or {"role": "nas"}),
     }
 
 
