@@ -3816,3 +3816,57 @@ CLI 侧保留「不可唤醒」，但测试里的两条断言必须分开写。
 **一条真实教训**：打包脚本原来是手写文件名的，漏掉了 `sync_api.py`、`arrival.py`、`observed.py` —— 它不报错，只是那几个功能在别人的机器上不存在。现在 `dist/_rebuild_bundle.py` 改成扫目录（`plugin/*.py` + `views/**` + `metadata.yaml` + `molt/*.py`），并且 `molt/tests/test_plugin_bundle.py` 里有一条专门钉住「插件 import 的每个 `molt` 子模块都必须有 vendored 副本」。
 
 判据：全量 `1038 passed`；真机 `POST /api/plugin/reload` 之后 `GET /api/v1/plugins/extensions/astrbot_plugin_molt/sync/state` 返回 200（`shell=desktop-h2kgiao`、10 个插件、9 份配置）；页面 `/api/v1/plugins/astrbot_plugin_molt/pages/sync` 返回标题「Molt · 插件配置同步」。
+
+### 14.15 搬家清单曾经是一句谎话：`COPY_ARTIFACTS` 从来没有被读过（2026-11-15）
+
+**现象**：主人说「`astrbot_plugin_private_companion` 是它记忆的核心，配置要同步过去」。
+配置核了哈希，两边一致；可一行代码读下去发现：**这个插件的记忆根本不参与搬家**。
+
+**证据**：`molt/soul.py` 里那张表写着
+
+```python
+COPY_ARTIFACTS = ("cmd_config.json", "mcp_server.json", "skills", "workspaces",
+                  "attachments", "knowledge_base", "plugin_data")
+```
+
+而 `grep -rn COPY_ARTIFACTS --include=*.py` 的结果是：**七处命中，全在注释里**。
+真正的快照逻辑（`molt/cli.py::_snapshot_payload`）只抓三样：
+`data_v4.db`、`plugin_data/astrbot_plugin_memory_companion/memory_companion.db`、
+`cmd_config.json`。所以 private_companion 的 `companions.json`（1.4 MB）、
+`companion-v2.sqlite3`（141 张表）从来都留在原地 —— 而文档说它会跟着走。
+
+**第二层**：`molt/cli.py::cmd_checkout` 里还躺着一份**单独的**热备实现
+（内容几乎一样）。两份实现的分叉点正好在"带什么"：`migrate` 走新版、
+`checkout` 走旧版 —— 同一台机器、两条命令，搬走的东西可以不一样。
+
+**修法**（三处，都是为了"让那句话变成真的"）：
+
+| 位置 | 改了什么 | 为什么 |
+|---|---|---|
+| `soul.MEMORY_PLUGIN_DATA` | 新增：默认要搬的记忆目录（目前只有 `plugin_data/astrbot_plugin_private_companion`） | 名单而不是"整个 plugin_data"：那里面有 172 MB 的 `meme_manager` 表情包缓存，丢了能重建 |
+| `soul.PLUGIN_DATA_CACHE` | 新增：明确不搬的缓存目录 | 写出来让"为什么不搬"可查，而不是让下一个人以为漏了 |
+| `soul.MAX_MEMORY_DIR_BYTES` | 新增：单目录 256 MB 上限，超了**整目录不搬并报错** | 记忆搬一半比没搬更坏：新壳会以为它在 |
+| `soul.copy_memory_dir()` | 新增：目录里 `.sqlite3/.db` 走 `hot_backup()`，其余按字节；跳过 `-wal/-shm/.bak-*/.molt-part` | 活库旁边有 WAL，按字节拷会拷到"一半在 WAL 里"的库 |
+| `cli._add_memory_dirs()` | 新增：把上面这些接进 `_snapshot_payload`，打印"几个文件 / 多少 MB / 几个 sqlite 走 backup()" | 让人看得见它真的搬了 |
+| `cli.cmd_checkout` | **删掉那份重复实现**，改成调 `_snapshot_payload` | 两份实现 = 两条命令搬的东西不一样 = 迟早出"为什么 migrate 带了、checkout 没带" |
+
+**判据**：
+
+- 测试 `molt/tests/test_memory_dirs.py`（9 条）：记忆文件字节一致、manifest 有条目、
+  目录里的 sqlite 走 backup 且 `quick_check=ok`、`-wal/.bak-*/.molt-part` 不搬、
+  缓存目录不搬、`--with-plugin-data` 才带额外插件、超限干净失败（什么都不搬）、
+  `checkout` 与 `migrate` 带的东西一致。全量 **1062 passed**。
+- 真机（Windows，`molt backup --dry-run`，不碰账本）：
+
+```
+· 搬记忆目录 plugin_data/astrbot_plugin_private_companion …
+    ✓ 35 个文件  7.0 MB  其中 15 个 sqlite 走 backup()
+· 打包 …
+    ✓ 9.6 MB  39 个文件
+```
+
+  改之前同一台机器打出来是 **4 个文件 / 9.6 MB**（只有两个库 + 配置）。
+
+**教训**：`grep` 一个常量名，比读它的注释快。**常量放在那里，不等于它被使用**
+—— 这和 `wakeable`（被打印但不参与判断）、`（时间未知）`（字段名错位）是同一族：
+**它们都不是崩溃，是"看起来做了"。**

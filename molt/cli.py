@@ -61,7 +61,9 @@ from .shell import (
 from .soul import (
     Artifact,
     Manifest,
+    collect_memory_dirs,
     collect_runtime_pip,
+    copy_memory_dir,
     hot_backup,
     sha256_of,
     sqlite_check,
@@ -434,96 +436,26 @@ def cmd_checkout(args: argparse.Namespace) -> int:
     gen = be.next_generation()
     dest_dir = be.prepare_generation_dir(gen)
 
-    artifacts: List[Artifact] = []
-
-    # --- 两个必带的库 ---
-    for rel in (
-        "data_v4.db",
-        "plugin_data/astrbot_plugin_memory_companion/memory_companion.db",
-    ):
-        src_db = src / rel
-        if not src_db.exists():
-            warn(f"源端没有 {rel}（这个部署可能没装对应插件）")
-            continue
-
-        dst_db = dest_dir / rel
-        try:
-            info(f"热备 {rel} …")
-            payload = hot_backup(src_db, dst_db)
-        except Fatal as e:
-            bad(str(e))
-            be.release(args.shell, epoch)
-            return 4
-
-        print(
-            f"    {C.GRN}{C.S_OK}{C.R} {payload['bytes'] / 1024 / 1024:.1f} MB  "
-            f"{payload['backup_seconds']:.3f}s  "
-            f"{payload['table_count']} 张表  "
-            f"quick_check={payload['quick_check']}  "
-            f"{C.DIM}{payload['sha256'][:16]}…{C.R}"
-        )
-
-        artifacts.append(
-            Artifact(
-                relpath=rel,
-                kind="sqlite",
-                bytes=payload["bytes"],
-                sha256=payload["sha256"],
-                quick_check=payload["quick_check"],
-                table_count=payload["table_count"],
-                backup_seconds=payload["backup_seconds"],
-            )
-        )
-
-    if not artifacts:
-        bad("一个库都没备份到，这次迁徙没有意义")
-        be.release(args.shell, epoch)
-        return 4
-
-    # --- 配置文件 ---
-    cfg = src / "cmd_config.json"
-    if cfg.exists():
-        info("复制 cmd_config.json …")
-        dst_cfg = dest_dir / "cmd_config.json"
-        dst_cfg.parent.mkdir(parents=True, exist_ok=True)
-        dst_cfg.write_bytes(cfg.read_bytes())
-        artifacts.append(
-            Artifact(
-                relpath="cmd_config.json",
-                kind="copy",
-                bytes=dst_cfg.stat().st_size,
-                sha256=sha256_of(dst_cfg),
-            )
-        )
-        print(f"    {C.GRN}{C.S_OK}{C.R} {dst_cfg.stat().st_size} B")
-
-    # --- manifest ---
-    # data 必须传进去：NAS 上源码在容器里，宿主机只有 data/，
-    # 版本信息只能从 data/cmd_config.json 读。不传就永远是 unknown。
-    ident = probe_identity(
-        Path(args.astrbot_src) if args.astrbot_src else None,
-        data_path=src,
-    )
-    site_pkgs = src / "site-packages"
-    runtime_pip = collect_runtime_pip(site_pkgs)
-
-    m = Manifest(
+    # 【2026-11-15】这里原来是**第二份**热备实现（和 `_snapshot_payload` 各写一遍）。
+    # 两份的差别在记忆目录上直接变成 bug：`molt migrate` 走的是新版、
+    # `molt checkout` 走的是旧版，于是"同一台机器、两条命令、搬走的东西不一样"。
+    # 现在只留一条实现。
+    rc, artifacts, _m = _snapshot_payload(
+        src=src,
+        dest_dir=dest_dir,
+        astrbot_src=getattr(args, "astrbot_src", None),
+        target=getattr(args, "target", "") or "",
         generation=gen,
-        created_at=time.time(),
-        source_host=ident.hostname,
-        source_root=str(src),
-        protocol_version=PROTOCOL_VERSION,
-        astrbot_version=ident.astrbot_version or "unknown",
-        platform=ident.platform,
-        python_version=ident.python_version,
-        artifacts=artifacts,
-        runtime_pip=runtime_pip,
-        target_shell=getattr(args, "target", "") or "",
+        with_plugin_data=tuple(getattr(args, "with_plugin_data", ()) or ()),
     )
-    m.save(dest_dir / "manifest.json")
+    if rc != 0:
+        be.release(args.shell, epoch)
+        return rc
+
+    total = sum(a.bytes for a in artifacts)
+    runtime_pip = _m.runtime_pip if _m is not None else []
 
     head("结论")
-    total = sum(a.bytes for a in artifacts)
     kv("generation", gen)
     kv("产出目录", dest_dir)
     kv("总字节", f"{total / 1024 / 1024:.1f} MB")
@@ -979,6 +911,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             astrbot_src=getattr(args, "astrbot_src", None),
             target=args.target,
             want_archive=not args.no_archive,
+            with_plugin_data=tuple(getattr(args, "with_plugin_data", ()) or ()),
         )
         if rc != 0:
             _resume_source("热备或打包失败")
@@ -1071,6 +1004,46 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
 
 
+def _add_memory_dirs(
+    *,
+    src: Path,
+    dest_dir: Path,
+    artifacts: List[Artifact],
+    extra: "Sequence[str]" = (),
+    quiet: bool = False,
+) -> int:
+    """把"记忆类" plugin_data 目录也搬进这份快照。返回 0 或 4。
+
+    这一条以前**根本不存在**：`COPY_ARTIFACTS` 里写着 plugin_data，
+    但没有任何代码读它，于是 private_companion 的记忆每次都留在原地。
+    见 `soul.MEMORY_PLUGIN_DATA` 上面的更正说明。
+    """
+    rels = collect_memory_dirs(src, extra=extra)
+    if not rels:
+        return 0
+    for rel in rels:
+        if not quiet:
+            info(f"搬记忆目录 {rel} …")
+        try:
+            got = copy_memory_dir(src, rel, dest_dir)
+        except NeedsHuman as e:
+            bad(str(e))
+            return 4
+        except Fatal as e:
+            bad(str(e))
+            return 4
+        artifacts.extend(got)
+        if not quiet:
+            total = sum(a.bytes for a in got)
+            sqlite_count = sum(1 for a in got if a.kind == "sqlite")
+            print(
+                f"    {C.GRN}{C.S_OK}{C.R} {len(got)} 个文件  "
+                f"{total / 1024 / 1024:.1f} MB  "
+                f"{C.DIM}其中 {sqlite_count} 个 sqlite 走 backup(){C.R}"
+            )
+    return 0
+
+
 def _snapshot_payload(
     *,
     src: Path,
@@ -1079,6 +1052,7 @@ def _snapshot_payload(
     target: str,
     generation: int,
     quiet: bool = False,
+    with_plugin_data: "Sequence[str]" = (),
 ) -> "tuple[int, List[Artifact], Optional[Manifest]]":
     """把"灵魂"热备进 `dest_dir` 并写好 manifest。
 
@@ -1149,6 +1123,16 @@ def _snapshot_payload(
         if not quiet:
             print(f"    {C.GRN}{C.S_OK}{C.R} {dst_cfg.stat().st_size} B")
 
+    rc = _add_memory_dirs(
+        src=src,
+        dest_dir=dest_dir,
+        artifacts=artifacts,
+        extra=with_plugin_data,
+        quiet=quiet,
+    )
+    if rc != 0:
+        return rc, artifacts, None
+
     ident = probe_identity(
         Path(astrbot_src) if astrbot_src else None,
         data_path=src,
@@ -1180,6 +1164,7 @@ def _do_checkout(
     astrbot_src: Optional[str],
     target: str,
     want_archive: bool,
+    with_plugin_data: "Sequence[str]" = (),
 ) -> "tuple[int, int, Path, Optional[Dict[str, Any]]]":
     """热备 + 打包。拆出来是为了让 `migrate` 的租约管理保持扁平。
 
@@ -1194,6 +1179,7 @@ def _do_checkout(
         astrbot_src=astrbot_src,
         target=target,
         generation=gen,
+        with_plugin_data=with_plugin_data,
     )
     if rc != 0:
         return rc, gen, dest_dir, None
@@ -1257,6 +1243,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
         astrbot_src=args.astrbot_src,
         target="",
         generation=latest,
+        with_plugin_data=tuple(getattr(args, "with_plugin_data", ()) or ()),
     )
     if rc != 0 or manifest is None:
         return rc or 4
@@ -2800,6 +2787,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--root", help="Warden 根目录")
     s.add_argument("--astrbot-src", help="AstrBot 源码目录")
     s.add_argument("--target", help="打算交给哪个壳（可留空，反正还不知道它开机没有）")
+    s.add_argument(
+        "--with-plugin-data",
+        action="append",
+        metavar="插件名",
+        help="除了默认的记忆目录，再带走这个插件的 plugin_data（可重复）",
+    )
     s.set_defaults(func=cmd_checkout)
 
     # verify
@@ -2887,6 +2880,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="直接给一个 dashboard JWT（不给 --control-config 时才用）",
     )
+    s.add_argument(
+        "--with-plugin-data",
+        action="append",
+        metavar="插件名",
+        help="除了默认的记忆目录，再带走这个插件的 plugin_data（可重复）",
+    )
     s.set_defaults(func=cmd_migrate)
 
     # land
@@ -2941,6 +2940,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--astrbot-src", default="", help="AstrBot 源码目录（用来读出它的版本）")
     s.add_argument("--dry-run", action="store_true", help="只打包不上传")
     s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.add_argument(
+        "--with-plugin-data",
+        action="append",
+        metavar="插件名",
+        help="除了默认的记忆目录，再带走这个插件的 plugin_data（可重复）",
+    )
     s.set_defaults(func=cmd_backup)
 
     # backups

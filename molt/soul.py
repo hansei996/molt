@@ -57,6 +57,12 @@ REQUIRED_SQLITE_ARTIFACTS = (
 )
 
 # 这些是目录/文件，整体同步即可，没有事务语义。
+#
+# 【2026-11-15 更正】这张表曾经是一句谎话：`_snapshot_payload()` 从来没读过它，
+# 真正被搬走的只有 data_v4.db + memory_companion.db + cmd_config.json。
+# 结果是 private_companion（"记忆核心"）的 plugin_data 每次都留在原地，
+# 而文档里写着它会跟着走。现在由 `collect_memory_dirs()` 只读它的
+# `plugin_data` 那一项，其余目录仍然**不搬**（见那一项下面的说明）。
 COPY_ARTIFACTS = (
     "cmd_config.json",
     "mcp_server.json",
@@ -66,6 +72,121 @@ COPY_ARTIFACTS = (
     "knowledge_base",
     "plugin_data",
 )
+
+#: 搬家时**真的**要带走的 plugin_data 子目录（相对 data/）。
+#:
+#: 为什么是一个名单而不是"整包 plugin_data"：`plugin_data` 里有 172 MB 的
+#: `meme_manager`（表情包缓存，丢了能重建）。把整包塞进每一次快照，会让
+#: "半小时一次的中途备份"从 28 MB 变成 200 MB，而其中 86% 是可以重新生成的缓存。
+#: 名单里的这些是**记忆**：丢了就真的没了。
+MEMORY_PLUGIN_DATA = (
+    "plugin_data/astrbot_plugin_private_companion",
+)
+
+#: 明确不搬的 plugin_data 子目录（纯缓存）。写出来是为了让"为什么不搬"可查，
+#: 而不是让下一个人以为漏了。
+PLUGIN_DATA_CACHE = (
+    "plugin_data/meme_manager",
+)
+
+#: 单个记忆目录的体积上限。超了就**报警并跳过整个目录**，
+#: 而不是悄悄搬十分钟 —— 半搬过去的记忆比没搬更坏（新壳以为它在）。
+MAX_MEMORY_DIR_BYTES = 256 * 1024 * 1024
+
+#: 这些后缀按 SQLite 处理（用 backup() 而不是字节拷贝，避开 WAL）。
+_SQLITE_SUFFIXES = (".sqlite3", ".db")
+
+#: 这些文件名/后缀永远不搬：WAL 会被 backup() 合并；`.bak-*` 是历史备份；
+#: `-part`/`-before-sync` 是没写完或同步前的临时物。
+_MEMORY_SKIP_MARKERS = ("-wal", "-shm", ".bak-", ".molt-part", ".molt-before-sync")
+
+
+def is_memory_cache(rel: str) -> bool:
+    """这个 plugin_data 子目录是不是"纯缓存、不搬"。"""
+    rel = rel.rstrip("/")
+    return any(rel == c.rstrip("/") or rel.startswith(c.rstrip("/") + "/") for c in PLUGIN_DATA_CACHE)
+
+
+def collect_memory_dirs(data_dir: Path, *, extra: Iterable[str] = ()) -> List[str]:
+    """这次搬家要带走哪些 plugin_data 记忆目录。
+
+    规则：`MEMORY_PLUGIN_DATA` 里存在的 + 调用方显式用 `--with-plugin-data`
+    追加的（`extra` 可以是 `astrbot_plugin_xxx` 也可以带 `plugin_data/` 前缀），
+    去掉缓存名单与不存在的目录。返回的每一项都以 `plugin_data/` 开头。
+    """
+    wanted: List[str] = list(MEMORY_PLUGIN_DATA)
+    for item in extra:
+        name = str(item).strip().strip("/")
+        if not name:
+            continue
+        wanted.append(name if name.startswith("plugin_data/") else f"plugin_data/{name}")
+
+    out: List[str] = []
+    for rel in wanted:
+        rel = rel.rstrip("/")
+        if rel in out or is_memory_cache(rel):
+            continue
+        if not (data_dir / rel).is_dir():
+            continue
+        out.append(rel)
+    return out
+
+
+def _memory_skip(name: str) -> bool:
+    return any(name.endswith(marker) or marker in name for marker in _MEMORY_SKIP_MARKERS)
+
+
+def copy_memory_dir(data_dir: Path, rel: str, dest_dir: Path) -> List[Artifact]:
+    """把一个记忆目录搬进 `dest_dir`，返回 manifest 条目。
+
+    SQLite 文件走 `hot_backup()`（它会把 WAL 合并进目标，并做 quick_check），
+    其余文件按字节拷贝。`.bak-*` / `-wal` / `-shm` / 临时文件不搬 ——
+    搬过去只会让新壳多出一堆"看起来像崩溃现场"的残留。
+    """
+    src_root = data_dir / rel
+    dst_root = dest_dir / rel
+    if not src_root.is_dir():
+        return []
+
+    total = sum(p.stat().st_size for p in src_root.rglob("*") if p.is_file())
+    if total > MAX_MEMORY_DIR_BYTES:
+        raise NeedsHuman(
+            f"{rel} 有 {total / 1024 / 1024:.0f} MB，超过单目录上限 "
+            f"{MAX_MEMORY_DIR_BYTES / 1024 / 1024:.0f} MB。\n"
+            "     记忆搬了一半比没搬更坏（新壳会以为它在）。请先确认这个目录里"
+            "是不是混进了缓存，或者显式调大上限。"
+        )
+
+    artifacts: List[Artifact] = []
+    for src in sorted(src_root.rglob("*")):
+        if not src.is_file():
+            continue
+        if _memory_skip(src.name):
+            continue
+        part = src.relative_to(src_root)
+        dst = dst_root / part
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        relpath = f"{rel}/{part.as_posix()}"
+
+        if src.suffix.lower() in _SQLITE_SUFFIXES:
+            payload = hot_backup(src, dst)
+            artifacts.append(
+                Artifact(
+                    relpath=relpath,
+                    kind="sqlite",
+                    bytes=payload["bytes"],
+                    sha256=payload["sha256"],
+                    quick_check=payload["quick_check"],
+                    table_count=payload["table_count"],
+                    backup_seconds=payload["backup_seconds"],
+                )
+            )
+        else:
+            dst.write_bytes(src.read_bytes())
+            artifacts.append(
+                Artifact(relpath=relpath, kind="copy", bytes=dst.stat().st_size, sha256=sha256_of(dst))
+            )
+    return artifacts
 
 
 def sha256_of(path: Path, chunk: int = 1 << 20) -> str:

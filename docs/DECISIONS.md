@@ -182,3 +182,22 @@ D4 的补充（2026-11-15）：**页面上那个同步按钮只写这台机器**
 配置顶层键 1008 vs 15；7.x 的 `plugin_data` 里还有一条 Windows 绝对路径
 （`.storage-backend-state.json` 的 `sqlite_path`）。**这两台机器上的"同一只鱼"
 目前能力集不同**，而迁移不会告诉你这件事 —— 现在会了。
+
+
+## D7 · 搬家默认带走哪些 plugin_data（已定案，2026-11-15，主人说「改」）
+
+**背景**：`astrbot_plugin_private_companion` 的记忆在 `plugin_data/` 里，而快照代码
+从来没搬过它（`COPY_ARTIFACTS` 是死代码）。主人确认「这个插件是它记忆的核心」，
+并要求改掉。
+
+**现在的默认**（可推翻，改动请写在这里）：
+
+| 项 | 现在的做法 | 为什么 |
+|---|---|---|
+| 默认名单 | `plugin_data/astrbot_plugin_private_companion` | 记忆，丢了就真没了 |
+| 缓存名单 | `plugin_data/meme_manager`（172 MB 表情包） | 丢了能重建；每次搬家多搬 172 MB 不值 |
+| 单目录上限 | 256 MB，超了整目录不搬并报错 | 半搬过去的记忆比没搬更坏 |
+| 扩展方式 | `molt migrate/backup/checkout --with-plugin-data 插件名` | 不把"哪些算记忆"写死在代码里 |
+
+**没有替你决定的一件事**：`workspaces/`、`attachments/`、`knowledge_base/` 仍然**不搬**
+（它们也在那张死清单里）。要搬的话同样应该走"名单"，但那是另一个决定。

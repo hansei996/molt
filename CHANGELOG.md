@@ -72,6 +72,12 @@ python tools\reload-plugin.py --config G:\molt-fish\data\cmd_config.json `
 - 如果连备份都没了：`data/config/` 里的配置会被插件重新生成一份默认值
   （代价是那台的个性化设置丢了，但插件不会坏）。
 
+- **搬家会带走"记忆类"的 plugin_data**（2026-11-15 决定）：
+  `astrbot_plugin_private_companion` 的 `companions.json` 与 141 张表的 `companion-v2.sqlite3`
+  现在真的会跟着快照走（此前 `COPY_ARTIFACTS` 是一张从没被代码读过的清单）。
+  缓存目录（`meme_manager`）不搬；`--with-plugin-data 插件名` 可以追加；
+  单个记忆目录超过 256 MB 会**整目录不搬**并报错，而不是搬一半。
+
 ### 已知限制
 
 - **插件版本漂移会被念出来**：同步包里带每个插件的版本（\metadata.yaml\ 的
