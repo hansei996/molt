@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """NAS 侧的"接住它"——把回家的四步变成一次轮询。
 
 ## 它和 `tools/molt-agent.py` 的区别
@@ -197,7 +197,7 @@ class Warden:
     ) -> bool:
         """告诉账本「我还在」。
 
-        为什么需要：账本其它字段都只记「谁取走了第几代」，没有一处回答
+        为什么需要：账本其它字段都只记「谁取走了哪一份快照」，没有一处回答
         「现在谁还在跑」。于是鱼被拔电之后，`molt status` 看起来一切正常 ——
         它分不清「鱼死了」和「鱼闲着」。
         失败只返回 False，**绝不抛**：一次心跳丢了不影响任何交接。
@@ -342,15 +342,15 @@ def decide(status: Dict[str, Any], *, shell: str, state: Dict[str, Any]) -> Deci
 
     target = str(latest.get("target_shell") or "")
     if target and target != shell:
-        return Decision("idle", reason=f"第 {gen} 代是给 {target} 的，不是我")
+        return Decision("idle", reason=f"快照 #{gen} 是给 {target} 的，不是我")
 
     consumed = str(latest.get("consumed_by") or "")
     if consumed == shell:
-        return Decision("idle", reason=f"第 {gen} 代我已经落过了")
+        return Decision("idle", reason=f"快照 #{gen} 我已经落过了")
 
     if consumed and consumed != shell:
         return Decision("wait", generation=gen,
-                        reason=f"第 {gen} 代已经被 {consumed} 消费，等下一轮")
+                        reason=f"快照 #{gen} 已经被 {consumed} 消费，等下一轮")
 
     lease = status.get("lease") or {}
     holder = str((lease or {}).get("holder") or "")
@@ -360,9 +360,9 @@ def decide(status: Dict[str, Any], *, shell: str, state: Dict[str, Any]) -> Deci
 
     if int(state.get("landed_generation") or 0) == gen:
         return Decision("idle", generation=gen,
-                        reason=f"第 {gen} 代我落过了，账本可能还没刷新")
+                        reason=f"快照 #{gen} 我落过了，账本可能还没刷新")
 
-    return Decision("land", generation=gen, reason=f"第 {gen} 代是给我的，该落位了")
+    return Decision("land", generation=gen, reason=f"快照 #{gen} 是给我的，该落位了")
 
 
 # ---------------------------------------------------------------- 干活
@@ -611,7 +611,7 @@ class Homer:
             payload = {"broken": True}
         generation = payload.get("generation")
         started = payload.get("started_at") or "时间不明"
-        which = f"第 {generation} 代" if generation else "某一代"
+        which = f"快照 #{generation}" if generation else "某一份快照"
         return (
             f"上一次落位没有做完（{which}，开始于 {started}）：{marker} 还在。"
             " 现在起容器会让 AstrBot 去读半份的库；先落一次位把它收尾。"
@@ -655,7 +655,7 @@ class Homer:
             tail = (cp.stdout or "") + (cp.stderr or "")
             self.log(f"  ! land 失败（退出码 {cp.returncode}）：{tail.strip()[-500:]}")
             return False
-        self.log(f"  ✓ 落位完成：第 {generation} 代")
+        self.log(f"  ✓ 落位完成：快照 #{generation}")
         return True
 
     def do_switch_on(self) -> bool:
@@ -881,7 +881,7 @@ class Homer:
         if started:
             state["needs_start"] = False
             self.save_state(state)
-            # 4.5) 让它自己记一笔"我是第几代到这儿来的"。
+            # 4.5) 让它自己记一笔"我是哪一份快照到这儿来的"。
             #      它失败**不影响交接结论** —— 鱼已经在说话了，少的只是一行档案。
             self.do_observe()
             self.maybe_backup(state, status)

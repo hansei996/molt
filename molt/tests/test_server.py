@@ -1,4 +1,4 @@
-"""`WardenServer` 与 `WardenClient` 的测试。
+﻿"""`WardenServer` 与 `WardenClient` 的测试。
 
 这里有一个刻意的选择：**大部分测试直接调 `dispatch()`，不起套接字**。
 理由不是图快，而是——测一个端点的业务语义不该依赖 TCP 的时序；
@@ -467,5 +467,5 @@ def test_timeline_page_renders_the_same_history_as_the_json(srv: WardenServer) -
         {"shell_id": "win-a", "epoch": lease["epoch"], "manifest": _manifest(1)},
     )
     page = srv.dispatch("GET", "/timeline", None).html
-    assert page and "第 1 代" in page
+    assert page and "第 1 次搬家" in page
     assert "<!doctype html>" in page

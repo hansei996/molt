@@ -1,4 +1,4 @@
-"""把账本里的历史渲染成一页可以直接看的 HTML。
+﻿"""把账本里的历史渲染成一页可以直接看的 HTML。
 
 ## 为什么要有这个模块
 
@@ -28,6 +28,8 @@ import time
 
 import html as _html
 from typing import Any, Dict, Iterable, List
+
+from .language import move_count, snapshot_tag
 
 
 def esc(value: Any) -> str:
@@ -131,7 +133,7 @@ def _gen_block(gen: Dict[str, Any]) -> str:
 
     return (
         f'<div class="gen {state_cls}">'
-        f'<div class="title">第 {esc(number)} 代<span class="when">{esc(when)}</span>'
+        f'<div class="title">{esc(move_count(number))}<span class="when">{esc(when)}</span>'
         f'<span class="badge {"ok" if state_cls == "done" else "warn"}">{esc(state_text)}</span></div>'
         + "".join(rows)
         + "</div>"
@@ -149,7 +151,7 @@ def _backups_table(backups: Iterable[Dict[str, Any]]) -> str:
             f'<td>{esc(b.get("created_at_readable") or "—")}</td>'
             f'<td>{esc(b.get("shell") or "—")}</td>'
             f'<td>{esc(_human_bytes(b.get("bytes")))}</td>'
-            f'<td>第 {esc(b.get("generation") or 0)} 代之后</td>'
+            f'<td>{esc(snapshot_tag(b.get("generation") or 0))}之后</td>'
             f'<td><code>{esc(b.get("name") or "")}</code></td>'
             "</tr>"
         )
@@ -176,7 +178,7 @@ def _beats_table(beats: Dict[str, Any]) -> str:
             f'<td><span class="badge {cls}">{text}</span></td>'
             f'<td>{esc(age)}</td>'
             f'<td>{esc(beat.get("note") or "—")}</td>'
-            f'<td>第 {esc(beat.get("generation") or 0)} 代</td>'
+            f'<td>{esc(snapshot_tag(beat.get("generation") or 0))}</td>'
             "</tr>"
         )
     return (
@@ -314,8 +316,8 @@ def demo_history() -> Dict[str, Any]:
         "heartbeats": heartbeats,
         "log": [
             "[示例] 19:02:11 租约：nas-box -> epoch 3（90 秒）",
-            "[示例] 19:02:34 收到第 3 代快照，27.3 MB，sha256 校验通过",
-            "[示例] 19:02:34 已登记第 3 代：目标壳 my-laptop",
+            "[示例] 19:02:34 收到快照 #3，27.3 MB，sha256 校验通过",
+            "[示例] 19:02:34 已登记快照 #3：目标壳 my-laptop",
         ],
     }
 

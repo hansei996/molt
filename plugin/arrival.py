@@ -1,4 +1,4 @@
-"""落地之后的第一句话，前面带一句「我刚从哪儿过来」。
+﻿"""落地之后的第一句话，前面带一句「我刚从哪儿过来」。
 
 ## 为什么挂在这句话上
 
@@ -12,7 +12,7 @@ QQ 官方机器人的资料页、昵称、签名只能在 QQ 开放平台后台�
 
 这条就挂在它说的那句话上：搬家落地之后的**第一句回复**，前面多一行
 
-    （我刚从 UGREEN-776B 搬过来，这是第 13 代。）
+    （我刚从 UGREEN-776B 那边过来 —— 中间睡了一觉。）
 
 ## 为什么不用一条通知消息
 
@@ -52,8 +52,8 @@ def compose_arrival_note(
     """那句话本身。末尾带换行，因为它要接在真正的回复前面。"""
     source = (from_label or "").strip() or prettify_shell(from_shell)
     if source:
-        return f"（我刚从 {source} 搬过来，这是第 {generation} 代。）\n"
-    return f"（我刚搬到这台机器上，这是第 {generation} 代。）\n"
+        return f"（我刚从 {source} 那边过来 —— 中间睡了一觉。）\n"
+    return f"（我刚搬到这台机器上 —— 中间睡了一觉。）\n"
 
 
 def prettify_shell(shell: str) -> str:

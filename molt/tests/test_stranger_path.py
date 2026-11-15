@@ -1,4 +1,4 @@
-"""陌生人冷启动复核钉住的三件事（v0.7）。
+﻿"""陌生人冷启动复核钉住的三件事（v0.7）。
 
 这三条测试的存在理由都一样：**"装得起来"是一个会退化的性质**，而它退化的
 时候不会有任何红字 —— 只有别人在他自己的机器上装到一半撞墙。
@@ -91,7 +91,7 @@ def test_demo_timeline_renders_a_marked_example(tmp_path):
     assert "示例数据" in page
     assert "它搬过几次家 · 示例" in page
     # 三条代次 + 备份 + 心跳都在，说明用的是同一套模板而不是另画一张图
-    assert "第 3 代" in page and "中途备份" in page and "现在谁还在报" in page
+    assert "第 3 次搬家" in page and "中途备份" in page and "现在谁还在报" in page
 
 
 def test_demo_data_does_not_leak_this_machines_real_shell_names():

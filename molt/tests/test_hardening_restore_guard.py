@@ -1,4 +1,4 @@
-"""v0.4 硬化：守护进程必须在"上次落位没做完"时拒绝启动鱼。
+﻿"""v0.4 硬化：守护进程必须在"上次落位没做完"时拒绝启动鱼。
 
 `molt land` 的原子性分两半：
 
@@ -113,7 +113,7 @@ def test_agent_refuses_to_boot_when_the_last_restore_did_not_finish(tmp_path):
 
     assert result.ok is False
     assert spawned == [], "半份的库面前不许把 AstrBot 拉起来"
-    assert "第 12 代" in result.detail
+    assert "快照 #12" in result.detail
     assert "molt land" in result.detail
 
 
@@ -194,7 +194,7 @@ def test_homer_refuses_to_start_the_container_after_a_half_restore(tmp_path):
     assert h.do_start() is False
     starts = [c for c in calls if c[:2] == ["docker", "start"]]
     assert starts == [], "容器一起来 AstrBot 就会去开那个半份的库"
-    assert "第 9 代" in h.restore_marker_reason()
+    assert "快照 #9" in h.restore_marker_reason()
 
 
 def test_homer_already_running_container_wins_over_the_marker(tmp_path):

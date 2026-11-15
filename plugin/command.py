@@ -1,4 +1,4 @@
-"""把"发一条消息"变成"搬一次家"——但只到"提议"为止的那一半。
+﻿"""把"发一条消息"变成"搬一次家"——但只到"提议"为止的那一半。
 
 ## 为什么这里没有一行 `astrbot` 导入
 
@@ -564,7 +564,7 @@ class MoltMover:
         lines = self._where_lines(st)
         lines += [
             "",
-            f"账本 epoch {st.get('current_epoch', '?')}，已登记 {st.get('generation_count', '?')} 代。",
+            f"账本 epoch {st.get('current_epoch', '?')}，已登记 {st.get('generation_count', '?')} 份快照。",
         ]
         # 账本的租约视图用的是 `holder`（没有租约时是 {"state": "no-lease"}）。
         # 早先这里读的是 `shell_id`，于是永远走 else 分支、永远说"没有租约" ——
@@ -581,7 +581,7 @@ class MoltMover:
             last = gens[-1]
             if isinstance(last, dict):
                 lines.append(
-                    f"最新一代 {last.get('generation', '?')}：{last.get('pushed_by', '?')} → "
+                    f"最近一次搬家 {last.get('generation', '?')}：{last.get('pushed_by', '?')} → "
                     f"{last.get('target_shell') or '（未指定）'}，"
                     f"{last.get('data_bytes', '?')} 字节。"
                 )
@@ -628,10 +628,10 @@ class MoltMover:
             return Reply("账本问不到，我不知道自己是从哪台机器搬过来的，所以不敢让你关任何机器。")
         gen = st.get("latest_generation") or {}
         if str(gen.get("consumed_by") or "").strip() != cfg.shell:
-            return Reply("最近这一代不是我取的 —— 我不知道哪台机器是你的旧壳，不猜。")
+            return Reply("最近这一次搬家不是我取的 —— 我不知道哪台机器是你的旧壳，不猜。")
         source = str(gen.get("pushed_by") or "").strip()
         if not source or source == cfg.shell:
-            return Reply("这一代是我自己推出去的，没有「我刚离开的那台机器」。")
+            return Reply("这一次是我自己推出去的，没有「我刚离开的那台机器」。")
         if not self._post_power(
             cfg,
             shell=source,
@@ -670,7 +670,7 @@ class MoltMover:
         return (
             f"迁徙入口当前{state}。\n"
             "· `/molt where` —— 我现在在哪台机器上、谁还活着\n"
-            "· `/molt status` —— 上面那些，加上账本第几代、租约在谁手上\n"
+            "· `/molt status` —— 上面那些，加上账本搬过几次、租约在谁手上\n"
             "· `/molt go` —— 提议搬去 " + (cfg.target or "（target 未配）") + "，我会问你确认\n"
             "· `/molt confirm` —— 真的搬（会先把我的嘴闭上，再说再见）\n"
             "· `/molt cancel` —— 取消还没确认的提议\n"

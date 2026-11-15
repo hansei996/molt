@@ -1,4 +1,4 @@
-"""T3：manifest 校验加固。
+﻿"""T3：manifest 校验加固。
 
 ## 这一条在防什么
 
@@ -236,7 +236,7 @@ def test_land_refuses_when_the_manifest_names_a_different_generation(
     out = capsys.readouterr().out
 
     assert rc == 6, "代次对不上必须拒收"
-    assert "第 2 代" in out and "第 1 代" in out
+    assert "快照 #2" in out and "快照 #1" in out
     assert not (target / "data_v4.db").exists(), "拒收之后不许留下任何文件"
 
 

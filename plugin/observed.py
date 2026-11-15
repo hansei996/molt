@@ -54,7 +54,7 @@ def compose_observation(
     port: int = 0,
 ) -> str:
     """写成第一人称的观察。缺的字段整句消失，不写占位符、不写"大约"。"""
-    lines = [f"我观察到：我在第 {generation} 代搬到了这台机器上（{shell or '这台壳'}）。"]
+    lines = [f"我观察到：我搬到了这台机器上（{shell or '这台壳'}），中间睡了一觉。"]
 
     if pushed_by and pushed_by != shell:
         lines.append(f"上一站在 {pushed_by}，是那边把快照推过来的。")
@@ -67,7 +67,9 @@ def compose_observation(
     if port:
         facts.append(f"dashboard 在 127.0.0.1:{port}")
     if facts:
-        lines.append("。" + "，".join(facts) + "。")
+        # 这里以前是 "。" + … —— 上一行本来就以句号结尾，于是拼出「。。」。
+        # 一句话自己带着句号，就不该再由别人替它加一个。
+        lines.append("，".join(facts) + "。")
 
     if consumed_at:
         lines.append(f"账本记的落地时间是 {_when_text(consumed_at)}。")

@@ -1,4 +1,4 @@
-"""molt 命令行。
+﻿"""molt 命令行。
 
 ## 为什么先做 CLI 而不是 API
 
@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__, initcfg
 from .backend import LocalBackend, RemoteBackend, open_backend
+from .language import move_count, move_count_after, snapshot_tag
 from .epoch import DEFAULT_LEASE_TTL_SECONDS
 from .errors import (
     EpochAhead,
@@ -302,7 +303,7 @@ def _backend(args: argparse.Namespace):
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """现在是谁在线、第几代、心跳多久前。"""
+    """现在是谁在线、搬过几次、心跳多久前。"""
     try:
         be = _backend(args)
     except ValueError as e:
@@ -360,7 +361,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             if note:
                 dim(f"      它的角色：{note}")
             if beat.get("generation"):
-                dim(f"      它手里是第 {beat['generation']} 代")
+                dim(f"      它手里是{snapshot_tag(beat['generation'])}")
         stale = [k for k, v in beats.items() if v.get("stale")]
         live = len(beats) - len(stale)
         print()
@@ -1288,7 +1289,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
 
     ok(f"已收进 backups/：{meta.get('name', '?')}")
     kv("字节", meta.get("bytes", 0))
-    kv("第几代之后", f"第 {latest} 代（这一份是它之后的全部增量）")
+    kv("第几次搬家之后", f"{move_count_after(latest)}（这一份是它之后的全部增量）")
     dim("  它不会出现在 molt status 的迁徙历史里 —— 备份不是交接。")
     return 0
 
@@ -1589,13 +1590,13 @@ def cmd_land(args: argparse.Namespace) -> int:
     # 不是那一代的。两种情况下落位都会让本地库变成"账本说第 N 代，实际是
     # 第 7 代的内容"——之后每一次 `decide()` 都基于一个错的代次做判断。
     if generation and int(generation) != m.generation:
-        bad(f"manifest 说的是第 {m.generation} 代，但你要取的是第 {int(generation)} 代")
+        bad(f"manifest 说的是{snapshot_tag(m.generation)}，但你要取的是{snapshot_tag(generation)}")
         dim("  这两者对不上，说明归档和账本里的那一条不是同一个东西。")
-        dim("  用 --generation N 时，归档必须来自账本里第 N 代；换一个代次，或者查账本。")
+        dim("  用 --generation N 时，归档必须来自账本里同一份快照；换一份，或者查账本。")
         return 6
 
     print()
-    info(f"来源 {m.source_host} ({m.platform}) / AstrBot {m.astrbot_version} / 第 {m.generation} 代")
+    info(f"来源 {m.source_host} ({m.platform}) / AstrBot {m.astrbot_version} / {snapshot_tag(m.generation)}")
 
     problems = m.verify_against(gen_dir)
     if problems:
@@ -2017,7 +2018,7 @@ def cmd_timeline(args: argparse.Namespace) -> int:
     ok(f"已经搬过 {len(generations)} 次，完成落地 {done} 次。")
     if generations:
         latest = generations[-1]
-        kv("最新一代", f"第 {latest.get('generation')} 代")
+        kv("最近一次搬家", move_count(latest.get("generation")))
         kv("从哪来", str(latest.get("source_host") or "—"))
         kv("谁取走的", str(latest.get("consumed_by") or "还没人取走"))
     kv("搬到", str(out.resolve()))
@@ -2176,7 +2177,7 @@ def cmd_observe(args: argparse.Namespace) -> int:
     if payload.get("status") == "error" or (not action and not payload.get("success")):
         warn(f"这只壳说：{payload.get('message') or payload.get('error') or '没听懂'}")
     if action == "recorded":
-        ok(f"记下了：第 {payload.get('generation')} 代（走 {payload.get('via')}）")
+        ok(f"记下了：{move_count(payload.get('generation'))}（走 {payload.get('via')}）")
     elif action == "skip":
         dim(f"不用记：{payload.get('reason') or ''}")
     else:
@@ -2582,7 +2583,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_shell)
 
     # status
-    s = add("status", "现在是谁在线、第几代")
+    s = add("status", "现在是谁在线、搬过几次")
     s.add_argument("--json", action="store_true")
     s.add_argument("--root", help="Warden 根目录")
     s.set_defaults(func=cmd_status)
@@ -2904,7 +2905,7 @@ def build_parser() -> argparse.ArgumentParser:
     # observe
     s = add(
         "observe",
-        "让这只壳自己看一眼账本，把「我在第 N 代搬到了这里」记成它自己的观察",
+        "让这只壳自己看一眼账本，把「我搬到了这里」记成它自己的观察",
     )
     s.add_argument("--config", required=True, help="这只壳的 cmd_config.json（拿 dashboard 凭据）")
     s.add_argument("--base", default="http://127.0.0.1:6199", help="这只壳的 dashboard 地址")

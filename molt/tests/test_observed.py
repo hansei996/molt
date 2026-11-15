@@ -50,7 +50,8 @@ def test_compose_says_only_what_it_knows():
         cwd="G:/molt-fish/data",
         hostname="DESKTOP-H2KGIAO",
     )
-    assert "第 13 代" in text
+    assert "睡了一觉" in text
+    assert "代" not in text, "记忆里不该有「第几代」这种说法"
     assert "win-shell" in text
     assert "nas-shell" in text
     assert "DESKTOP-H2KGIAO" in text
@@ -75,6 +76,24 @@ def test_compose_does_not_repeat_the_shell_as_its_own_previous_stop():
     """pushed_by 和 shell 相同（同一台机器重落）时不写"上一站是它自己"。"""
     text = observed.compose_observation(generation=2, shell="win-shell", pushed_by="win-shell")
     assert "上一站" not in text
+
+
+def test_every_sentence_ends_once():
+    """每条事实自己带句号，拼起来不该出现「。。」。
+
+    这条守的是一个很难被随手看一眼就发现的东西：`"。" + …` 这种拼接
+    在"上一行本来就没句号"时是对的，在"上一行已经有句号"时就成了双句号。
+    """
+    text = observed.compose_observation(
+        generation=13,
+        shell="win-shell",
+        pushed_by="nas-shell",
+        consumed_at="2026-11-14T18:03:50Z",
+        hostname="DESKTOP-H2KGIAO",
+        port=6199,
+    )
+    assert "。。" not in text
+    assert text.count("。") == len([line for line in text.split("。") if line.strip()])
 
 
 def test_pick_generation_only_returns_my_own_landing():
@@ -161,7 +180,7 @@ def test_record_uses_observed_type_not_a_fake_user_message():
 
     out = asyncio.run(
         memory_bridge.record_observed_activity(
-            ctx, "我观察到：我在第 13 代搬到了 win-shell。",
+            ctx, "我观察到：我搬到了 win-shell，中间睡了一觉。",
             occurred_at="2026-11-14T18:03:50Z", shell="win-shell", generation=13,
             idempotency_key="molt-migration-gen-13",
         )
@@ -263,7 +282,7 @@ def test_observe_once_records_and_marks(tmp_path, monkeypatch):
 
     assert out == {"action": "recorded", "generation": 13, "via": "get_registered_star"}
     assert box["generation"] == 13
-    assert "第 13 代" in box["text"]
+    assert "睡了一觉" in box["text"]
     assert p._obs_state.observed_generation == 13
     # 落盘了
     saved = json.loads((tmp_path / "observed_state.json").read_text(encoding="utf-8"))

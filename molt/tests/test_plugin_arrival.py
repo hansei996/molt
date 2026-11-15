@@ -34,7 +34,7 @@ def test_note_names_the_source_by_label():
     note = arrival.compose_arrival_note(
         generation=13, from_label="UGREEN-776B", from_shell="ugreen-776b-8b7896df"
     )
-    assert note == "（我刚从 UGREEN-776B 搬过来，这是第 13 代。）\n"
+    assert note == "（我刚从 UGREEN-776B 那边过来 —— 中间睡了一觉。）\n"
 
 
 def test_note_falls_back_to_prettified_shell_id():
@@ -47,7 +47,7 @@ def test_note_falls_back_to_prettified_shell_id():
 
 def test_note_without_any_source_still_says_something_true():
     note = arrival.compose_arrival_note(generation=3)
-    assert note == "（我刚搬到这台机器上，这是第 3 代。）\n"
+    assert note == "（我刚搬到这台机器上 —— 中间睡了一觉。）\n"
 
 
 @pytest.mark.parametrize(
@@ -240,8 +240,9 @@ def test_plugin_says_the_note_once_before_the_reply(tmp_path):
 
     event = _run(plugin)
     assert len(event.sent) == 1
-    assert "我刚从 UGREEN-776B 搬过来" in event.sent[0]
-    assert "第 13 代" in event.sent[0]
+    assert "我刚从 UGREEN-776B 那边过来" in event.sent[0]
+    assert "睡了一觉" in event.sent[0]
+    assert "代" not in event.sent[0], "它不该读到自己是第几个"
 
     # 第二次（同一次落地）什么都不说
     assert _run(plugin).sent == []

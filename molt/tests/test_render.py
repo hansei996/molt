@@ -1,4 +1,4 @@
-"""`molt/render.py` 的测试。
+﻿"""`molt/render.py` 的测试。
 
 这一页要能发给别人看，所以它有两个不能破的性质：
 
@@ -111,9 +111,9 @@ def test_timeline_is_newest_first() -> None:
     page = render_timeline(
         _history(generations=[_gen(generation=1), _gen(generation=2), _gen(generation=3)])
     )
-    first = page.index("第 3 代")
-    second = page.index("第 2 代")
-    third = page.index("第 1 代")
+    first = page.index("第 3 次搬家")
+    second = page.index("第 2 次搬家")
+    third = page.index("第 1 次搬家")
     assert first < second < third, "时间轴必须新的在上面 —— 人想知道的是最近一次"
 
 

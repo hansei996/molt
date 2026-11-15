@@ -1,4 +1,4 @@
-"""molt-agent —— 目标机上的常驻看门人。
+﻿"""molt-agent —— 目标机上的常驻看门人。
 
 ## 它解决什么问题
 
@@ -178,7 +178,7 @@ class Warden:
     ) -> bool:
         """告诉账本「我还在」。
 
-        为什么需要：账本其它字段都只记「谁取走了第几代」，没有一处回答
+        为什么需要：账本其它字段都只记「谁取走了哪一份快照」，没有一处回答
         「现在谁还在跑」。于是鱼被拔电之后，`molt status` 看起来一切正常 ——
         它分不清「鱼死了」和「鱼闲着」。
         失败只返回 False，**绝不抛**：一次心跳丢了不影响任何交接。
@@ -326,19 +326,19 @@ def decide(
         )
 
     if not target:
-        return Decision("idle", f"第 {gen} 代没有 target_shell，不是给谁搬的")
+        return Decision("idle", f"快照 #{gen} 没有 target_shell，不是给谁搬的")
     if target != shell:
-        return Decision("idle", f"第 {gen} 代是给 {target} 的，不是我（{shell}）")
+        return Decision("idle", f"快照 #{gen} 是给 {target} 的，不是我（{shell}）")
     if consumed == shell:
-        return Decision("idle", f"第 {gen} 代我已经落过了")
+        return Decision("idle", f"快照 #{gen} 我已经落过了")
     if consumed:
-        return Decision("idle", f"第 {gen} 代已经被 {consumed} 落走了")
+        return Decision("idle", f"快照 #{gen} 已经被 {consumed} 落走了")
 
     if not _lease_is_free(status):
         holder = (status.get("lease") or {}).get("holder")
-        return Decision("wait", f"第 {gen} 代是给我的，但 {holder} 还攥着租约", gen)
+        return Decision("wait", f"快照 #{gen} 是给我的，但 {holder} 还攥着租约", gen)
 
-    return Decision("land", f"第 {gen} 代是给我的，落位", gen)
+    return Decision("land", f"快照 #{gen} 是给我的，落位", gen)
 
 
 # ---------------------------------------------------------------- 执行
@@ -809,7 +809,7 @@ class Agent:
             if not ok:
                 return StepResult("shutdown", False, why)
             return StepResult("shutdown", True,
-                              f"机器睡着了（第 {generation} 代已经交给别人；唤醒靠魔术封包）")
+                              f"机器睡着了（快照 #{generation} 已经交给别人；唤醒靠魔术封包）")
         delay = int(self.settings.shutdown_delay_seconds)
         if delay < 0:
             delay = 0
@@ -824,7 +824,7 @@ class Agent:
             err = (getattr(proc, "stderr", "") or "").strip()
             return StepResult("shutdown", False, f"退出码 {code}：{err}")
         return StepResult("shutdown", True,
-                          f"{delay} 秒后关机（第 {generation} 代已经交给别人了）")
+                          f"{delay} 秒后关机（快照 #{generation} 已经交给别人了）")
 
     def do_checkpoint(self) -> StepResult:
         """停干净之后，把残留的 WAL 合并回主库 —— 不合并 land 会被护栏挡住。
@@ -942,7 +942,7 @@ class Agent:
             payload = {"broken": True}
         generation = payload.get("generation")
         started = payload.get("started_at") or "时间不明"
-        which = f"第 {generation} 代" if generation else "某一代"
+        which = f"快照 #{generation}" if generation else "某一份快照"
         return (
             f"上一次落位没有做完（{which}，开始于 {started}）：{marker} 还在。\n"
             "  现在起 AstrBot 会让它去读半份的库。先重跑一次 `molt land`"
@@ -1033,7 +1033,7 @@ class Agent:
                     self.log("· 你说过留着这台机器 —— 不关机")
                     return decision, steps
                 if not self.settings.execute:
-                    self.log(f"  (dry-run) 我会关机：第 {gnum} 代的目標是 {target}")
+                    self.log(f"  (dry-run) 我会关机：快照 #{gnum} 的目標是 {target}")
                     return decision, steps
                 sd = self.do_shutdown(gnum)
                 steps.append(sd)
@@ -1120,9 +1120,9 @@ class Agent:
                 )
             if consumed == self.settings.shell and not listening and not cooling:
                 if not self.settings.execute:
-                    self.log(f"  (dry-run) 第 {gnum} 代是我取的，但端口没人听 —— 我会把它拉起来")
+                    self.log(f"  (dry-run) 快照 #{gnum} 是我取的，但端口没人听 —— 我会把它拉起来")
                     return decision, steps
-                self.log(f"  第 {gnum} 代是我取的，但端口没人听 —— 我去把它拉起来")
+                self.log(f"  快照 #{gnum} 是我取的，但端口没人听 —— 我去把它拉起来")
                 state["last_boot_at"] = time.time()
                 self.save_state(state)
                 sw = self.do_switch_on()
@@ -1156,7 +1156,7 @@ class Agent:
             consumed = str(gen.get("consumed_by") or "").strip()
             gnum = gen.get("generation")
             if consumed == self.settings.shell and state.get("observed_generation") != gnum:
-                self.log(f"  第 {gnum} 代是我落的地，让它自己记一笔")
+                self.log(f"  快照 #{gnum} 是我落的地，让它自己记一笔")
                 ob = self.do_observe()
                 steps.append(ob)
                 if ob.ok:

@@ -152,11 +152,11 @@ def _where_html(status: Dict[str, Any]) -> str:
         else "没有租约 —— 没有任何壳在搬家"
     )
     gen_text = (
-        f"第 <b>{esc(latest.get('generation'))}</b> 代 · 目标壳 "
+        f"第 <b>{esc(latest.get('generation'))}</b> 次搬家 · 目标壳 "
         f"<b>{esc(latest.get('target_shell') or '?')}</b> · 取走的是 "
         f"<b>{esc(latest.get('consumed_by') or '还没人取')}</b>"
         if latest
-        else "账本里还没有任何一代"
+        else "账本里还没有任何一次搬家"
     )
 
     return f"""<!doctype html>
@@ -181,14 +181,14 @@ def _where_html(status: Dict[str, Any]) -> str:
   <h1>鱼现在在哪</h1>
   <p class="sub">数据来自各个壳自己上报的心跳。心跳超过 10 分钟没更新就算「哑了」。</p>
   <table>
-    <thead><tr><th>壳</th><th>状态</th><th>是什么</th><th>最后心跳</th><th>代</th><th>说明</th></tr></thead>
+    <thead><tr><th>壳</th><th>状态</th><th>是什么</th><th>最后心跳</th><th>快照</th><th>说明</th></tr></thead>
     <tbody>{''.join(rows)}</tbody>
   </table>
   <div class="meta">
     <div>账本：{gen_text}</div>
     <div>租约：{lease_text}</div>
     <div>当前 epoch：<b>{esc(status.get('current_epoch'))}</b> ·
-         已登记 <b>{esc(status.get('generation_count'))}</b> 代</div>
+         已登记 <b>{esc(status.get('generation_count'))}</b> 份快照</div>
   </div>
 </div>
 </body></html>"""
