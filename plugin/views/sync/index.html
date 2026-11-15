@@ -18,6 +18,16 @@
         <button id="refresh" class="ghost" type="button">刷新</button>
       </header>
 
+      <!-- 结果横幅：每个动作结束都在这里留一条，带时间。没有它，页面和没点是一样的。 -->
+      <div id="banner" class="banner idle" role="status" aria-live="polite">
+        <span id="banner-icon" class="banner-icon">•</span>
+        <div class="banner-body">
+          <p id="banner-text">还没有动作。先点下面第 1 步。</p>
+          <p id="banner-detail" class="banner-detail"></p>
+        </div>
+        <time id="banner-time" class="banner-time"></time>
+      </div>
+
       <section class="card" id="identity">
         <div class="kv"><span>这台壳</span><b id="shell">—</b></div>
         <div class="kv"><span>数据目录</span><code id="data-dir">—</code></div>
@@ -26,25 +36,25 @@
       </section>
 
       <section class="card">
-        <h2>1 · 把这台的配置发布到账本</h2>
+        <h2><span class="step">1</span>把这台的配置发布到账本</h2>
         <p class="hint">
           打包 <code>data/config/&lt;插件&gt;_config.json</code>（含一份清单，让对面知道这台装了哪些插件），
           不打包插件代码、也不打包 <code>plugin_data</code>。
         </p>
         <div class="row">
           <button id="publish" class="primary" type="button">发布这台</button>
-          <span class="result" id="publish-result"></span>
+          <span class="result" id="publish-result">还没发布过</span>
         </div>
       </section>
 
       <section class="card">
-        <h2>2 · 选择从哪台壳同步</h2>
+        <h2><span class="step">2</span>选择从哪台壳同步</h2>
         <p class="hint">预览是空跑 —— 一个字都不会写。真正写要再点一次，并且勾上确认。</p>
         <div id="peers" class="peers"></div>
       </section>
 
       <section class="card" id="preview-card" hidden>
-        <h2>3 · 预览：<code id="preview-source"></code></h2>
+        <h2><span class="step">3</span>预览：<code id="preview-source"></code></h2>
         <p class="counts" id="counts"></p>
         <div class="table-scroll">
           <table>
@@ -54,18 +64,29 @@
             <tbody id="rows"></tbody>
           </table>
         </div>
-        <div class="row apply-row">
+
+        <div class="apply-box">
           <label class="check">
             <input type="checkbox" id="confirm" />
             <span>我确认覆盖这台机器上的插件配置（旧文件会留 <code>*.molt-before-sync-*</code> 备份）</span>
           </label>
-          <button id="apply" class="primary" type="button" disabled>同步过来</button>
-          <span class="result" id="apply-result"></span>
+          <div class="row">
+            <button id="apply" class="primary" type="button" disabled>同步过来</button>
+            <span class="result" id="apply-result"></span>
+          </div>
+        </div>
+
+        <!-- 写完之后把"到底写了哪几个"列在这里 —— 表格会刷新成"一样，不用动"，
+             但只有这份清单能回答"刚才那次真的写了吗、写了哪些"。 -->
+        <div id="applied" class="applied" hidden>
+          <p class="applied-title" id="applied-title"></p>
+          <ul id="applied-list" class="applied-list"></ul>
         </div>
       </section>
 
-      <p class="foot" id="foot">
+      <p class="foot">
         结构差太多的（顶层键几乎不重合）默认跳过 —— 那通常是两边插件版本不同，覆盖过去等于把对方不认识的键塞进去。
+        写完要重启 AstrBot 才生效：它读的是启动时载入的配置。
       </p>
     </main>
     <script type="module" src="./app.js"></script>

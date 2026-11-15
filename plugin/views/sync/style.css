@@ -163,3 +163,81 @@ td:first-child { white-space: nowrap; font-family: ui-monospace, Consolas, monos
 .result.good { color: var(--ok-fg); }
 
 .empty { color: var(--muted); font-size: 13px; }
+
+/* ---- 结果横幅（1.3.0 之后加的：每个动作都要留下看得见的一条结论） ---- */
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  background: var(--card);
+}
+
+.banner-icon {
+  font-size: 15px;
+  line-height: 1.4;
+  flex: 0 0 auto;
+}
+
+.banner-body { flex: 1 1 auto; min-width: 0; }
+.banner-body p { margin: 0; }
+#banner-text { font-weight: 600; }
+.banner-detail { color: var(--muted); font-size: 12.5px; margin-top: 2px !important; }
+.banner-time { color: var(--muted); font-size: 12px; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+
+.banner.idle { border-left-color: var(--line); }
+.banner.busy { border-left-color: var(--accent); }
+.banner.busy .banner-icon { animation: molt-spin 1.1s linear infinite; display: inline-block; }
+.banner.ok { border-left-color: #10b981; background: var(--ok-bg); }
+.banner.ok #banner-text { color: var(--ok-fg); }
+.banner.bad { border-left-color: #ef4444; background: var(--skip-bg); }
+.banner.bad #banner-text { color: var(--skip-fg); }
+
+@keyframes molt-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 步骤号 */
+.step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 12px;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+
+.apply-box {
+  margin-top: 14px;
+  border-top: 1px dashed var(--line);
+  padding-top: 14px;
+}
+
+.apply-box .row { margin-top: 10px; }
+
+/* 预览里"会写"的行给一点底色，扫一眼就知道哪几行会动 */
+tr.row-write td { background: var(--warn-bg); }
+tr.row-write td:first-child { font-weight: 600; }
+
+.applied {
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--ok-bg);
+}
+
+.applied-title { margin: 0 0 6px; color: var(--ok-fg); font-weight: 600; font-size: 13px; }
+.applied-list { margin: 0; padding-left: 20px; font-size: 12.5px; }
+.applied-list li { font-family: ui-monospace, Consolas, monospace; }

@@ -70,6 +70,19 @@ def test_the_sync_page_is_actually_wired():
         assert endpoint in app_js, f"页面没调 {endpoint}"
 
 
+def test_the_publish_summary_survives_a_number_or_a_list():
+    """发布反馈里的插件数：后端给 `plugin_count`，页面不能假设 `plugins` 是数组。
+
+    2026-11-15 真机：`do_publish` 返回的 `plugins` 是**数字**，页面写的是
+    `(res.plugins || []).length` —— 数字没有 `.length`，于是横幅上出现
+    「已发布，账本收下了（undefined 个插件的配置 · 33 KB）」。
+    这种错没有任何异常、没有任何日志，只有人盯着屏幕才看得见。
+    """
+    app_js = (PLUGIN / "views/sync/app.js").read_text("utf-8")
+    assert "plugin_count" in app_js, "发布反馈要用后端给的 plugin_count"
+    assert "Array.isArray(res.plugins)" in app_js, "字段若变回数字也要能算对，不许打印 undefined"
+
+
 def test_the_page_cannot_apply_without_a_confirm_checkbox():
     """页面上"真的写"必须由一个勾选框把关，而后端还要求 confirm=true。
 

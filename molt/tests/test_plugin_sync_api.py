@@ -1,4 +1,4 @@
-﻿"""dashboard 同步页面的后端（`plugin/sync_api.py`）。
+"""dashboard 同步页面的后端（`plugin/sync_api.py`）。
 
 ## 这一组测试盯的是什么
 
@@ -133,7 +133,10 @@ def test_publish_sends_configs_and_their_names(tmp_path):
     client = FakeClient()
     result = sync_api.do_publish(FakeSettings(root), client)
 
-    assert result["plugins"] == 3
+    # 「plugins」一律是名字数组（和 list_plugin_bundles 一致），数量另有 plugin_count。
+    # 曾经这里是数字，页面用 (res.plugins || []).length 算，于是印出「undefined 个插件」。
+    assert result["plugins"] == ["alpha", "beta", "only_here"]
+    assert result["plugin_count"] == 3
     assert result["installed"] == 3
     assert len(client.published) == 1
     sent = client.published[0]

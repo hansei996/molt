@@ -1,4 +1,4 @@
-﻿"""插件配置同步的 dashboard 页面后端。
+"""插件配置同步的 dashboard 页面后端。
 
 ## 它为什么在插件里，而不是新加一个服务
 
@@ -99,10 +99,15 @@ def do_publish(settings: Any, client: Any) -> Dict[str, Any]:
         sha256=digest,
         plugins=sorted(manifest.get("configs") or {}),
     )
+    bundled = sorted(manifest.get("configs") or {})
     return {
         "shell": str(settings.shell or ""),
         "bytes": len(payload),
-        "plugins": len(manifest.get("configs") or {}),
+        # 「plugins」在整个 API 里一律是名字数组（list_plugin_bundles 里也是），
+        # 数量另给一个 plugin_count —— 同一个字段名一会儿是列表一会儿是数字，
+        # 页面就会把 undefined 印成「undefined 个插件的配置」（真出现过）。
+        "plugins": bundled,
+        "plugin_count": len(bundled),
         "installed": len(plugins),
     }
 
