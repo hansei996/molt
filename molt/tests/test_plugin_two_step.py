@@ -122,8 +122,11 @@ def test_if_it_never_wakes_up_the_fish_does_not_move(plugin_dir: Path) -> None:
     reply = m._confirm(cfg)
 
     assert reply.plan is None
-    assert "还没有上线" in reply.text
+    assert "还没上线" in reply.text
+    assert "魔术封包" in reply.text
     assert "鱼没动" in reply.text
+    # 提议不能丢：丢了他就得回去重新 `/molt go`，而"这次是谁提的"也会丢
+    assert m.has_proposal() is True
 
 
 def test_no_mac_means_it_says_so_instead_of_pretending(plugin_dir: Path) -> None:
@@ -144,3 +147,52 @@ def test_no_mac_means_it_says_so_instead_of_pretending(plugin_dir: Path) -> None
     assert ok_sent is False
     assert "MAC" in msg
 
+
+
+def test_a_target_that_just_went_offline_gets_a_packet_at_confirm_time(
+    plugin_dir: Path,
+) -> None:
+    """`/molt go` 时它开着（于是问都没问），按 confirm 时它已经躺下了。
+
+    这是 2026-11-16 00:38 那次真实翻车：上一次交接完关机票执行，
+    机器自己关了；再 `/molt go` 时心跳还是新的 → 走的是"直接搬"分支；
+    等按 confirm，它已经关机四分钟。光说"没上线"没用 —— 得当场发封包。
+    """
+    m = mover(plugin_dir, payload=ON_PAYLOAD)
+    cfg = _cfg(plugin_dir)
+    m.request_move(cfg, target="nas-shell", reason="")  # 此时 on → phase=move
+
+    sent: List[str] = []
+    m.wake_target = lambda cfg, shell: (sent.append(shell) or (True, "已由账本发出 2 个封包"))  # type: ignore[assignment]
+    m._opener = FakeLedger(OFF_PAYLOAD)  # type: ignore[attr-defined]  # 它已经关了
+
+    reply = m._confirm(cfg)
+
+    assert sent == ["nas-shell"], "这种时候必须真的发一封，而不是只回一句『没上线』"
+    assert reply.plan is None
+    assert "魔术封包" in reply.text
+    assert "鱼没动" in reply.text
+    assert m.has_proposal() is True
+
+
+def test_when_it_cannot_wake_it_says_which_part_is_missing(plugin_dir: Path) -> None:
+    """走的是"直接搬"分支（go 时还开着），按 confirm 时关了、而且账本里没 MAC。"""
+    no_mac_off = {
+        "status": {
+            "current_epoch": 31,
+            "lease": None,
+            "heartbeats": {"win-shell": {"age_seconds": 2.0}, "nas-shell": {"age_seconds": 200.0}},
+            "shells": {"nas-shell": {"role": "nas", "wakeable": True}},
+        }
+    }
+    m = mover(plugin_dir, payload=ON_PAYLOAD)
+    cfg = _cfg(plugin_dir)
+    m.request_move(cfg, target="nas-shell", reason="")
+    m._opener = FakeLedger(no_mac_off)  # type: ignore[attr-defined]
+
+    reply = m._confirm(cfg)
+
+    assert reply.plan is None
+    assert "叫不醒" in reply.text
+    assert "MAC" in reply.text
+    assert "鱼没动" in reply.text

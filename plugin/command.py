@@ -1,4 +1,4 @@
-﻿"""把"发一条消息"变成"搬一次家"——但只到"提议"为止的那一半。
+"""把"发一条消息"变成"搬一次家"——但只到"提议"为止的那一半。
 
 ## 为什么这里没有一行 `astrbot` 导入
 
@@ -1054,8 +1054,21 @@ class MoltMover:
             state_line = (
                 f"最后心跳 {age:.0f} 秒前" if isinstance(age, float) else "账本里没有它的心跳"
             )
+            # 它刚才还开着、现在却关了 —— 最常见的成因就是**上一次交接完，关机票执行了**。
+            # 于是 `/molt go` 那会儿它还是 "on"（phase=move，问都没问），等按 confirm
+            # 时它已经躺下了。这种时候光说"没上线"没用：得就地把它叫醒。
+            # 注意：**提议不清、鱼不动**，封包只是让人少走一趟 `/molt go`。
+            ok_sent, why = self.wake_target(cfg, wanted)
+            if ok_sent:
+                return Reply(
+                    f"它现在还没上线（{state_line}）。\n"
+                    f"我又发了一次魔术封包 —— {why}。\n\n"
+                    f"等它上线，你再回一次 `/molt confirm`；那一次我就会动身。\n"
+                    f"鱼没动，还在这台机器上。"
+                )
             return Reply(
                 f"先不搬：**{wanted} 现在还没有上线**（{state_line}）。\n"
+                f"我也叫不醒它：{why}\n"
                 f"鱼没动，还在这台机器上 —— 点了确认也不会把它推进一台关着的机器里。\n"
                 f"等它起来再发 `/molt confirm`；不想搬了就 `/molt cancel`。"
             )
