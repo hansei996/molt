@@ -237,12 +237,33 @@ C:\path\to\venv\Scripts\molt.exe agent --config C:\path\to\agent.json >> C:\logs
 
 ## 6. 第一次真正迁徙
 
-在**鱼正在说话的那台机器**上（QQ 里）：
+在**鱼正在说话的那台机器**上（QQ 里）。第一次搬家要按**两次** confirm：
 
 ```
 /molt go
-/molt confirm
+  搬去 win-box 之前先说清楚：
+  · win-box：最后心跳 149 秒前 —— 那是关着的
+  要我先把它叫醒吗？回 /molt confirm 我就发魔术封包；
+  它上线之后我会再问你一次「要不要搬」—— 一共两次确认。
+
+/molt confirm          # 第一次：只发唤醒包，鱼不动
+  好，发包了 —— 已由账本发出 2 个封包（192.168.50.255 / 255.255.255.255）。
+  等它开机（我这边看的是心跳，不是 ping）。
+  它上线之后，你回 /molt confirm —— 那一次就是第二次确认，我会直接动身。
+
+/molt confirm          # 第二次：它先自己再核一遍心跳，才开搬
+  好，我走了。
 ```
+
+前提：目标那台机器的 MAC 要登记在账本里，否则谁也叫不醒它。
+
+```bash
+molt declare --shell win-box --role desktop --wakeable --wake-mac D8-BB-C1-11-C3-D2
+```
+
+封包由**账本那台机器**发（`POST /wake`）。容器发不出去 —— 它用的是 bridge
+网络，往 `255.255.255.255` 的广播出不了 docker0（2026-11-16 00:11 那次就是
+"日志写着发了、机器没醒"）。
 
 > 注意：`molt land` 一定会把 `platform[].enable` 关掉 —— 这是公理 0 的护栏，
 > 不是 bug。落位之后要让它重新对外说话，必须由人显式打开：
