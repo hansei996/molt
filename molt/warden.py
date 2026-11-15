@@ -847,20 +847,27 @@ class Warden:
 
         「默认 role=unknown」听起来无害，实际后果是：任何按 role 判断的代码
         都会把"我不知道"当成"我确认过它不是 NAS"。缺席必须能被看见。
+
+        同一个道理对内层字段也成立：一个只声明了 `role` 的壳，它的
+        `wakeable` 必须是 `None`（没说过），**不能是 `False`**（说过不能）。
+        早先这里写的是 `bool(attrs.get("wakeable", False))`，于是"没声明"和
+        "声明了不能唤醒"在视图里长得一模一样 —— 而按后者判断就会**不发**魔术
+        封包，机器永远起不来，看起来却像是"账本说它不用叫醒"。
         """
         out: Dict[str, Dict[str, Any]] = {}
         self._ensure_loaded()
         for shell_id, attrs in self._shells.items():
             item = {
                 "role": attrs.get("role", ""),
-                "gpu": attrs.get("gpu", ""),
-                "wakeable": bool(attrs.get("wakeable", False)),
-                "cost_per_hour": attrs.get("cost_per_hour", 0.0),
+                "gpu": attrs.get("gpu") if "gpu" in attrs else None,
+                "wakeable": attrs.get("wakeable") if "wakeable" in attrs else None,
+                "cost_per_hour": attrs.get("cost_per_hour") if "cost_per_hour" in attrs else None,
                 "label": str(attrs.get("label") or ""),
                 "updated_at": attrs.get("updated_at", 0),
                 "updated_at_readable": attrs.get("updated_at_readable", ""),
                 "updated_by": attrs.get("updated_by", ""),
                 "declared": "role" in attrs,
+                "declared_fields": [k for k in SHELL_ATTR_FIELDS if k in attrs],
             }
             out[shell_id] = item
         return out

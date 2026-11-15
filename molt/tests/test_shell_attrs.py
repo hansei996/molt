@@ -154,4 +154,32 @@ def test_the_view_does_not_leak_internal_keys(root: Path) -> None:
         "updated_at_readable",
         "updated_by",
         "declared",
+        # 1.2 补的：哪些字段真的被声明过。少了它，"没填"和"填了 false"
+        # 在视图里长得一模一样 —— 而按后者判断会得出相反的结论。
+        "declared_fields",
     }
+
+
+def test_an_undeclared_field_is_none_not_a_default(root: Path) -> None:
+    """只声明了 role 的壳，`wakeable` 必须是 None（没说过），不是 False（说过不能）。
+
+    `bool(attrs.get("wakeable", False))` 会把这两件事压成同一个值，而按它判断
+    的后果是：那台机器永远收不到魔术封包，症状看起来却是"叫不醒"。
+    """
+    w = Warden(root=root)
+    w.set_shell("box", role="desktop")
+    item = w.shells_view()["box"]
+    assert item["wakeable"] is None, "没声明 ≠ 声明了不能"
+    assert item["gpu"] is None, "没声明 ≠ 确认过没有显卡"
+    assert item["cost_per_hour"] is None
+    assert item["declared_fields"] == ["role"]
+
+
+def test_a_declared_false_stays_false(root: Path) -> None:
+    """填了 false 就是 false —— 不能被"没声明"的 None 混掉。"""
+    w = Warden(root=root)
+    w.set_shell("box", wakeable=False)
+    assert w.shells_view()["box"]["wakeable"] is False
+    w.set_shell("box", gpu="")
+    assert w.shells_view()["box"]["gpu"] == "", "空串 = 确认过没有显卡"
+

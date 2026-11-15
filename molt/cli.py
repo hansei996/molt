@@ -783,7 +783,37 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     # 更要命的是：叫醒失败（网卡没 arm）会让租约白占 90 秒。
     #
     # 另外这条顺序也符合语义：**你不可能把一个还没开机的壳"交接"出去**。
+    # 账本里对目标壳的声明。**只在能读到的时候用**：读不到账本不该让整个
+    # 迁徙失败 —— 那会把"账本抖了一下"变成"它搬不了家"。
+    #
+    # `wakeable` 的语义严格三分：True=我说过能叫醒 / False=我说过叫不醒 /
+    # None=我什么都没说（老行为：给了 --wake-mac 就发）。
+    # 把 None 当成 False 会让一台没登记的机器**永远收不到封包**，而症状
+    # 看起来是"叫不醒" —— 这正是"默认值伪装成事实"最贵的那个后果。
+    target_wakeable: Optional[bool] = None
+    target_name = str(getattr(args, "target", "") or "")
+    if target_name:
+        try:
+            declared = ((be.status() or {}).get("shells") or {}).get(target_name) or {}
+            if "wakeable" in declared:
+                target_wakeable = declared.get("wakeable")
+        except Exception:
+            target_wakeable = None
+
     wake_mac = getattr(args, "wake_mac", None)
+    if wake_mac and target_wakeable is False:
+        # 账本说这台机器叫不醒。发封包不是"也没坏处"——它会让人以为叫过了，
+        # 于是去查 BIOS 而不是去按电源键。
+        print()
+        warn(f"账本说 {target_name} 不可唤醒（wakeable: false）——不发魔术封包。")
+        dim("  这台机器要人手动开。包照发只会让人去查网卡，而问题在电源键上。")
+        dim("  如果这个声明写错了：molt declare --shell <壳名> --wakeable")
+        wake_mac = None
+    elif not wake_mac and target_wakeable is True:
+        print()
+        warn(f"账本说 {target_name} 可以被叫醒（wakeable: true），但没给 --wake-mac。")
+        dim("  账本里不存 MAC（它是地址，不是属性）——想让它自己醒就补一个。")
+
     if wake_mac:
         wake_host = getattr(args, "wake_host", "") or ""
         print()
@@ -1864,8 +1894,12 @@ def cmd_shells(args: argparse.Namespace) -> int:
         bits = [f"{C.CYA}{shell_id}{C.R}", role]
         if attrs.get("gpu"):
             bits.append(f"gpu={attrs['gpu']}")
-        if attrs.get("wakeable"):
+        # True / False / 没声明 是三件事，不能压成"说"和"不说"：
+        # 把 False 印成空白，等于把"我确认它叫不醒"藏起来。
+        if attrs.get("wakeable") is True:
             bits.append("可唤醒")
+        elif attrs.get("wakeable") is False:
+            bits.append("不可唤醒")
         cost = attrs.get("cost_per_hour")
         if cost:
             bits.append(f"{cost}/小时")
@@ -1893,8 +1927,8 @@ def cmd_declare(args: argparse.Namespace) -> int:
         attrs["role"] = args.role
     if args.gpu is not None:
         attrs["gpu"] = args.gpu
-    if args.wakeable:
-        attrs["wakeable"] = True
+    if args.wakeable is not None:
+        attrs["wakeable"] = bool(args.wakeable)
     if args.cost_per_hour is not None:
         attrs["cost_per_hour"] = args.cost_per_hour
     if args.label is not None:
@@ -2821,8 +2855,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument(
         "--wakeable",
-        action="store_true",
+        dest="wakeable",
+        action="store_const",
+        const=True,
+        default=None,
         help="这台机器能被魔术封包叫醒（发 WOL 之前要知道这件事）",
+    )
+    s.add_argument(
+        "--no-wakeable",
+        dest="wakeable",
+        action="store_const",
+        const=False,
+        help="明确声明它叫不醒（老主板 / 网卡不支持 PCI-E 唤醒）；molt migrate 就不会白等",
     )
     s.add_argument(
         "--cost-per-hour",

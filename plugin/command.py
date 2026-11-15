@@ -220,8 +220,12 @@ def _shell_what(attrs: Dict[str, Any]) -> str:
     gpu = str(attrs.get("gpu") or "").strip()
     if gpu:
         bits.append(gpu)
-    if attrs.get("wakeable"):
+    if attrs.get("wakeable") is True:
         bits.append("可唤醒")
+    elif attrs.get("wakeable") is False:
+        # 用"叫不醒"而不是"不可唤醒"：后者**包含**"可唤醒"这个子串，
+        # 断言"没说可唤醒"时就永远为假 —— 一个能悄悄骗过测试的词。
+        bits.append("叫不醒")
     return " · ".join(bits)
 
 

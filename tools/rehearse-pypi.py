@@ -66,7 +66,10 @@ def free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def wait_status(url: str, token: str, *, tries: int = 40) -> str:
+def wait_status(url: str, token: str, *, tries: int = 120) -> str:
+    # 120 × 0.25s = 30 秒。原来是 10 秒 —— 在全新的 venv 里第一次 import
+    # 要编译 .pyc、杀毒软件还要扫一遍，冷启动偶尔就超过 10 秒，于是演练
+    # 会莫名其妙红一次。**一个会随机红的演练，很快就会被所有人忽略。**
     for _ in range(tries):
         try:
             req = urllib.request.Request(url, headers={"X-Molt-Token": token})
@@ -79,12 +82,15 @@ def wait_status(url: str, token: str, *, tries: int = 40) -> str:
     return "TIMEOUT"
 
 
-def walk(version: str, *, keep: bool) -> int:
+def walk(version: str, *, keep: bool, wheel: str = "") -> int:
     root = pathlib.Path(tempfile.mkdtemp(prefix="molt-pypi-"))
     steps: list[tuple[str, bool, str]] = []
     venv = root / "venv"
     say(f"工作目录：{root}")
-    say(f"目标版本：{PACKAGE}=={version}")
+    spec = wheel or f"{PACKAGE}=={version}"
+    # 传了本地 wheel 就装它：这一轮要验的是"还没发出去的这一版装得上吗"。
+    # 没有这一步，新版本永远只能在发布之后才第一次被真的装一遍。
+    say(f"安装目标：{spec}")
 
     def record(name: str, ok: bool, detail: str = "") -> bool:
         steps.append((name, ok, detail))
@@ -108,15 +114,16 @@ def walk(version: str, *, keep: bool) -> int:
         for attempt in range(6):
             rc, out = run(
                 [str(vpy), "-m", "pip", "install", "--disable-pip-version-check", "-q",
-                 "--no-cache-dir", "--index-url", "https://pypi.org/simple",
-                 f"{PACKAGE}=={version}"],
+                 "--no-cache-dir", *(["--no-deps", spec] if wheel else
+                                     ["--index-url", "https://pypi.org/simple", spec])],
                 cwd=root,
             )
-            if rc == 0 or "No matching distribution" not in out:
+            # 本地 wheel 不存在索引同步问题：错了就是错了，不重试。
+            if rc == 0 or wheel or "No matching distribution" not in out:
                 break
             say(f"  （索引还没同步到 {version}，等 20 秒再试：第 {attempt + 1} 次）")
             time.sleep(20)
-        if not record(f"pip install {PACKAGE}=={version}", rc == 0, out[-1200:]):
+        if not record(f"pip install {spec}", rc == 0, out[-1200:]):
             return report(steps)
 
         rc, out = run([str(vpy), "-c",
@@ -142,7 +149,15 @@ def walk(version: str, *, keep: bool) -> int:
             cwd=str(root), stdout=log, stderr=subprocess.STDOUT,
         )
         status = wait_status(f"http://127.0.0.1:{port}/status", token)
-        record(f"起账本 127.0.0.1:{port}", "current_epoch" in status, status[:400])
+        if "current_epoch" in status:
+            detail = status[:400]
+        else:
+            # 只报 "TIMEOUT" 的话，读的人下一步不知道该看哪儿 ——
+            # 起不来和起得慢是两件事，日志尾部能把它们分开。
+            log.flush()
+            tail = (root / "warden.log").read_text(encoding="utf-8", errors="replace")[-1200:]
+            detail = f"{status}\n--- warden.log 尾部 ---\n{tail}"
+        record(f"起账本 127.0.0.1:{port}", "current_epoch" in status, detail)
 
         rc, out = run([str(exe), "--no-color", "init", "--role", "agent",
                        "--out", "./agent.json", "--shell", "my-box",
@@ -168,6 +183,18 @@ def walk(version: str, *, keep: bool) -> int:
                        "--warden-url", f"http://127.0.0.1:{port}", "--warden-token", token], cwd=root)
         record("molt shells 读得回来（含 role 与可唤醒）",
                rc == 0 and "desktop" in out and "可唤醒" in out, out.strip()[-800:])
+
+        # 1.2.1 补的：把"它叫不醒"写进账本。这一条必须走**装出来的** exe ——
+        # 它是命令行的入口，只测源码路径证明不了装好的那份认这两个开关。
+        rc, out = run([str(exe), "--no-color", "declare",
+                       "--warden-url", f"http://127.0.0.1:{port}", "--warden-token", token,
+                       "--shell", "my-box", "--no-wakeable", "--by", "rehearse"], cwd=root)
+        record("molt declare --no-wakeable 写进账本", rc == 0 and "已登记" in out, out.strip()[-800:])
+
+        rc, out = run([str(exe), "--no-color", "shells",
+                       "--warden-url", f"http://127.0.0.1:{port}", "--warden-token", token], cwd=root)
+        record("molt shells 会把「不可唤醒」印出来（不是空白）",
+               rc == 0 and "不可唤醒" in out, out.strip()[-800:])
 
         # 全局开关排在前面也认得 —— 1.1.0 就是在这条上翻的车。
         rc, out = run([str(exe), "--no-color", "agent", "--config", "./agent.json", "--once"], cwd=root)
@@ -215,9 +242,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="从 PyPI 装一份 molt 并照 INSTALL.md 走一遍")
     parser.add_argument("--version", default="", help="要装的版本（默认：PyPI 上最新的）")
     parser.add_argument("--keep", action="store_true", help="保留临时目录")
+    parser.add_argument("--wheel", default="", help="装这个本地 wheel，而不是从 PyPI 装（用来验还没发布的版本）")
     args = parser.parse_args(argv)
-    version = args.version.strip() or latest_version()
-    return walk(version, keep=args.keep)
+    wheel = args.wheel.strip()
+    if wheel:
+        path = pathlib.Path(wheel).expanduser().resolve()
+        if not path.is_file():
+            say(f"没有这个 wheel：{path}")
+            return 2
+        wheel = str(path)
+    version = args.version.strip() or ("" if wheel else latest_version())
+    if not version and wheel:
+        # 从文件名里读版本，免得人再抄一遍（抄错的话最后一条断言会莫名其妙地红）
+        stem = pathlib.Path(wheel).name
+        version = stem.split("-")[1] if stem.count("-") >= 2 else ""
+    if not version:
+        say("读不出版本号，用 --version 指定一个")
+        return 2
+    return walk(version, keep=args.keep, wheel=wheel)
 
 
 if __name__ == "__main__":

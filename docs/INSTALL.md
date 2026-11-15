@@ -19,7 +19,7 @@
 
 ```bash
 pip install molt-handoff   # 装出发行包；导入名和命令都还是 molt
-molt --version             # 应该打印 molt 1.2.0（或更新）
+molt --version             # 应该打印 molt 1.2.1（或更新）
 ```
 
 只有想改代码、或者还没发版时才需要仓库：
