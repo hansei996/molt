@@ -1,0 +1,122 @@
+name: release
+
+# ## 为什么镜像是 Actions 推的，而不是我在这台机器上推
+#
+# 在这台机器上推 ghcr.io，需要一把带 `write:packages` 的个人 token —— 那意味着
+# 一份长期凭据要躺在一台游戏机的磁盘上，用完还得想怎么销毁。
+#
+# 在 Actions 里不用：仓库自带的 `GITHUB_TOKEN` 只在这一轮作业里有效，只要
+# workflow 声明 `packages: write`，它就够用。凭据从"我保管一个东西"变成
+# "GitHub 临时借给我一个东西"，差别不是方便，是**没有东西可以被偷**。
+#
+# ## 什么时候跑
+#
+# 推 `v*` 标签时真发一版（打 `latest` + `1.0.0` + `1.0` + `1` + 完整 sha）。
+# `workflow_dispatch` 是给「先看看这条链路通不通」用的：它只打 `latest` 与 sha，
+# **不会**覆盖 semver 标签 —— 手动跑一遍不该让 `1.0.0` 这个号提前被人占到。
+#
+# ## 一件我看不见、必须由人去点的事
+#
+# ghcr 上第一次推上去的包默认是 **private**。`docker pull ghcr.io/...:latest`
+# 对匿名用户会失败（报 `denied` 或 `manifest unknown`，看起来都像"镜像不存在"）。
+# 第一次发布之后，要去包的设置页把可见性改成 Public：
+#   https://github.com/hansei996/molt/pkgs/container/molt
+# 这一步没有 API 可以替你做（改可见性是账号级决定），所以它写在 README 里等着。
+#
+# ## PyPI 还没接
+#
+# 发包需要另一条凭据链，见 `docs/V1.0-PLAN.md` §2.2。等老大在「可信发布」与
+# 「repo secret」之间选一个，这里再加一个 `pypi` 作业。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# 只读代码，写包。就这两条 —— 不给 `contents: write`，因为这个作业从不提交任何东西。
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+# 同一个标签连着推两次时不并发跑两份（两份同时 push 会有一个白跑并报错）。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 算出这次该打哪些标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # `type=semver` 只在 ref 是合法 semver 标签时生效；手动跑时它们自然为空，
+          # 于是只剩 latest 与 sha —— 这正是我们要的「手动跑不占版本号」。
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+            type=sha
+          labels: |
+            org.opencontainers.image.title=molt
+            org.opencontainers.image.description=让一个 AI 伴侣自己从一台机器走到另一台机器
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - uses: docker/setup-buildx-action@v3
+
+      # 这里用的是 `secrets.GITHUB_TOKEN`，不是 PAT。
+      # 用户名必须是 `github.actor`（推送者），不能写死成仓库名。
+      - name: 登录 ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # 只构 amd64：这个项目的两端都是 x86 家用机（NAS + 游戏机），
+          # 多架构会让每次发布多花几分钟换一个没人用的 arm64 层。
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 构建成功不代表"能被拉下来"。这里从 registry 反查一次 manifest ——
+      # 它证明的是「推上去了」，不是「别人能拉」（那取决于包可见性，见文件头）。
+      - name: 回查 registry，确认标签真的在
+        run: |
+          set -eu
+          first="$(echo "${{ steps.meta.outputs.tags }}" | head -n1)"
+          echo "检查 $first"
+          docker buildx imagetools inspect "$first"
+
+      - name: 把结果写进这次运行的摘要
+        if: always()
+        run: |
+          {
+            echo "## 镜像"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "- digest: \`${{ steps.push.outputs.digest }}\`"
+            echo "- 如果这是第一次发布，记得去 https://github.com/hansei996/molt/pkgs/container/molt"
+            echo "  把包可见性改成 **Public**，否则陌生人 \`docker pull\` 会失败。"
+          } >> "$GITHUB_STEP_SUMMARY"
