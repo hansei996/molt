@@ -585,7 +585,7 @@ def _recorder(calls):
 
 
 def test_shutdown_after_leave_fires_when_generation_goes_elsewhere(tmp_path):
-    cfg = settings(shutdown_after_leave=True, shutdown_delay_seconds=120, execute=True, power_action="shutdown")
+    cfg = settings(power_requires_permission=False, shutdown_after_leave=True, shutdown_delay_seconds=120, execute=True, power_action="shutdown")
     # 直接用 Agent 本体
     mod = sys.modules["molt_agent_under_test"]
     calls = []
@@ -611,7 +611,7 @@ def test_shutdown_fires_against_the_real_ledger_lease_shape(tmp_path):
     """
     mod = sys.modules["molt_agent_under_test"]
     calls = []
-    cfg = settings(shutdown_after_leave=True, shutdown_delay_seconds=30,
+    cfg = settings(power_requires_permission=False, shutdown_after_leave=True, shutdown_delay_seconds=30,
                    execute=True, power_action="shutdown")
     st = {
         "latest_generation": {"generation": 12, "target_shell": "nas-shell",
@@ -631,7 +631,7 @@ def test_shutdown_does_not_fire_while_someone_holds_a_lease(tmp_path):
     """有人持着租约时不关机：那一代正在飞，等它落定再决定。"""
     mod = sys.modules["molt_agent_under_test"]
     calls = []
-    cfg = settings(shutdown_after_leave=True, execute=True, power_action="shutdown")
+    cfg = settings(power_requires_permission=False, shutdown_after_leave=True, execute=True, power_action="shutdown")
     st = {
         "latest_generation": {"generation": 12, "target_shell": "nas-shell",
                               "consumed_by": "", "pushed_by": "win-shell"},
@@ -649,7 +649,7 @@ def test_shutdown_does_not_fire_while_someone_holds_a_lease(tmp_path):
 def test_shutdown_after_leave_does_not_fire_for_my_own_generation(tmp_path):
     mod = sys.modules["molt_agent_under_test"]
     calls = []
-    cfg = settings(shutdown_after_leave=True)
+    cfg = settings(power_requires_permission=False, shutdown_after_leave=True)
     st = {"latest_generation": {"generation": 11, "target_shell": "win-shell",
           "consumed_by": "win-shell", "pushed_by": "nas-shell"}, "lease": None}
     agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
@@ -669,7 +669,7 @@ def test_leave_sleeps_instead_of_shutdown_when_power_action_is_sleep(tmp_path, m
     monkeypatch.setattr(mod, "_away_mode_enabled", lambda: False)
     monkeypatch.setattr(mod, "_suspend_now", lambda: (True, "已挂起"))
     calls = []
-    cfg = settings(shutdown_after_leave=True, execute=True, power_action="sleep")
+    cfg = settings(power_requires_permission=False, shutdown_after_leave=True, execute=True, power_action="sleep")
     st = {"latest_generation": {"generation": 12, "target_shell": "nas-shell",
           "consumed_by": None, "pushed_by": "win-shell"}, "lease": None}
     agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
@@ -687,7 +687,7 @@ def test_away_mode_is_refused_and_explained(tmp_path, monkeypatch):
     """开着离开模式时，API 会返回成功但机器根本没睡 —— 不能假装成功。"""
     mod = sys.modules["molt_agent_under_test"]
     monkeypatch.setattr(mod, "_away_mode_enabled", lambda: True)
-    cfg = settings(shutdown_after_leave=True, execute=True, power_action="sleep")
+    cfg = settings(power_requires_permission=False, shutdown_after_leave=True, execute=True, power_action="sleep")
     st = {"latest_generation": {"generation": 14, "target_shell": "nas-shell",
           "consumed_by": None, "pushed_by": "win-shell"}, "lease": None}
     agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
@@ -704,7 +704,7 @@ def test_suspend_failure_is_reported(tmp_path, monkeypatch):
     mod = sys.modules["molt_agent_under_test"]
     monkeypatch.setattr(mod, "_away_mode_enabled", lambda: False)
     monkeypatch.setattr(mod, "_suspend_now", lambda: (False, "SetSuspendState 返回 False（5）"))
-    cfg = settings(shutdown_after_leave=True, execute=True, power_action="sleep")
+    cfg = settings(power_requires_permission=False, shutdown_after_leave=True, execute=True, power_action="sleep")
     st = {"latest_generation": {"generation": 15, "target_shell": "nas-shell",
           "consumed_by": None, "pushed_by": "win-shell"}, "lease": None}
     agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",
@@ -716,10 +716,46 @@ def test_suspend_failure_is_reported(tmp_path, monkeypatch):
     assert "SetSuspendState" in steps[-1].detail
 
 
+
+def test_without_a_ticket_the_machine_stays_on(tmp_path):
+    """默认策略下，鱼走了也**不许**关机 —— 除非账本里有一张票。
+
+    这条钉的是默认值本身：`power_requires_permission` 为真时，
+    `run_once()` 不该走到任何关机/休眠动作，只该留一句话。
+    「走」和「关」是两件事，人只说了一件。
+    """
+    mod = sys.modules["molt_agent_under_test"]
+    calls = []
+    cfg = settings(shutdown_after_leave=True, execute=True, power_action="shutdown")
+    assert cfg.power_requires_permission is True
+    st = {
+        "latest_generation": {
+            "generation": 13,
+            "target_shell": "nas-shell",
+            "consumed_by": "nas-shell",
+            "pushed_by": "win-shell",
+        },
+        "lease": None,
+    }
+    agent = mod.Agent(
+        settings=cfg,
+        state_path=tmp_path / "s.json",
+        status_fetcher=lambda: st,
+        runner=_recorder(calls),
+        port_probe=lambda port: False,
+        spawner=lambda argv: 1,
+        log=lambda m: None,
+    )
+    _decision, steps = agent.run_once()
+    assert steps == []
+    joined = " ".join(" ".join(argv) for argv in calls)
+    assert "shutdown" not in joined
+    assert "suspend" not in joined
+
 def test_unknown_power_action_is_refused_not_guessed(tmp_path):
     mod = sys.modules["molt_agent_under_test"]
     calls = []
-    cfg = settings(shutdown_after_leave=True, execute=True, power_action="reboot")
+    cfg = settings(power_requires_permission=False, shutdown_after_leave=True, execute=True, power_action="reboot")
     st = {"latest_generation": {"generation": 13, "target_shell": "nas-shell",
           "consumed_by": None, "pushed_by": "win-shell"}, "lease": None}
     agent = mod.Agent(settings=cfg, state_path=tmp_path / "s.json",

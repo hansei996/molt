@@ -301,6 +301,30 @@ class WardenServer:
                 )
                 return _ok(heartbeat=beat)
 
+            # ---- POST /power ----（「走」和「关」是两件事，这是第二件）
+            if head == "power" and parts[1:2] == [] and method == "POST":
+                shell_id = str(body.get("shell") or "").strip()
+                if not shell_id:
+                    return _err(400, "缺少 shell", "bad_request")
+                try:
+                    generation = int(body.get("generation") or 0)
+                except (TypeError, ValueError):
+                    generation = 0
+                ticket = self.warden.request_power(
+                    shell_id,
+                    str(body.get("action") or ""),
+                    generation=generation,
+                    by=str(body.get("by") or ""),
+                )
+                return _ok(power=ticket)
+
+            # ---- POST /power/ack ----（票用掉了就撕掉，别让它下次又生效）
+            if head == "power" and parts[1:2] == ["ack"] and method == "POST":
+                shell_id = str(body.get("shell") or "").strip()
+                if not shell_id:
+                    return _err(400, "缺少 shell", "bad_request")
+                return _ok(cleared=self.warden.clear_power(shell_id))
+
             # ---- GET /where ----
             # 一个给人看的页面，不是给机器用的。它回答的是「鱼现在在哪」，
             # 而这个问题的答案以前只能靠「问它」。

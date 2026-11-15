@@ -97,6 +97,10 @@ class Settings:
     shutdown_after_leave: bool = False
     # "sleep" 只挂起（会话不销毁，回来不用登录）；"shutdown" 真关机（回来必须能自动登录）
     power_action: str = "sleep"
+    #: 关机要不要一张票据。默认 **要** —— 迁徙由一次 confirm 决定，
+    #: 而「这台机器关不关」是另一个问题；把两者绑在一起，人点一次「走」
+    #: 就顺带丢掉没保存的东西。设成 false 才回到"走了就自动关"的老行为。
+    power_requires_permission: bool = True
     shutdown_delay_seconds: int = 60
     timeout: float = DEFAULT_TIMEOUT
     #: 这台壳自己的 dashboard 监听地址/端口。留空 = 保持快照里原样。
@@ -195,6 +199,23 @@ class Warden:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return 200 <= resp.status < 300
         except Exception:  # noqa: BLE001 - 心跳永远不该把守护进程弄死
+            return False
+
+    def power_ack(self, shell_id: str) -> bool:
+        """把票撕掉（我照做了）。失败只返回 False —— 撕不掉最多是下次再问一遍。"""
+        if not shell_id:
+            return False
+        body = json.dumps({"shell": shell_id}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/power/ack",
+            data=body,
+            headers={"Content-Type": "application/json", "X-Molt-Token": self.token},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return 200 <= resp.status < 300
+        except Exception:  # noqa: BLE001 - 销票失败不该让守护进程死掉
             return False
 
     def status(self) -> Dict[str, Any]:
@@ -355,6 +376,25 @@ def _log_line(msg: str) -> None:
         pass
 
 
+def power_verdict(*, requires_permission: bool, tickets: Any, shell: str) -> str:
+    """这台机器现在该不该关。四个返回值，语义互斥：
+
+    - `"shutdown"` —— 账本里有一张「关掉我」的票
+    - `"keep"`     —— 账本里有一张「留着」的票
+    - `"ask"`      —— 没票。**这就是默认值：不关，等人说话**
+    - `"auto"`     —— 配置里关掉了许可要求（老行为，走了就关）
+    """
+    if not requires_permission:
+        return "auto"
+    ticket = tickets.get(shell) if isinstance(tickets, dict) else None
+    action = str((ticket or {}).get("action") or "").strip().lower()
+    if action in ("shutdown", "sleep"):
+        return "shutdown"
+    if action == "keep":
+        return "keep"
+    return "ask"
+
+
 @dataclass
 class Agent:
     settings: Settings
@@ -363,6 +403,8 @@ class Agent:
     status_fetcher: Optional[Callable[[], Dict[str, Any]]] = None
     # 可选：往账本报「我还在」。不注入就什么都不做（测试与 dry-run 用）。
     heartbeat_sender: Optional[Callable[..., bool]] = None
+    #: 票用掉之后撕掉它。不注入就不撕（测试与 dry-run 用）。
+    power_ack_sender: Optional[Callable[[str], bool]] = None
     port_probe: Optional[Callable[..., bool]] = None
     _probe_takes_port: Optional[bool] = None
     spawner: Optional[Callable[[list, str], int]] = None
@@ -373,6 +415,14 @@ class Agent:
     log: Callable[[str], None] = field(default=_log_line)
 
     # -- 状态 ------------------------------------------------------
+    def _ack_power(self) -> None:
+        if self.power_ack_sender is None:
+            return
+        try:
+            self.power_ack_sender(self.settings.shell)
+        except Exception:  # noqa: BLE001 - 撕票失败不影响已经做出的决定
+            pass
+
     def _send_heartbeat(self) -> None:
         if self.heartbeat_sender is None:
             return
@@ -909,12 +959,32 @@ class Agent:
             # 从来没触发过（真机 2026-11-15 01:41 抓到）。
             holder = (lease or {}).get("holder")
             if (target and target != self.settings.shell
-                    and not holder and state.get("shut_down_for") != gnum):
+                    and not holder and state.get("shut_down_for") != gnum
+                    and not state.get("power_seen_for") == gnum):
+                # 「走」和「关」是两件事。上半场由一次 `/molt confirm` 决定，
+                # 下半场由账本里的一张票决定 —— 没票就**留着**。
+                # 判错的方向不对称：「该关没关」只是多耗一晚电，
+                # 「不该关关掉了」是人的工作被清掉。
+                verdict = power_verdict(
+                    requires_permission=self.settings.power_requires_permission,
+                    tickets=status.get("power"),
+                    shell=self.settings.shell,
+                )
+                if verdict == "ask":
+                    self.log("· 这一代已经交接出去了；你没说要不要关这台机器 —— 留着")
+                    return decision, steps
+                if verdict == "keep":
+                    self._ack_power()
+                    state["shut_down_for"] = gnum
+                    self.save_state(state)
+                    self.log("· 你说过留着这台机器 —— 不关机")
+                    return decision, steps
                 if not self.settings.execute:
                     self.log(f"  (dry-run) 我会关机：第 {gnum} 代的目標是 {target}")
                     return decision, steps
                 sd = self.do_shutdown(gnum)
                 steps.append(sd)
+                self._ack_power()
                 if sd.ok:
                     state["shut_down_for"] = gnum
                     self.save_state(state)
@@ -1346,6 +1416,7 @@ def main(argv: Optional[list] = None) -> int:
         state_path=cfg_path.parent / STATE_FILENAME,
         status_fetcher=warden.status,
         heartbeat_sender=warden.heartbeat,
+        power_ack_sender=warden.power_ack,
         port_probe=lambda port: _port_open("127.0.0.1", port),
         spawner=_default_spawn,
         pid_probe=lambda: _listening_pid(settings.port),

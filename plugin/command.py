@@ -139,6 +139,16 @@ CANCEL_WORDS = {"cancel", "no", "取消", "算了", "不走了"}
 #: 一个说自己叫 `where` 却回了一大段账本数字的命令，比没有这个命令更让人困惑。
 WHERE_WORDS = {"where", "在哪", "在哪呢"}
 STATUS_WORDS = {"status", "状态"}
+
+#: 「走」和「关」是两件事：这两个词回答的是**我走了之后那台机器关不关**。
+POWER_WORDS = {
+    "shutdown": "shutdown",
+    "关机": "shutdown",
+    "关掉": "shutdown",
+    "keep": "keep",
+    "留着": "keep",
+    "别关": "keep",
+}
 HELP_WORDS = {"help", "?", "帮助", "怎么用"}
 
 
@@ -165,6 +175,8 @@ def normalize_args(raw: str) -> str:
         return "status"
     if first in HELP_WORDS:
         return "help"
+    if first in POWER_WORDS:
+        return POWER_WORDS[first]
     return ""
 
 
@@ -475,7 +487,57 @@ class MoltMover:
             return self._confirm(cfg)
         if want == "cancel":
             return self._cancel()
+        if want in POWER_WORDS:
+            return self.request_power(cfg, POWER_WORDS[want])
         return Reply(self._help_text(cfg))
+
+    def request_power(self, cfg: Settings, action: str) -> Reply:
+        """我走了以后，那台机器关不关 —— 第二张票，和「走不走」分开。
+
+        为什么要分开：人点一次「走」，顺带丢掉没保存的东西，是最难受的一种失败
+        —— 因为「走」本身是对的，代价来自一件他没被问过的事。
+        """
+        st = self.ledger_status()
+        if not isinstance(st, dict):
+            return Reply("账本问不到，我不知道自己是从哪台机器搬过来的，所以不敢让你关任何机器。")
+        gen = st.get("latest_generation") or {}
+        if str(gen.get("consumed_by") or "").strip() != cfg.shell:
+            return Reply("最近这一代不是我取的 —— 我不知道哪台机器是你的旧壳，不猜。")
+        source = str(gen.get("pushed_by") or "").strip()
+        if not source or source == cfg.shell:
+            return Reply("这一代是我自己推出去的，没有「我刚离开的那台机器」。")
+        if not self._post_power(
+            cfg,
+            shell=source,
+            action=action,
+            generation=int(gen.get("generation") or 0),
+        ):
+            return Reply(
+                f"票没送到账本（{cfg.warden_url or '未配置'}）。\n"
+                f"你可以直接在那台机器上关，或者稍后再回一次 `/molt {action}`。"
+            )
+        if action == "shutdown":
+            return Reply(
+                f"好。`{source}` 会在下一轮心跳里看到这张票，然后关机。\n"
+                "在那之前它要是改了主意，回 `/molt keep`。"
+            )
+        return Reply(f"好，`{source}` 留着不关。")
+
+    def _post_power(self, cfg: Settings, *, shell: str, action: str, generation: int) -> bool:
+        body = json.dumps(
+            {"shell": shell, "action": action, "generation": generation, "by": cfg.shell}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            cfg.warden_url.rstrip("/") + "/power",
+            data=body,
+            headers={"Content-Type": "application/json", "X-Molt-Token": cfg.warden_token or ""},
+            method="POST",
+        )
+        try:
+            with self._opener(req, timeout=5.0) as resp:
+                return 200 <= getattr(resp, "status", 200) < 300
+        except (urllib.error.URLError, OSError, ValueError):
+            return False
 
     def _help_text(self, cfg: Settings) -> str:
         state = "已开启" if cfg.enabled else "未开启"
@@ -485,7 +547,9 @@ class MoltMover:
             "· `/molt status` —— 上面那些，加上账本第几代、租约在谁手上\n"
             "· `/molt go` —— 提议搬去 " + (cfg.target or "（target 未配）") + "，我会问你确认\n"
             "· `/molt confirm` —— 真的搬（会先把我的嘴闭上，再说再见）\n"
-            "· `/molt cancel` —— 取消还没确认的提议"
+            "· `/molt cancel` —— 取消还没确认的提议\n"
+            "· `/molt shutdown` —— 我走了以后，把那台机器关掉（另一张票，和「走」分开）\n"
+            "· `/molt keep` —— 我走了以后，那台机器留着别关"
         )
 
     def _propose(self, cfg: Settings, *, sender: str) -> Reply:

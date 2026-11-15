@@ -92,6 +92,9 @@ _BACKUP_NAME_RE = re.compile(r"^backup-[0-9T-]+-[A-Za-z0-9_-]+(-[0-9]+)?\.tar\.g
 #: 按十分钟一次算是两小时的历史；按一小时一次算就是半天。
 DEFAULT_BACKUP_KEEP = 12
 
+#: 「走」和「关」是两件事 —— 关机许可只认这三种动作。
+POWER_ACTIONS = ("shutdown", "sleep", "keep")
+
 
 def _slugify(text: str) -> str:
     """把壳名压成一个能进文件名的短串。
@@ -534,6 +537,66 @@ class Warden:
         self._ensure_loaded()
         return list(self._generations)
 
+    # ---------------------------------------------------------- 关机许可
+    #
+    # 为什么要单独一张票据：迁徙（走）由一次 `/molt confirm` 决定，
+    # 而「那台机器要不要关」是另一件事 —— 人可能想让它回家但机器继续开着
+    # （还在下载、还想远程连、还想让它随时回来）。
+    # 把两件事绑在一起的结果是：人点一次「走」，顺带丢掉没保存的东西。
+
+    def power_path(self) -> Path:
+        """关机票据放哪。
+
+        **不进 `state.json`**：账本记的是「谁在哪一代取走了什么」，是交接历史；
+        一张「允许关掉 X」的票是**当前状态**，和心跳同一类东西。
+        混进账本会让 `history()` 里出现一行谁也解释不清的记录。
+        """
+        return self.root / "power.json"
+
+    def power_view(self) -> Dict[str, Dict[str, Any]]:
+        """谁允许关掉哪台机器。**读不到或读坏了都返回空** ——
+
+        一张坏掉的票据绝不能变成一次关机。默认值必须是"没票 = 不关"。
+        """
+        try:
+            raw = json.loads(self.power_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def request_power(
+        self, shell: str, action: str, *, generation: int = 0, by: str = ""
+    ) -> Dict[str, Any]:
+        """写一张「允许关掉 shell」的票（或一张「留着」的票）。"""
+        shell = str(shell or "").strip()
+        action = str(action or "").strip().lower()
+        if not shell:
+            raise NeedsHuman("缺少 shell：要关的是哪台机器？")
+        if action not in POWER_ACTIONS:
+            raise NeedsHuman(f"power 只认 {'/'.join(POWER_ACTIONS)}，收到 {action!r}")
+        current = self.power_view()
+        ticket = {
+            "action": action,
+            "generation": int(generation or 0),
+            "by": str(by or ""),
+            "decided_at": time.time(),
+            "decided_at_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        current[shell] = ticket
+        _atomic_write_json(self.power_path(), current)
+        self.append_log("INFO", f"关机许可：{shell} -> {action}（第 {generation} 代，{by or '未署名'}）")
+        return ticket
+
+    def clear_power(self, shell: str) -> bool:
+        """销票。目标机真的关掉/真的留着了，就该把票撕掉，别让它下次又生效。"""
+        shell = str(shell or "").strip()
+        current = self.power_view()
+        if shell not in current:
+            return False
+        current.pop(shell, None)
+        _atomic_write_json(self.power_path(), current)
+        return True
+
     def status(self) -> Dict[str, Any]:
         """给 `molt status` 用的人类可读快照。
 
@@ -579,6 +642,7 @@ class Warden:
             ),
             "checked_at": now,
             "heartbeats": self._heartbeat_view(now),
+            "power": self.power_view(),
         }
 
     # ---------------------------------------------------------------- 心跳

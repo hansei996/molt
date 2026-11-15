@@ -369,3 +369,116 @@ def test_a_legacy_three_element_proposal_still_confirms(plugin_dir: Path) -> Non
     reply = m._confirm(cfg)
     assert reply.plan is not None
     assert "这次是你提的" in reply.text
+
+# ---- 2.2 定案 C 的钉子：它只能问，不能自己出门 ----
+
+def test_a_proposal_only_ever_asks_and_never_runs(plugin_dir: Path) -> None:
+    """提议存在，但**一个执行计划都没被造出来** —— 这是 C 的全部含义"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir)
+    reply = m.request_move(cfg, target="nas-shell", reason="这边随时会被关掉", source="utterance")
+    assert m.has_proposal() is True
+    assert reply.plan is None, "提议阶段不许有执行计划"
+    assert "/molt confirm" in reply.text
+    assert m._proposal[3] == "utterance"
+
+
+def test_an_expired_proposal_simply_vanishes(plugin_dir: Path) -> None:
+    """过期就是什么都没发生：不重试、不排队、不留待执行"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir)
+    m.request_move(cfg, target="nas-shell", reason="", source="self")
+    assert m.has_proposal() is True
+
+    m._clock.advance(cfg.self_propose_ttl_seconds + 1)
+
+    assert m.has_proposal() is False
+    refused = m._confirm(cfg)
+    assert refused.plan is None
+    assert "过期" in refused.text or "失效" in refused.text
+
+
+# ---- 「走」和「关」是两张票：第二张票的测试 ----
+
+class _RecordOpener:
+    """既能答 `/status`，又记下每一次 POST。"""
+
+    def __init__(self, status_payload):
+        self.status_payload = status_payload
+        self.posts = []
+
+    def __call__(self, req, timeout=None):
+        url = getattr(req, "full_url", "")
+        body = getattr(req, "data", None)
+        if url.endswith("/status"):
+            data = json.dumps(self.status_payload).encode("utf-8")
+        else:
+            self.posts.append((url, json.loads(body.decode("utf-8")) if body else {}))
+            data = json.dumps({"ok": True}).encode("utf-8")
+
+        class _R:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return data
+
+        return _R()
+
+
+def _just_arrived_payload() -> Dict[str, Any]:
+    """我刚从 nas-shell 搬过来，现在是 win-shell 在说话。"""
+    return {
+        "status": {
+            "current_epoch": 21,
+            "lease": {"holder": None, "state": "no-lease"},
+            "heartbeats": {"win-shell": {"age_seconds": 3}, "nas-shell": {"age_seconds": 9}},
+            "latest_generation": {
+                "generation": 19,
+                "pushed_by": "nas-shell",
+                "target_shell": "win-shell",
+                "consumed_by": "win-shell",
+            },
+        }
+    }
+
+
+def test_the_power_question_is_a_separate_ticket(plugin_dir: Path) -> None:
+    """`/molt shutdown` 投的是**另一张票**，带的是我**刚离开**的那台机器"""
+    rec = _RecordOpener(_just_arrived_payload())
+    m = MoltMover(plugin_dir, clock=FakeClock(), runner=lambda *a, **k: _Ok(), opener=rec)
+    cfg = _cfg(plugin_dir)
+    reply = m.handle("shutdown", sender="hansei")
+    assert len(rec.posts) == 1
+    url, body = rec.posts[0]
+    assert url.endswith("/power")
+    assert body == {"shell": "nas-shell", "action": "shutdown", "generation": 19, "by": "win-shell"}
+    assert "nas-shell" in reply.text
+    assert "/molt keep" in reply.text
+
+
+def test_keep_is_also_a_ticket_not_a_silence(plugin_dir: Path) -> None:
+    """「留着」也要落成一张票 —— 否则那台机器永远不知道能不能关"""
+    rec = _RecordOpener(_just_arrived_payload())
+    m = MoltMover(plugin_dir, clock=FakeClock(), runner=lambda *a, **k: _Ok(), opener=rec)
+    cfg = _cfg(plugin_dir)
+    reply = m.handle("keep", sender="hansei")
+    assert rec.posts[0][1]["action"] == "keep"
+    assert "留着不关" in reply.text
+
+
+def test_it_refuses_to_guess_which_machine_to_shut_down(plugin_dir: Path) -> None:
+    """这一代不是取的 → 我不知道你的旧壳是哪台 → 一张票都不投"""
+    payload = _just_arrived_payload()
+    payload["status"]["latest_generation"]["consumed_by"] = "somebody-else"
+    rec = _RecordOpener(payload)
+    m = MoltMover(plugin_dir, clock=FakeClock(), runner=lambda *a, **k: _Ok(), opener=rec)
+    cfg = _cfg(plugin_dir)
+    reply = m.handle("shutdown", sender="hansei")
+    assert rec.posts == []
+    assert "不猜" in reply.text
