@@ -85,6 +85,11 @@ DEFAULT_CONFIRM_TTL_SECONDS = 120
 #: 它不降低安全性（`confirm` 永远要人来说），只降低"提议总是过期"的挫败感。
 DEFAULT_SELF_PROPOSE_TTL_SECONDS = 1800
 
+#: 发包之后多久内不再重复发。60 秒是"一次开机该等多久"的粗估：
+#: 从发包到心跳上报，真机实测 11 秒开机 + 约 60 秒 AstrBot 起来。
+#: 比这更频繁地重发不会提高成功率，只会让主人以为它卡住了。
+WAKE_COOLDOWN_SECONDS = 60.0
+
 #: 提议是谁提的。`SELF_PROPOSER` 表示"它自己想搬"——`confirm` 时会如实标注，
 #: 因为"它想走"和"你让它走"是两件事，哪怕按下去的是同一只手。
 SELF_PROPOSER = "self"
@@ -468,6 +473,10 @@ class MoltMover:
         self._proposal: Optional[Tuple[float, str, str]] = None
         #: 已确认、待执行的计划。`after_message_sent` 取走它。
         self._pending: Optional[Plan] = None
+        #: 上一次"已经请账本发过封包"的时刻与目标。存在的理由很具体：
+        #: 2026-11-16 00:58 主人在机器开机期间连发了 5 次 `/molt confirm`，
+        #: 每次都会再发一封 —— 那不是"更保险"，只是让人以为它坏了。
+        self._last_wake: Optional[Tuple[float, str]] = None
 
     # -------------------------------------------------------------- 配置与只读信息
 
@@ -977,6 +986,12 @@ class MoltMover:
                            f"在那台机器上登记一次：`molt declare --shell {shell} --wakeable --wake-mac AA-BB-CC-DD-EE-FF`")
         if wakeable is False:
             return (False, f"账本说 {shell} 不可唤醒（wakeable: false）—— 这台机器只能人手动开。")
+        last = self._last_wake
+        if last is not None and last[1] == shell:
+            age = self._clock() - last[0]
+            if 0 <= age < WAKE_COOLDOWN_SECONDS:
+                return (True, f"刚才已经发过一封（{age:.0f} 秒前），这次不重复发 —— "
+                              f"我在等它报到")
         try:
             # 延迟导入：这一层刻意零 AstrBot 依赖，也不该在模块导入时就去碰
             # `molt.client`（它要 `urllib` 之外的东西，而且要能被单独拷出去跑）。
@@ -992,6 +1007,7 @@ class MoltMover:
         sent = got.get("sent") or []
         if not sent:
             return (False, "账本那边一个包都没发出去：" + "；".join(got.get("failed") or []))
+        self._last_wake = (self._clock(), shell)
         return (True, f"已由账本发出 {len(sent)} 个封包（{' / '.join(sent)}）")
 
     def _expired(self) -> bool:

@@ -248,3 +248,36 @@ def test_wake_target_reports_it_when_nothing_went_out(plugin_dir: Path, monkeypa
 
     assert ok is False
     assert "socket boom" in msg
+
+
+def test_it_does_not_resend_the_packet_on_every_confirm(plugin_dir: Path) -> None:
+    """2026-11-16 00:58：机器正在开机，主人连发 5 次 confirm，每次都再发一封。
+
+    重发不提高成功率，只让人以为它坏了。60 秒内第二封就算了。
+    """
+    m = mover(plugin_dir, payload=OFF_PAYLOAD)
+    cfg = _cfg(plugin_dir)
+
+    sent: List[str] = []
+
+    class FakeClient:
+        def __init__(self, base: str, token: str) -> None:
+            pass
+
+        def wake(self, mac: str, *, host: str = "") -> Dict[str, Any]:
+            sent.append(mac)
+            return {"ok": True, "sent": ["192.168.50.255"], "failed": []}
+
+    import molt.client as client_mod
+
+    original = client_mod.WardenClient
+    client_mod.WardenClient = FakeClient  # type: ignore[assignment]
+    try:
+        ok1, msg1 = m.wake_target(cfg, "nas-shell")
+        ok2, msg2 = m.wake_target(cfg, "nas-shell")
+    finally:
+        client_mod.WardenClient = original  # type: ignore[assignment]
+
+    assert ok1 is True and ok2 is True
+    assert len(sent) == 1, "第二封必须被冷却挡掉"
+    assert "不重复发" in msg2
