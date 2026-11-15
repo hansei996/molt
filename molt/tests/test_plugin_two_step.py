@@ -196,3 +196,55 @@ def test_when_it_cannot_wake_it_says_which_part_is_missing(plugin_dir: Path) -> 
     assert "叫不醒" in reply.text
     assert "MAC" in reply.text
     assert "鱼没动" in reply.text
+
+
+def test_wake_target_really_constructs_a_client(plugin_dir: Path, monkeypatch) -> None:
+    """不许再让"整段被 mock 掉"掩盖 `WardenClient` 没导入这类错。
+
+    2026-11-16 00:52 真机原文：
+        `我也叫不醒它：让账本发包失败：name 'WardenClient' is not defined`
+    —— 当时 5 条测试全绿，因为它们都把 `wake_target` 整个换成了 lambda。
+    """
+    import molt.client as client_mod
+
+    calls: List[tuple] = []
+
+    class FakeClient:
+        def __init__(self, base: str, token: str) -> None:
+            calls.append(("init", base, token))
+
+        def wake(self, mac: str, *, host: str = "") -> Dict[str, Any]:
+            calls.append(("wake", mac, host))
+            return {"ok": True, "sent": ["192.168.50.255"], "failed": []}
+
+    monkeypatch.setattr(client_mod, "WardenClient", FakeClient)
+
+    m = mover(plugin_dir, payload=ON_PAYLOAD)
+    cfg = _cfg(plugin_dir, warden_url="http://192.168.50.50:6186", warden_token="t0k")
+
+    ok, msg = m.wake_target(cfg, "nas-shell")
+
+    assert ok is True
+    assert ("init", "http://192.168.50.50:6186", "t0k") in calls
+    assert any(c[0] == "wake" and c[1] == "D8-BB-C1-11-C3-D2" for c in calls)
+    assert "1 个封包" in msg
+
+
+def test_wake_target_reports_it_when_nothing_went_out(plugin_dir: Path, monkeypatch) -> None:
+    import molt.client as client_mod
+
+    class FakeClient:
+        def __init__(self, base: str, token: str) -> None:
+            pass
+
+        def wake(self, mac: str, *, host: str = "") -> Dict[str, Any]:
+            return {"ok": False, "sent": [], "failed": ["socket boom"]}
+
+    monkeypatch.setattr(client_mod, "WardenClient", FakeClient)
+
+    m = mover(plugin_dir, payload=ON_PAYLOAD)
+    cfg = _cfg(plugin_dir)
+    ok, msg = m.wake_target(cfg, "nas-shell")
+
+    assert ok is False
+    assert "socket boom" in msg

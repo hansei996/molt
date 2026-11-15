@@ -978,6 +978,13 @@ class MoltMover:
         if wakeable is False:
             return (False, f"账本说 {shell} 不可唤醒（wakeable: false）—— 这台机器只能人手动开。")
         try:
+            # 延迟导入：这一层刻意零 AstrBot 依赖，也不该在模块导入时就去碰
+            # `molt.client`（它要 `urllib` 之外的东西，而且要能被单独拷出去跑）。
+            # 这里犯过一次真错：直接写 `WardenClient(...)` 而没导入 ——
+            # 所有测试都把 `wake_target` 整个换掉了，所以谁也没走到这一行，
+            # 真机上回的是 `name 'WardenClient' is not defined`。
+            from molt.client import WardenClient  # noqa: PLC0415
+
             client = WardenClient(cfg.warden_url, cfg.warden_token)
             got = client.wake(mac, host=str(getattr(cfg, "wake_host", "") or ""))
         except Exception as exc:
