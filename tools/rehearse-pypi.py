@@ -16,7 +16,7 @@
     python tools/rehearse-pypi.py --version 1.1.1 # 装指定的
     python tools/rehearse-pypi.py --keep          # 留下 venv 方便进去看
 
-退出码 0 表示十四步全过。
+退出码 0 表示十五步全过。
 """
 
 from __future__ import annotations
@@ -101,12 +101,21 @@ def walk(version: str, *, keep: bool) -> int:
 
         # 不用本机缓存与镜像：这一轮要证明的是"陌生人能不能装到"，
         # 用一个可能停在旧索引上的缓存，测出来的是"我这台机器装得到"。
-        rc, out = run(
-            [str(vpy), "-m", "pip", "install", "--disable-pip-version-check", "-q",
-             "--no-cache-dir", "--index-url", "https://pypi.org/simple",
-             f"{PACKAGE}=={version}"],
-            cwd=root,
-        )
+        #
+        # 但**刚发完版就跑**会撞上另一件事：JSON API 先更新、simple 索引的
+        # CDN 边缘还停在旧版本上，pip 会说 "No matching distribution"。那不是
+        # 发版失败，是"你跑得太早了"。所以只在这种错上重试，别的错一次就报。
+        for attempt in range(6):
+            rc, out = run(
+                [str(vpy), "-m", "pip", "install", "--disable-pip-version-check", "-q",
+                 "--no-cache-dir", "--index-url", "https://pypi.org/simple",
+                 f"{PACKAGE}=={version}"],
+                cwd=root,
+            )
+            if rc == 0 or "No matching distribution" not in out:
+                break
+            say(f"  （索引还没同步到 {version}，等 20 秒再试：第 {attempt + 1} 次）")
+            time.sleep(20)
         if not record(f"pip install {PACKAGE}=={version}", rc == 0, out[-1200:]):
             return report(steps)
 
@@ -147,6 +156,19 @@ def walk(version: str, *, keep: bool) -> int:
         rc, out = run([str(exe), "--no-color", "doctor", "--config", "./agent.json", "--role", "agent"], cwd=root)
         record("doctor 连得上账本", "连得上" in out and rc == 0, out.strip()[-1200:])
 
+        # 1.2 起账本记得"那台机器是什么"。不填也能跑，但这两条命令装出来必须
+        # 真的存在、而且真的写进了账本 —— 只验"命令不报错"验不出任何东西。
+        rc, out = run([str(exe), "--no-color", "declare",
+                       "--warden-url", f"http://127.0.0.1:{port}", "--warden-token", token,
+                       "--shell", "my-box", "--role", "desktop", "--gpu", "4070TiS",
+                       "--wakeable", "--by", "rehearse"], cwd=root)
+        record("molt declare 写下壳属性", rc == 0 and "已登记" in out, out.strip()[-800:])
+
+        rc, out = run([str(exe), "--no-color", "shells",
+                       "--warden-url", f"http://127.0.0.1:{port}", "--warden-token", token], cwd=root)
+        record("molt shells 读得回来（含 role 与可唤醒）",
+               rc == 0 and "desktop" in out and "可唤醒" in out, out.strip()[-800:])
+
         # 全局开关排在前面也认得 —— 1.1.0 就是在这条上翻的车。
         rc, out = run([str(exe), "--no-color", "agent", "--config", "./agent.json", "--once"], cwd=root)
         record("molt --no-color agent --once 能跑", rc == 0 and "idle" in out, out.strip()[-1200:])
@@ -176,9 +198,11 @@ def walk(version: str, *, keep: bool) -> int:
 
 
 def report(steps: list[tuple[str, bool, str]]) -> int:
-    bad = [(n, d) for n, ok, d in steps if not ok]
+    # 这里曾经写成 (n, d) 却在下面按三元组解包 —— 于是"全部通过"时它从没被执行过，
+    # 第一次真有失败就直接 ValueError。演练脚本自己也要有失败路径的测试。
+    bad = [(name, detail) for name, ok, detail in steps if not ok]
     say("")
-    for name, _, detail in bad:
+    for name, detail in bad:
         say(f"[FAIL] {name}")
         for line in detail.splitlines()[-6:]:
             say("       " + line)
