@@ -20,7 +20,9 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -331,6 +333,9 @@ def test_migration_does_not_wake_a_target_that_is_already_reporting(
     root = tmp_path / "warden"
     _declare(root, role="desktop", wakeable=True, wake_mac="D8-BB-C1-11-C3-D2")
     Warden(root=root).record_heartbeat("shell-b", generation=0, note="agent")
+    # 闸门要的是"观察窗口里又跳了一拍"，而测试里没有真 agent 在报；
+    # 这一条验的是"活着就不发包"，所以只把"又跳了一拍"这件事替换掉。
+    monkeypatch.setattr(cli_module, "_target_is_alive_now", lambda *a, **k: True)
 
     spy = _WakeSpy()
     monkeypatch.setattr(cli_module.W, "wake", spy)
@@ -379,4 +384,34 @@ def test_migration_aborts_when_the_target_never_reports(
     out = capsys.readouterr().out
     assert "没有来账本报到" in out
     assert "这次迁徙没有发生" in out
+    assert Warden(root=root).status()["generation_count"] == 0
+
+def test_a_heartbeat_that_stopped_59_seconds_ago_is_not_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """2026-11-15 23:38:29 的原样复现：最后一拍只过了 59 秒，但机器已经关机。
+
+    旧判据（age <= 60）会放行；新判据要求"观察窗口里又跳了一拍"，关机后
+    第一秒就不成立了。
+    """
+    data = _make_source_data(tmp_path)
+    root = tmp_path / "warden"
+    _declare(root, role="desktop", wakeable=True, wake_mac="D8-BB-C1-11-C3-D2")
+    w = Warden(root=root)
+    w.record_heartbeat("shell-b", generation=0, note="agent")
+
+    # 把"这一拍"伪造成 59 秒前（老判据的边界内），且不会再跳。
+    state = json.loads(w.state_path.read_text(encoding="utf-8"))
+    state["heartbeats"]["shell-b"]["last_seen"] = time.time() - 59
+    w.state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    assert cli_module._target_is_alive_now(Warden(root=root), "shell-b", guard=0.2, interval=0.05) is False
+
+    spy = _WakeSpy()
+    monkeypatch.setattr(cli_module.W, "wake", spy)
+    monkeypatch.setattr(cli_module, "_wait_for_target_heartbeat", lambda *a, **k: None)
+    rc = _migrate_gated(root, data, "--no-wait-wake", "--wake-timeout", "1")
+
+    assert rc == 5
+    assert len(spy.calls) == 1, "判成关着就该去叫醒它"
     assert Warden(root=root).status()["generation_count"] == 0

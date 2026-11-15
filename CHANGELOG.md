@@ -116,6 +116,11 @@ python tools\reload-plugin.py --config G:\molt-fish\data\cmd_config.json `
   `wake_mac` 成为壳属性（`molt declare --wake-mac`），`migrate` 会自动用它。
 - 落地时主动问一句「旧壳要不要关」（`/molt shutdown` / `/molt keep`），问句不再只写进日志。
 
+- 交接之后要确认「另一边真的接走了」：默认等 180 秒看 `consumed_by`，
+  没接走就抢回租约并 resume 源壳（退出码 6，**鱼没死**）。
+- 「目标还活着」的判据从「心跳年龄 ≤ 60 秒」改成「观察窗口里又跳了一拍」——
+  关机后第一秒就不成立。
+
 ### 已知限制
 
 - **插件版本漂移会被念出来**：同步包里带每个插件的版本（\metadata.yaml\ 的

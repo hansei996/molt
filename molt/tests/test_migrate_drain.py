@@ -129,6 +129,8 @@ def _argv(data: Path, root: Path, *extra: str) -> List[str]:
         "migrate",
         # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
         "--skip-target-check",
+        # 也不验"交出去之后等目标接管"（那条见 test_migrate_confirm.py）。
+        "--no-wait-confirm",
         "--data",
         str(data),
         "--shell",

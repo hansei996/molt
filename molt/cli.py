@@ -648,8 +648,11 @@ def _control_client(args: argparse.Namespace) -> Optional[AstrBotControl]:
     return AstrBotControl(url, token)
 
 
-#: 目标壳"还活着"的门槛。心跳每 10 秒一次，这里给 60 秒 —— 容许一轮慢的。
-TARGET_ALIVE_SECONDS = 60.0
+#: 目标壳"还活着"的门槛。心跳每 10 秒一次；60 秒等于容了 6 拍不报，
+#: 而 2026-11-15 23:38 那次翻车正是这样发生的：机器 23:37:30 关机，
+#: 到 23:38:29 才过了 59 秒，快照照样被推了过去。现在收紧到 25 秒，
+#: 并且**光看年龄不够** —— 还要求在这段时间里真的又跳了一拍（见下面）。
+TARGET_ALIVE_SECONDS = 25.0
 
 
 def _target_heartbeat_age(be: Any, shell: str) -> Optional[float]:
@@ -663,6 +666,44 @@ def _target_heartbeat_age(be: Any, shell: str) -> Optional[float]:
         return float(beat.get("age_seconds"))
     except (TypeError, ValueError):
         return None
+
+
+def _heartbeat_marker(be: Any, shell: str) -> Optional[str]:
+    """取这一次心跳的"指纹"（账本给的是可读时间串）。
+
+    用它而不是 `age_seconds`：年龄是算出来的、每次请求都在变，
+    而 `last_seen_readable` 只在**对方真的又报了一拍**之后才变。
+    """
+    try:
+        status = be.status() or {}
+    except MoltError:
+        return None
+    beat = (status.get("heartbeats") or {}).get(shell) or {}
+    marker = beat.get("last_seen_readable")
+    return str(marker) if marker else None
+
+
+def _target_is_alive_now(
+    be: Any, shell: str, *, guard: float = 15.0, interval: float = 3.0
+) -> bool:
+    """"它还活着吗" —— 要看到**新的一拍**，而不是"最后一拍还不算久"。
+
+    2026-11-15 23:38:29 那次：Windows 在 23:37:30 关机，59 秒后
+    `age_seconds` 仍在阈值内，闸门于是说"它还在报心跳，可以直接搬"，
+    把鱼交给了一台正在关机的机器。判据换成"观察窗口内又跳了一拍"，
+    关机后的第一秒就不成立了。
+    """
+    first = _heartbeat_marker(be, shell)
+    age = _target_heartbeat_age(be, shell)
+    if first is None or age is None or age > TARGET_ALIVE_SECONDS:
+        return False
+    deadline = time.monotonic() + max(guard, interval)
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        marker = _heartbeat_marker(be, shell)
+        if marker is not None and marker != first:
+            return True
+    return False
 
 
 def _wait_for_target_heartbeat(
@@ -681,6 +722,34 @@ def _wait_for_target_heartbeat(
         age = _target_heartbeat_age(be, shell)
         if age is not None and age <= TARGET_ALIVE_SECONDS:
             return age
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(interval)
+
+
+#: 交出去之后等目标壳"真的接走"的时限（秒）。
+#:
+#: 这一条是 2026-11-15 23:30 那次的补丁：源壳 drain 了、快照上传了、也登记了，
+#: 然后**什么都不管地退出 0** —— 目标壳的 agent 卡在"停不下来"，
+#: 于是两台壳都不在线。判据只能是账本上的 `consumed_by`，
+#: 因为那是唯一"另一边真的把它取走了"的证据。
+TARGET_CONFIRM_SECONDS = 180.0
+
+
+def _wait_for_consumption(
+    be: Any, generation: int, shell: str, *, timeout: float, interval: float = 5.0
+) -> Optional[float]:
+    """等账本记下 `consumed_by == shell`。成功返回等了多久，超时返回 None。"""
+    started = time.monotonic()
+    deadline = started + max(0.0, timeout)
+    while True:
+        try:
+            status = be.status() or {}
+        except MoltError:
+            status = {}
+        latest = status.get("latest_generation") or {}
+        if str(latest.get("consumed_by") or "") == shell:
+            return time.monotonic() - started
         if time.monotonic() >= deadline:
             return None
         time.sleep(interval)
@@ -796,8 +865,10 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     target_confirmed_alive = False
     if cross_machine and not getattr(args, "skip_target_check", False):
         age = _target_heartbeat_age(be, target_name)
-        if age is not None and age <= TARGET_ALIVE_SECONDS:
-            ok(f"目标壳 {target_name} 还在报心跳（{age:.0f} 秒前）—— 可以直接搬")
+        if age is not None and age <= TARGET_ALIVE_SECONDS and _target_is_alive_now(
+            be, target_name
+        ):
+            ok(f"目标壳 {target_name} 还在报心跳（{age:.0f} 秒前），刚刚又跳了一拍 —— 可以直接搬")
             target_confirmed_alive = True
         else:
             if age is None:
@@ -1108,7 +1179,74 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             warn(f"交还租约失败：{e}")
             dim("  90 秒后会自动过期，不用慌。")
 
+    # ---- 交出控制权之后，必须确认它真的被接住了 ----------------------
+    #
+    # 只有"真的把鱼交出去了"（drained）才需要这一步：没 drain 的迁徙
+    # 源壳一直在说话，鱼从来没离开过，没什么可回滚的。
+    if drained and not getattr(args, "no_wait_confirm", False):
+        wait = float(getattr(args, "confirm_timeout", TARGET_CONFIRM_SECONDS) or 0)
+        print()
+        info(f"等 {args.target} 真的接走这一代（最多 {wait:.0f} 秒）…")
+        took = _wait_for_consumption(be, gen, args.target, timeout=wait)
+        if took is not None:
+            ok(f"{args.target} 已经接走了（{took:.0f} 秒）—— 这次交接完成")
+            return 0
+        # 没接走：把鱼拉回源壳。这是"鱼不能死"的最后一道闸。
+        warn(f"{args.target} 在 {wait:.0f} 秒内没有接走这一代。")
+        return _rollback_to_source(
+            be, args, generation=gen, reason="目标壳没有接管",
+            control=control, drained=drained,
+        )
+
     return 0
+
+
+def _rollback_to_source(
+    be: Any,
+    args: argparse.Namespace,
+    *,
+    generation: int,
+    reason: str,
+    control: Any,
+    drained: bool,
+) -> int:
+    """把鱼拉回源壳：先抢回租约（fencing），再让平台适配器重新上线。
+
+    顺序不能反：先恢复平台、再抢租约，中间那几秒里目标壳可能也起来 ——
+    那就是两只鱼同时在线。抢租约在前，目标壳的 agent 看到 holder 非空
+    就不会落位（`daemon/agent.py::_lease_is_free`）。
+    """
+    print()
+    warn(f"交接失败（{reason}）—— 现在把鱼拉回源壳。")
+    try:
+        epoch2 = be.acquire(args.shell)
+        ok(f"已抢回租约：epoch {epoch2}（目标壳看到有人持租约就不会落位）")
+    except MoltError as e:
+        bad(f"抢回租约失败：{e}")
+        dim("  鱼现在只在账本里 —— 请人工确认哪台壳该起来。")
+        return 7
+
+    if drained:
+        if control is None:
+            warn("这次迁徙没有控制面凭据 —— 我没法把源壳叫回来。")
+            dim("  下一步：molt resume，或重启源壳的 AstrBot。")
+            return 6
+        try:
+            r = control.resume()
+            resumed = r.get("resumed") or []
+            if resumed:
+                ok(f"源壳已恢复：{', '.join(resumed)}")
+                ok("鱼回到源壳了 —— 这次迁徙没有发生，鱼没死。")
+                return 6
+            warn("resume 没有恢复任何平台 —— 它现在仍然是哑的。")
+            dim("  下一步：molt resume（或重启源壳的 AstrBot）。")
+            return 6
+        except MoltError as e:
+            bad(f"恢复源壳失败：{e}")
+            dim("  下一步：molt resume（或重启源壳的 AstrBot）。")
+            return 7
+    dim("  源壳没被 drain，鱼一直在说话。")
+    return 6
 
 
 
@@ -2987,6 +3125,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-archive",
         action="store_true",
         help="只做热备不打包（用于本地调试）",
+    )
+    s.add_argument(
+        "--confirm-timeout",
+        type=float,
+        default=TARGET_CONFIRM_SECONDS,
+        help=f"交出去之后等目标壳接走的时限（秒，默认 {TARGET_CONFIRM_SECONDS:.0f}）",
+    )
+    s.add_argument(
+        "--no-wait-confirm",
+        action="store_true",
+        dest="no_wait_confirm",
+        help="不等目标壳接管（脚本/测试用；真实使用不要加）",
     )
     s.add_argument(
         "--keep-lease",
