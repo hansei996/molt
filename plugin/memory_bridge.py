@@ -30,6 +30,12 @@
    而不是抛错。迁徙本身不该因为"没记住"被判失败。
 4. **永不抛**：任何异常都收成 `ok=False` —— 这段代码跑在 AstrBot 的事件循环里，
    抛出去会变成一条没人看的 traceback，甚至打断别的钩子。
+5. **不抬档位（2026-11-15 定案 A）**：这类记录在对方的合同里是
+   `visibility=bot_self` / `sayability=indirect`（私人档案，按设计不注入对话），
+   所以它"记得住但想不起来"。老大选了接受为档案 —— 记录的价值在可追溯，不在被复述。
+   **我们不传 `visibility` / `sayability` / `memory_domain`**：档位由对方的合同决定。
+   谁想改成"能被检索到"，必须先改 `molt/tests/test_memory_tier.py`（那条测试钉的就是这件事），
+   因为"不做某件事的决定"最容易在以后被顺手做掉。
 """
 
 from __future__ import annotations

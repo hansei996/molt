@@ -456,6 +456,34 @@ backup-20261114T204024-desktop-h2kgiao.tar.gz        7.3 MB   来自 desktop-h2k
 这正是这条功能前后错过两次的地方。
 
 
+## 它记得住，但不会主动提起（这是刻意的）
+
+搬完之后它会往 memory_companion 写一条自己的观察：
+
+> ot_observed_activity · source_kind observed · owner self · 第 N 代 · 落在哪台机器
+
+这条记录**永久、可追溯、归属正确**。但它**不会在聊天里突然提起来** —— 因为那一类记忆在
+memory_companion 的合同里是 isibility=bot_self / sayability=indirect（私人档案，
+按设计不注入对话）。真机上能直接看到：
+
+`
+selected_memory_ids: []
+blocked_reasons: [{reason:prefiltered_out_of_search_range:89;...}]
+injection_chars: 0
+`
+
+这是一个**产品决定，不是缺陷**（2026-11-15 定案 A，见 docs/ARCH.md §14.4）：
+
+- **A 接受为档案**（采纳）：记录的价值在可追溯，不在被复述。它认账，但不念叨。
+- B 抬进检索档位（否决）：要改对方插件的行为，副作用是它可能在不相干的对话里突然提起自己搬过家。
+
+想让它说的时候，直接问就行 —— 「你还记得自己是怎么到这台机器上的吗」这类问题它会去翻档案；
+答案常常是记着这件事但说不出细节，那是档案与对话的区别，不是它撒谎。
+
+这条决定有一条测试钉着：molt/tests/test_memory_tier.py 断言我们**永远不覆盖**
+isibility / sayability。谁想改成 B，必须先改那个文件 —— 因为不做某件事的决定
+最容易在以后被顺手做掉。
+
 ## 到了新壳上：管理页面、插件
 
 ### 管理页面：一样的界面，不一样的地址
