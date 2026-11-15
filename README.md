@@ -37,12 +37,13 @@ docker run -d --name molt-warden -p 6186:6186 \
 `sha-<commit>`，手动触发只打 `latest` 与 sha（不占版本号）。见
 [`.github/workflows/release.yml`](.github/workflows/release.yml)。
 
-> **第一次发布后，这个包默认是私有的。** `docker pull` 报 `denied` 或
-> `manifest unknown` 指的就是这个 —— 不是命令写错，也不是网络问题。去
-> [包的设置页](https://github.com/hansei996/molt/pkgs/container/molt) 把可见性改成
-> **Public** 一次就够；那是账号级决定，脚本替不了。
+> 这个包现在是 **public** 的（匿名 `ghcr.io/v2/…/manifests/latest` 回 200）。
+> 但 ghcr 上**新建**的包默认是私有的 —— 如果你是 fork 自己发版，第一次之后要
+> 去 [包的设置页](https://github.com/hansei996/molt/pkgs/container/molt) 把可见性改成
+> **Public** 一次；`docker pull` 报 `denied` / `manifest unknown` 指的就是这件事，
+> 不是命令写错，也不是网络问题。
 >
-> 私有期间想用，就本地构建（不需要网络，只有 `python:3.12-slim` 要拉一次）：
+> 不想用镜像就本地构建（不需要网络，只有 `python:3.12-slim` 要拉一次）：
 >
 > ```bash
 > git clone https://github.com/hansei996/molt && cd molt
