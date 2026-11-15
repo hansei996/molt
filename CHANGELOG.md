@@ -78,6 +78,10 @@ python tools\reload-plugin.py --config G:\molt-fish\data\cmd_config.json `
   缓存目录（`meme_manager`）不搬；`--with-plugin-data 插件名` 可以追加；
   单个记忆目录超过 256 MB 会**整目录不搬**并报错，而不是搬一半。
 
+- 搬家会把 `<插件>_config.json` 一起带走，落位时只写**这台壳也装了的**插件；
+  结构差太多的跳过、机器绑定的键（如 dsh_connector 的 `http_base_url`）保留本机的，
+  每次都留 `.molt-before-land-*` 备份。不想带就加 `molt land --no-plugin-configs`。
+
 ### 已知限制
 
 - **插件版本漂移会被念出来**：同步包里带每个插件的版本（\metadata.yaml\ 的

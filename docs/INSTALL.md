@@ -281,6 +281,16 @@ molt shells --warden-url http://192.168.50.50:6186 --warden-token <token>
 
 ---
 
+## 6.7 搬家时自动带插件配置（1.3.0 起）
+
+落位时默认把**搬来的插件配置**写回这台壳，只写这边也装了的插件：
+
+- 结构差太多的（多半两个大版本）跳过，保留这边的；
+- 机器绑定的键（目前只有 `astrbot_plugin_dsh_connector` 的 `http_base_url`）保留本机的；
+- 每次写之前留 `<名字>.molt-before-land-<时间戳>`；
+- 不想带就 `molt land --no-plugin-configs`；
+- 写完要重载那个插件才生效：`python tools/reload-plugin.py --config <cmd_config.json> <插件名>`。
+
 ## 7. 它现在在哪？（不用问它）
 
 三条路，随便挑一条：

@@ -36,7 +36,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import __version__, initcfg, pluginsync
+from . import __version__, initcfg, landcfg, pluginsync
 from .backend import LocalBackend, RemoteBackend, open_backend
 from .language import move_count, move_count_after, snapshot_tag
 from .epoch import DEFAULT_LEASE_TTL_SECONDS
@@ -64,6 +64,7 @@ from .soul import (
     collect_memory_dirs,
     collect_runtime_pip,
     copy_memory_dir,
+    copy_plugin_configs,
     hot_backup,
     sha256_of,
     sqlite_check,
@@ -1133,6 +1134,21 @@ def _snapshot_payload(
     if rc != 0:
         return rc, artifacts, None
 
+    # 插件配置：搬来的这一份是"源壳上当时正在生效的那份"。
+    # 落位时只写目标壳也装了的插件（见 molt.landcfg）。
+    try:
+        cfg_arts = copy_plugin_configs(src, dest_dir)
+    except (Fatal, NeedsHuman) as e:
+        bad(str(e))
+        return 4, artifacts, None
+    if cfg_arts and not quiet:
+        info(f"带上 {len(cfg_arts)} 份插件配置（落位时只写这边也装了的插件）")
+        for art in cfg_arts[:6]:
+            print(f"    {C.GRN}{C.S_OK}{C.R} {art.relpath}  {art.bytes} B")
+        if len(cfg_arts) > 6:
+            dim(f"    … 共 {len(cfg_arts)} 份")
+    artifacts.extend(cfg_arts)
+
     ident = probe_identity(
         Path(astrbot_src) if astrbot_src else None,
         data_path=src,
@@ -1934,6 +1950,34 @@ def cmd_land(args: argparse.Namespace) -> int:
             return 0
 
     print()
+
+    # --- 搬来的插件配置：只写这台壳也装了的插件 ---
+    #
+    # 位置刻意放在机器覆写层之后：覆写层只碰 cmd_config.json（壳自己的事），
+    # 这一层只碰 data/config/<插件>_config.json（鱼喜欢什么）。两者互不覆盖，
+    # 但顺序错了会让人以为是同一件事。
+    if not getattr(args, "no_plugin_configs", False):
+        try:
+            carried = landcfg.apply_carried_configs(gen_dir, data_dir)
+        except (Fatal, NeedsHuman) as e:
+            bad(f"插件配置没能写回：{e}")
+            dim("  落位本身已完成；这不会挡住启动，只是这台壳还用着旧的那份配置。")
+        else:
+            if carried["applied"] or carried["schema"] or carried["not_installed"]:
+                head("搬来的插件配置")
+                for plugin in carried["applied"]:
+                    bak = carried["backups"].get(plugin) or ""
+                    extra = f"（旧文件留在 {Path(bak).name}）" if bak else ""
+                    print(f"    {C.GRN}{C.S_OK}{C.R} {plugin} 已换成搬来的那份{extra}")
+                for plugin in carried["same"]:
+                    print(f"    {C.DIM}{C.S_OK} {plugin} 本来一样，没动{C.R}")
+                for plugin in carried["schema"]:
+                    warn(f"{plugin} 两边结构差太多（多半插件版本不同），保留这边的")
+                for plugin in carried["not_installed"]:
+                    dim(f"  {plugin} 这边没装 —— 不写（装了才会有配置）")
+                if carried["applied"]:
+                    dim("  这些配置要下一次重载插件才生效：tools/reload-plugin.py")
+
     ok("现在这台壳的 data/ 就是那个存在的状态了。")
     if cfg_path.exists():
         dim("  ⚠️ 平台适配器已关闭：这只鱼现在还没连上 QQ。")
@@ -2930,6 +2974,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="跳过「目标 data 目录看起来还活着」的检查（确认那个 AstrBot 真的停了再用）",
+    )
+    s.add_argument(
+        "--no-plugin-configs",
+        dest="no_plugin_configs",
+        action="store_true",
+        help="不把搬来的插件配置写回这台壳（默认会写，只写这边也装了的插件）",
     )
     s.set_defaults(func=cmd_land)
 

@@ -189,6 +189,58 @@ def copy_memory_dir(data_dir: Path, rel: str, dest_dir: Path) -> List[Artifact]:
     return artifacts
 
 
+#: 插件配置放在 `data/config/` 下，一个插件一份 `<插件名>_config.json`。
+#:
+#: 为什么这些也要进快照：主人 2026-11-15 的直觉是对的 —— **搬家时源壳上的配置
+#: 就是"当时正在生效的那份"**，不需要比 mtime（两台机器的时钟不可靠）。
+#: 落位时再看目标壳装没装这个插件，装了才写（见 molt.landcfg）。
+PLUGIN_CONFIG_DIR = "config"
+
+#: 只认这个后缀的普通文件；`*.bak-*` / `*.molt-before-sync-*` 这些历史备份不搬。
+_PLUGIN_CONFIG_SUFFIX = "_config.json"
+
+
+def collect_plugin_configs(data_dir: Path) -> List[str]:
+    """这次搬家要带走哪些插件配置（返回 `config/` 下的文件名）。"""
+    cfg_dir = data_dir / PLUGIN_CONFIG_DIR
+    if not cfg_dir.is_dir():
+        return []
+    out: List[str] = []
+    for path in sorted(cfg_dir.iterdir()):
+        if not path.is_file():
+            continue
+        name = path.name
+        if not name.endswith(_PLUGIN_CONFIG_SUFFIX):
+            continue
+        if any(marker in name for marker in (".bak-", ".molt-before-sync", ".molt-part")):
+            continue
+        out.append(name)
+    return out
+
+
+def copy_plugin_configs(data_dir: Path, dest_dir: Path) -> List[Artifact]:
+    """把插件配置按字节搬进 `dest_dir/config/`，返回 manifest 条目。
+
+    按字节而不是"读出来再写回去"：配置里可能有 BOM、可能有固定的缩进风格，
+    而落位时要拿它和原文件逐字节比较 —— 顺手重排一下就会变成"每一份都不同"。
+    """
+    artifacts: List[Artifact] = []
+    for name in collect_plugin_configs(data_dir):
+        src = data_dir / PLUGIN_CONFIG_DIR / name
+        dst = dest_dir / PLUGIN_CONFIG_DIR / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(src.read_bytes())
+        artifacts.append(
+            Artifact(
+                relpath=f"{PLUGIN_CONFIG_DIR}/{name}",
+                kind="copy",
+                bytes=dst.stat().st_size,
+                sha256=sha256_of(dst),
+            )
+        )
+    return artifacts
+
+
 def sha256_of(path: Path, chunk: int = 1 << 20) -> str:
     """流式计算 sha256。大文件（1325 MB 的 site-packages）不读进内存。"""
     h = hashlib.sha256()
