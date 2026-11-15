@@ -24,20 +24,30 @@
 装一次就不用再管 —— 所以它最适合用镜像。
 
 ```bash
-git clone https://github.com/hansei996/molt && cd molt
-docker build -t molt:dev .
 docker run -d --name molt-warden -p 6186:6186 \
   -v molt-data:/var/lib/molt \
   -e MOLT_TOKEN="$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')" \
-  molt:dev
+  ghcr.io/hansei996/molt:latest
 ```
 
 镜像**没有 token 就不启动**。这是刻意的：容器里随机生成一个 token，意味着每次重启都换，
 所有壳一起 401，而症状看起来像网络问题。同一个 token 要抄进每台壳的配置里。
 
-> 预构建镜像 `ghcr.io/hansei996/molt` 还没推上去（需要一把 registry 凭据，
-> 见 [docs/V1.0-PLAN.md §2.2](docs/V1.0-PLAN.md)）。在那之前就走上面这三条 ——
-> 构建过程不需要网络，只有 `python:3.12-slim` 这一个基础镜像要拉一次。
+镜像由发版 Actions 自己构建并推送：推 `v*` 标签时打 `latest` / `1.0.0` / `1.0` / `1` /
+`sha-<commit>`，手动触发只打 `latest` 与 sha（不占版本号）。见
+[`.github/workflows/release.yml`](.github/workflows/release.yml)。
+
+> **第一次发布后，这个包默认是私有的。** `docker pull` 报 `denied` 或
+> `manifest unknown` 指的就是这个 —— 不是命令写错，也不是网络问题。去
+> [包的设置页](https://github.com/hansei996/molt/pkgs/container/molt) 把可见性改成
+> **Public** 一次就够；那是账号级决定，脚本替不了。
+>
+> 私有期间想用，就本地构建（不需要网络，只有 `python:3.12-slim` 要拉一次）：
+>
+> ```bash
+> git clone https://github.com/hansei996/molt && cd molt
+> docker build -t molt:dev .        # 然后上面那条把 ghcr.io/... 换成 molt:dev
+> ```
 
 壳那侧仍然是 `pip install`（见下一节）—— 壳要的是它自己那台机器的路径、python、容器名，
 那些东西装进镜像等于把某台机器的细节固化进发行物。

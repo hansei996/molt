@@ -32,18 +32,20 @@ molt --version
 如果你只是想要一个账本，不想管 python 环境：
 
 ```bash
-git clone https://github.com/hansei996/molt && cd molt
-docker build -t molt:dev .        # 构建过程不需要网络，只拉一次 python:3.12-slim
 docker run -d --name molt-warden -p 6186:6186 \
   -v molt-data:/var/lib/molt \
   -e MOLT_TOKEN="$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')" \
-  molt:dev
+  ghcr.io/hansei996/molt:latest
 ```
 
 - 没设 `MOLT_TOKEN` 时容器会**拒绝启动**（退出码 78）并打印怎么配。这不是故障。
 - 数据在 `molt-data` 这个 named volume 里；换机器时搬它。
-- 预构建镜像 `ghcr.io/hansei996/molt` 尚未发布（需要 registry 凭据，
-  见 [V1.0-PLAN.md §2.2](V1.0-PLAN.md)）。
+- 镜像由发版 Actions 推送（推 `v*` 标签触发）。**包默认私有**：`docker pull` 报
+  `denied` / `manifest unknown` 就是它 —— 去
+  [包的设置页](https://github.com/hansei996/molt/pkgs/container/molt) 改成 Public 一次即可。
+- 不想等那一次点击，就本地构建（不需要网络，只拉一次 `python:3.12-slim`）：
+  `git clone https://github.com/hansei996/molt && cd molt && docker build -t molt:dev .`，
+  然后把上面那条的 `ghcr.io/hansei996/molt:latest` 换成 `molt:dev`。
 
 壳那侧仍然按下面第 1、2、3 步走 —— 壳跑在你要搬去的那台机器上，不是容器里。
 
