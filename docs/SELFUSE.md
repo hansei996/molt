@@ -440,6 +440,22 @@ backup-20261114T204024-desktop-h2kgiao.tar.gz        7.3 MB   来自 desktop-h2k
 > 那条测试叫 `test_plugin_marks_state_even_when_the_send_fails`，
 > docstring 写着"发不出去也不能每分钟重试一次"。已经删掉换成相反断言的用例。
 
+**真机验到了（2026-11-15 06:57 · QQ 私聊）**：
+
+![它自己说了一句：我刚从 UGREEN-776B 搬过来，这是第 19 代](assets/qq-arrival-announce-2026-11-15.png)
+
+同一时刻 `data/plugins/astrbot_plugin_molt/arrival_state.json` 是：
+
+```json
+{ "announced_generation": 19, "announced_at": "2026-11-15 06:57:33", "last_detail": "announced" }
+```
+
+两件事对得上才算验过：**人看见了那句话**（上面这张截图），
+**账本记的是"送达"不是"组装"**（`mark()` 现在只在 `event.send()` 正常返回之后才执行）。
+只有前者，说明不了它是被正确记账的；只有后者，说明不了它真的到了人眼前 ——
+这正是这条功能前后错过两次的地方。
+
+
 ## 到了新壳上：管理页面、插件
 
 ### 管理页面：一样的界面，不一样的地址
