@@ -18,6 +18,20 @@
 
 ---
 
+## 装两样东西，先选一条路
+
+这个项目由两块组成，**分别装在两台机器上**：
+
+| 装什么 | 装在哪 | 怎么装 |
+|---|---|---|
+| **账本**（Warden） | 一直开着的那台（NAS / 小主机） | docker 一条命令，或者 `pip install` 后 `molt serve` |
+| **壳的守护进程**（agent） | 会关机、会打游戏的那台（你的电脑） | `pip install molt-handoff` |
+
+下面两节是并列的两条路，**选一条走完就行**，别两条都装 —— 同一个端口上跑两个账本，
+症状是两边都 401，看起来像网络问题。
+
+---
+
 ## 一条命令把账本跑起来（docker）
 
 账本是「记忆待在哪台机器上」的那个权威。它只有一处状态（一个目录）和一份凭据（一个 token），
@@ -62,6 +76,12 @@ molt timeline --warden-url http://<账本IP>:6186 --warden-token <token>
 # ✓ 已经搬过 19 次，完成落地 13 次。  -> molt-timeline.html
 ```
 
+**刚装完还没有迁徙记录？** 先看示例（内置数据，不连账本、不联网）：
+
+```bash
+molt timeline --demo          # -> molt-timeline.html，页面上会写明"这是示例数据"
+```
+
 得到一个**单文件、零外部请求**的 HTML：四张统计卡、一条按时间倒序的代次轴
 （每代从哪台机器出发、多少字节、谁提交的、谁取走的、隔了多久）、中途备份表、
 「现在谁还在报心跳」、最近日志。断网也能打开，可以直接发给别人看。
@@ -80,7 +100,9 @@ pip install molt-handoff        # 发行名是 molt-handoff；导入名/命令�
 molt init --role warden --root ./warden      # 立账本，生成 token 并打印 serve 命令
 molt init --role agent --out ./agent.json --shell my-box \
     --data ./astrbot-data --warden-url http://<账本IP>:6186 --token <上一步的 token>
+molt serve --root ./warden                   # 账本起来（它会打印这一行，照抄即可）
 molt doctor --config ./agent.json --role agent   # 自检：加载器读得过吗 / 连得上吗 / token 对吗
+molt agent --config ./agent.json --once      # 空跑一轮：只读账本、只打印判断
 ```
 
 `molt init` 写出来的配置会**先交给守护进程自己的加载器读一遍**，读不过就不写盘 ——

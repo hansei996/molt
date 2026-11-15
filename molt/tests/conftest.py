@@ -227,3 +227,87 @@ if _plugin_str not in sys.path:
 _molt_str = str(MOLT_ROOT)
 if _molt_str not in sys.path:
     sys.path.insert(0, _molt_str)
+
+
+# ---------------------------------------------------------------------------
+# 总闸：**任何一条测试都不许真的动这台机器的电源**
+#
+# 由来（2026-11-15 15:11–15:31 真事故）：`test_molt_agent.py` 里那几条关机/睡眠
+# 用例靠 `monkeypatch.setattr(mod, "_suspend_now", ...)` 把真动作换掉，而 `mod`
+# 当时是 `tools/molt-agent.py` 那个**垫片** —— 它只是把名字复制进自己的 globals，
+# 真正执行的是 `molt.daemon.agent`。补丁打在影子上，`_suspend_now()` 真的被调用：
+# 那 20 分钟里这台机器被自己的测试挂起了四次，最后一次以 `Kernel-Power 41` /
+# `6008`（非正常关机）收场，鱼跟着断线。
+#
+# 两条教训：①测试加载器必须指向**真模块**，不是垫片；②光靠"每个用例自己记得打
+# 补丁"不够 —— 这里再加一道总闸，谁忘了谁就 AssertionError，而不是让跑测试的
+# 人电脑被关掉。
+# ---------------------------------------------------------------------------
+import subprocess as _subprocess  # noqa: E402
+
+import pytest  # noqa: E402
+
+_POWER_WORDS = ("shutdown", "shutdown.exe", "powercfg", "rundll32", "setsuspendstate")
+
+
+def _refuse_power(what: str):
+    def _boom(*_args, **_kwargs):
+        raise AssertionError(
+            f"测试里不许真的执行电源动作（{what}）。"
+            "要测关机/睡眠请 monkeypatch `_suspend_now` 或注入假 runner —— "
+            "打在垫片上不会生效，见本文件末尾的说明。"
+        )
+
+    return _boom
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _never_touch_the_real_power():
+    """把两台守护进程里的电源入口全部换成"一调用就炸"。"""
+    from molt.daemon import agent as _agent_impl
+    from molt.daemon import homer as _homer_impl
+
+    patches = []
+
+    def _patch(obj, name, value):
+        original = getattr(obj, name)
+        setattr(obj, name, value)
+        patches.append((obj, name, original))
+
+    if hasattr(_agent_impl, "_suspend_now"):
+        _patch(_agent_impl, "_suspend_now", _refuse_power("_suspend_now"))
+
+    class _GuardedSubprocess:
+        """只拦电源命令，其它照常放行（有些用例要真跑 python）。"""
+
+        def __getattr__(self, name):
+            real = getattr(_subprocess, name)
+            if name not in ("run", "call", "check_call", "check_output", "Popen"):
+                return real
+
+            def _wrapper(*args, **kwargs):
+                argv = args[0] if args else kwargs.get("args")
+                text = (
+                    " ".join(str(x) for x in argv)
+                    if isinstance(argv, (list, tuple))
+                    else str(argv)
+                )
+                lowered = text.lower()
+                for word in _POWER_WORDS:
+                    if word in lowered:
+                        raise AssertionError(
+                            f"测试里不许真的执行电源动作（{name}: {text}）。请注入假 runner。"
+                        )
+                return real(*args, **kwargs)
+
+            return _wrapper
+
+    for module in (_agent_impl, _homer_impl):
+        if hasattr(module, "subprocess"):
+            _patch(module, "subprocess", _GuardedSubprocess())
+
+    try:
+        yield
+    finally:
+        for obj, name, original in reversed(patches):
+            setattr(obj, name, original)

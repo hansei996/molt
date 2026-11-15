@@ -8,9 +8,14 @@
 #   1. **运行时零依赖**。Warden 必须能在 NAS 宿主上裸跑（实测那台 UGREEN
 #      只有 python 3.10.7，没装任何第三方包）。所以 `dependencies = []`
 #      不是"暂时没写"，是设计。要加依赖先问一句：NAS 上装得上吗？
-#   2. `py-modules`/`packages` 只列 `molt`。仓库根下还有 `plugin/`（AstrBot
-#      侧插件）和 `tools/`（一次性脚本），它们**不是**本包的子模块，
+#   2. `packages` 只列 `molt` 与 `molt.daemon`。仓库根下还有 `plugin/`（AstrBot
+#      侧插件）和 `tools/`（一次性脚本 + 两个垫片），它们**不是**本包的子模块，
 #      让 setuptools 自动发现它们会把一次 `pip install` 变成拷一堆临时脚本。
+#
+#      `molt.daemon` 必须**在 wheel 里**：两个守护进程原来住在 `tools/` 下，
+#      而 `tools/` 不随包发布 —— 于是 `pip install` 的人拿不到守护进程，
+#      `molt init --role agent` 会报"找不到 tools/molt-agent.py"。那不是文档
+#      错，是代码的位置错：一个只能从 git 仓库里跑起来的守护进程，等于没发布。
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -26,7 +31,7 @@ build-backend = "setuptools.build_meta"
 # 往 site-packages 里放一个 `molt/` 目录，后装的那个会盖掉先装的。判据很简单 ——
 # 装我们的之前先 `pip uninstall -y molt`（见 docs/INSTALL.md）。
 name = "molt-handoff"
-version = "1.0.1"
+version = "1.1.0"
 description = "让一个数字生命从一台机器，走进另一台机器；旧壳留下，魂走。"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -64,7 +69,7 @@ Documentation = "https://github.com/hansei996/molt/blob/main/docs/ARCH.md"
 Source = "https://github.com/hansei996/molt"
 
 [tool.setuptools]
-packages = ["molt"]
+packages = ["molt", "molt.daemon"]
 
 [tool.pytest.ini_options]
 testpaths = ["molt/tests"]

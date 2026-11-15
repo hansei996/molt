@@ -65,6 +65,7 @@ from .soul import (
     sqlite_check,
 )
 from .transfer import extract_archive, make_archive, restore_into
+from . import render
 from .render import render_timeline
 from .overlay import (
     DEFAULT_DASHBOARD_PORT,
@@ -1860,18 +1861,33 @@ def cmd_timeline(args: argparse.Namespace) -> int:
     2 = 参数不合法
     4 = 连不上 Warden / Warden 报错
     """
-    be = _backend(args)
-    try:
-        history = be.history()
-    except MoltError as e:
-        bad(f"读不到账本：{e}")
-        return 4
+    demo = bool(getattr(args, "demo", False))
+    if demo:
+        # 不需要账本、不需要服务器、不联网 —— 刚装完的人账本是空的，
+        # 而"看见迁移日志"这件事恰恰是他最想看的那一眼。
+        history = render.demo_history()
+    else:
+        be = _backend(args)
+        try:
+            history = be.history()
+        except MoltError as e:
+            bad(f"读不到账本：{e}")
+            return 4
 
     if getattr(args, "json", False):
         print(json.dumps(history, ensure_ascii=False, indent=2))
         return 0
 
-    page = render_timeline(history)
+    page = render_timeline(
+        history,
+        title="它搬过几次家 · 示例" if demo else "它搬过几次家",
+        note=(
+            "这是示例数据 —— 不是你机器上的迁移记录。\n"
+            "真的那一页，等你第一次迁徙之后用 molt timeline 生成。"
+            if demo
+            else ""
+        ),
+    )
     out = Path(args.out).expanduser() if args.out else Path("molt-timeline.html")
     if out.parent and str(out.parent) not in ("", "."):
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1883,6 +1899,8 @@ def cmd_timeline(args: argparse.Namespace) -> int:
 
     generations = history.get("generations") or []
     done = sum(1 for g in generations if g.get("consumed_by"))
+    if demo:
+        warn("这是示例数据 —— 不是你机器上的记录。真的那一页等你迁徙一次之后再生成。")
     ok(f"已经搬过 {len(generations)} 次，完成落地 {done} 次。")
     if generations:
         latest = generations[-1]
@@ -2144,9 +2162,14 @@ def cmd_init(args: argparse.Namespace) -> int:
         kv("token 文件", token_path)
         kv("token", token)
         info("下一步：")
+        # 这里原来写的是 `python3 -m molt.cli serve ...`。两个问题：
+        # Windows 上没有 `python3` 这个名字（实测 exit 9009），而且 `molt`
+        # 命令既然已经装了就该用它 —— 别人照抄的那一行，必须在他自己的
+        # 机器上真能跑。
+        dim(f"  molt serve --root {root} --host 0.0.0.0 --port 6186 --token {token}")
         dim(
-            f"  python3 -m molt.cli serve --root {root} --host 0.0.0.0 "
-            f"--port 6186 --token {token}"
+            f"  （没装命令行入口时等价写法：{sys.executable} -m molt.cli serve "
+            f"--root {root} --port 6186 --token {token}）"
         )
         dim("  然后交给一个守护进程（NAS 上用 tools/molt-supervise.py，它只补不杀）")
         dim("  另外两台壳的配置里，warden_token 都填这个值")
@@ -2718,6 +2741,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="不打摘要，直接把时间轴的原始数据打成 JSON（给脚本用）",
     )
+    s.add_argument(
+        "--demo",
+        action="store_true",
+        help="用内置示例数据渲染，不连账本（第一次装完想看看它长什么样）",
+    )
     s.set_defaults(func=cmd_timeline)
 
     # observe
@@ -2747,10 +2775,39 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+#: 两个常驻守护进程的名字。它们**不是**普通子命令：一个是长期运行的循环、
+#: 有自己的 argparse 和退出码语义，所以不走 `build_parser()`，在入口处直接
+#: 转交。这样 `molt agent --config x --once` 与
+#: `python -m molt.daemon.agent --config x --once` 逐字等价。
+#:
+#: 为什么不挂成 argparse 子命令：试过了，`nargs=REMAINDER` + `parents=[common]`
+#: 的子解析器**不接管未知开关** —— `molt agent --config x` 会被顶层 parser
+#: 判成 `unrecognized arguments: --config`。与其和 argparse 较劲，不如在入口
+#: 认这两个词：它们本来就是进程入口，不是子命令。
+_DAEMON_COMMANDS = ("agent", "homer")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     # 必须在任何输出之前——见 _setup_console 的文档。
     # 漏了这一步的后果实测过：中文 Windows 上第一行输出就 traceback。
     _setup_console()
+
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] in _DAEMON_COMMANDS:
+        # 装成 wheel 之后没有 tools/，所以这两条命令必须由包自己提供 ——
+        # 否则 `pip install` 的人拿到一份配置，却没有一条能跑它的命令。
+        import importlib
+
+        module = importlib.import_module(f"molt.daemon.{raw[0]}")
+        try:
+            return int(module.main(raw[1:]))
+        except MoltError as e:
+            bad(f"{type(e).__name__}: {e}")
+            return 1
+        except KeyboardInterrupt:
+            print()
+            warn("被中断")
+            return 130
 
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -2762,6 +2819,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         print()
         dim("  第一次用？先跑：molt doctor && molt shell")
+        dim("  装好之后：molt init --role warden|agent|homer；常驻用 molt agent --config <json>")
         return 0
 
     try:

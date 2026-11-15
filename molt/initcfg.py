@@ -20,6 +20,7 @@ token、一个壳名，任何一处写错，症状都是"它不动"，而且不�
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import os
@@ -163,9 +164,10 @@ def write_json_atomic(path: Path, payload: Dict[str, Any], *, force: bool = Fals
 def load_builder(path: Path, module_name: str) -> Any:
     """按文件路径加载守护进程脚本，拿它自己的 `Settings`。
 
-    守护进程不能 `import molt`（它是被 `python tools/xxx.py` 直接跑起来的），
-    所以这里反过来：用 importlib 按路径把它们当模块加载，只为了**用它们
-    自己的校验器**验一遍 —— 生成器自己认为对不算数。
+    这条路走的是**仓库模式**（`tools/` 就在旁边）。装成 wheel 之后没有
+    `tools/`，参见 `builder_module()`。
+
+    为什么要用"它自己的"校验器：生成器自己认为对不算数。
     """
     if not path.is_file():
         raise Fatal(f"找不到 {path} —— --molt-pkg 指向的目录里应该有 tools/")
@@ -185,6 +187,30 @@ def load_builder(path: Path, module_name: str) -> Any:
 _ADVISORY_PREFIXES = ("execute 是 false",)
 
 
+def builder_module(kind: str, molt_pkg: str) -> Any:
+    """拿到守护进程模块本身，两条路依次试。
+
+    1. **仓库模式**：`<molt_pkg>/tools/molt-agent.py`（或 `molt-homer.py`）。
+    2. **安装模式**：直接 `import molt.daemon.agent`。
+
+    第二条是 v0.7 补上的。在那之前只有第一条，而 `pip install` 装到的包里
+    没有 `tools/` —— 于是陌生人照 `docs/INSTALL.md` 走到第 2 步就拿到一句
+    「找不到 .../site-packages/tools/molt-agent.py」，连配置都写不出来。
+    """
+    script = "molt-agent.py" if kind == "agent" else "molt-homer.py"
+    path = Path(molt_pkg) / "tools" / script
+    if path.is_file():
+        return load_builder(path, f"_molt_init_{kind}")
+    module_name = f"molt.daemon.{kind}"
+    try:
+        return importlib.import_module(module_name)
+    except ImportError as e:
+        raise Fatal(
+            f"找不到 {path}，也 import 不到 {module_name}（{e}）—— "
+            f"这份配置验证不了，不写盘。用 pip 装的请确认 `molt --version` 能跑。"
+        )
+
+
 def validate_config(
     path: Path,
     *,
@@ -192,10 +218,8 @@ def validate_config(
     molt_pkg: str,
 ) -> List[str]:
     """用守护进程自己的加载器读一遍，返回它认为的**阻塞性**问题（空 = 通过）。"""
-    tools = Path(molt_pkg) / "tools"
-    script = "molt-agent.py" if kind == "agent" else "molt-homer.py"
     try:
-        module = load_builder(tools / script, f"_molt_init_{kind}")
+        module = builder_module(kind, molt_pkg)
     except Fatal as e:
         # 加载器本身找不到，也是"这份配置现在用不了"的一种 —— 归到问题列表里
         # 返回，调用方就能统一按"不写盘"处理，而不是两种失败两种文案。
@@ -269,17 +293,29 @@ def new_token(nbytes: int = 24) -> str:
     return secrets.token_urlsafe(nbytes)
 
 
+def daemon_command(kind: str, *, config: Path | str) -> str:
+    """跑守护进程的**可移植**写法。
+
+    `molt agent` 是 v0.7 加的入口：装成 wheel 之后没有 `tools/`，而
+    `python tools/molt-agent.py` 这种写法在别人的机器上根本不存在。
+    命令行和文档都改用这一句。
+    """
+    return f"molt {kind} --config {config}"
+
+
 def next_steps(role: str, *, out: Path, python: str) -> List[str]:
     if role == "agent":
         return [
-            f"先看一眼（不执行任何动作）：{python} tools/molt-agent.py --config {out} --once",
+            f"先看一眼（不执行任何动作）：{daemon_command('agent', config=out)} --once",
             f"确认壳名对得上之后，把 {out} 里的 \"execute\" 改成 true",
             "然后让它常驻：把这条命令放进启动项（或计划任务）",
+            f"（在仓库里没装包也能跑：{python} tools/molt-agent.py --config {out} --once）",
         ]
     if role == "homer":
         return [
-            f"先看一眼：{python} tools/molt-homer.py --config {out} --once",
+            f"先看一眼：{daemon_command('homer', config=out)} --once",
             f"确认容器名对得上之后，把 {out} 里的 \"execute\" 改成 true",
             "常驻：交给 tools/molt-supervise.py（只补不杀，可进 cron）",
+            f"（在仓库里没装包也能跑：{python} tools/molt-homer.py --config {out} --once）",
         ]
     return []

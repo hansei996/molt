@@ -204,12 +204,36 @@ def test_init_writes_nothing_when_the_loader_rejects(
     assert not (tmp_path / "agent.json").exists()
 
 
-def test_validate_config_rejects_a_missing_molt_pkg(tmp_path: Path) -> None:
+def test_validate_config_accepts_a_pkg_without_tools_when_the_package_is_installed(
+    tmp_path: Path,
+) -> None:
+    """`molt_pkg` 下没有 `tools/` 不再是错误 —— 那是 pip 装出来的正常形状。
+
+    v1.0 之前守护进程只住在仓库 `tools/` 下，所以"找不到脚本"是一件必须
+    拦下来的事。v1.1 把它们搬进了 `molt/daemon/`，安装模式下 `molt_pkg`
+    甚至可以是空的；此时该走的是 `import molt.daemon.agent`。
+    """
     assert _run(*_agent_args(tmp_path)) == 0
     problems = initcfg.validate_config(
         tmp_path / "agent.json", kind="agent", molt_pkg=str(tmp_path / "nowhere")
     )
-    assert any("找不到" in p or "加载失败" in p for p in problems)
+    assert problems == [], problems
+
+
+def test_validate_config_still_reports_a_package_that_cannot_be_imported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真找不到加载器时仍要报 —— 这才是这条检查原本要拦的东西。"""
+    assert _run(*_agent_args(tmp_path)) == 0
+
+    def _boom(name: str):
+        raise ImportError(f"{name}: 故意失败")
+
+    monkeypatch.setattr(initcfg.importlib, "import_module", _boom)
+    problems = initcfg.validate_config(
+        tmp_path / "agent.json", kind="agent", molt_pkg=str(tmp_path / "nowhere")
+    )
+    assert any("找不到" in p or "加载失败" in p for p in problems), problems
 
 
 # --------------------------------------------------------------------------

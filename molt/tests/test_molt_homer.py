@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-HOMER_PATH = ROOT / "tools" / "molt-homer.py"
+HOMER_PATH = ROOT / "molt" / "daemon" / "homer.py"
 
 
 def _load_homer():

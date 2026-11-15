@@ -24,6 +24,8 @@
 
 from __future__ import annotations
 
+import time
+
 import html as _html
 from typing import Any, Dict, Iterable, List
 
@@ -56,7 +58,12 @@ _STYLE = """
   h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: .5px; }
   .sub { color: var(--dim); margin: 0 0 26px; }
   .cards { display:flex; flex-wrap:wrap; gap:12px; margin: 0 0 30px; }
-  .card { flex:1 1 150px; border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .note {
+  margin: 0 0 22px; padding: 14px 16px; border-radius: 10px;
+  border: 1px solid #e6a23c; background: #fdf6ec; color: #8a5a00;
+  font-size: 14px; line-height: 1.7;
+}
+.card { flex:1 1 150px; border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
   .card .k { color: var(--dim); font-size:12px; }
   .card .v { font-size:20px; font-weight:600; margin-top:2px; }
   h2 { font-size:16px; margin: 34px 0 12px; padding-bottom:6px; border-bottom:1px solid var(--line); }
@@ -178,7 +185,147 @@ def _beats_table(beats: Dict[str, Any]) -> str:
     )
 
 
-def render_timeline(history: Dict[str, Any], *, title: str = "它搬过几次家") -> str:
+def _subtitle(note: str) -> str:
+    """一句话说明这一页是什么。
+
+    示例数据不能沿用"这里没有一条是编的"——那正好相反。模板只有一份，
+    所以这句话必须跟着 `note` 走，而不是另画一张示例页。
+    """
+    if note:
+        return "下面是示例数据，不是真实记录。"
+    return "同一个它，换了几次身体。数据来自账本本身 —— 这里没有一条是编的。"
+
+
+def _note_block(note: str) -> str:
+    """页面上的一条醒目提示。目前只有 `molt timeline --demo` 会用到。
+
+    为什么非要在**页面上**写，而不是只在命令行里说一句：这一页会被截图、
+    会被转发到群里。脱离终端上下文之后，一份示例数据看起来和真实记录一模
+    一样 —— 而"看起来像证据"正是我们最不该送给别人的东西。
+    """
+    if not note:
+        return ""
+    return f'<div class="note">{esc(note)}</div>'
+
+
+def demo_history() -> Dict[str, Any]:
+    """一份内置的示例账本视图，给 `molt timeline --demo` 用。
+
+    ## 为什么需要它
+
+    验收标准里有一条是"陌生人能看见迁移过程"。可一个人刚装完时账本是空的，
+    `molt timeline` 只会给他一页白纸 —— 而"它搬过几次家"正是这个项目唯一
+    想让人看见的东西。所以给一条不需要账本、不需要服务器、不联网的路。
+
+    ## 为什么数字是真的、名字是假的
+
+    时间、字节数、epoch 都按真机上的量级写（一次快照 27.3 MB、租约 90 秒、
+    epoch 每搬一次 +1），因为一份"看起来合理"的示例才能说明它长什么样。
+    但壳名用 `nas-box` / `my-laptop`：真实的
+    `ugreen-776b-8b7896df` / `desktop-h2kgiao` 落到截图里就是信息泄漏。
+    """
+    now = time.time()
+    hour = 3600.0
+
+    def gen(n: int, *, src: str, pushed: str, target: str, consumed: str,
+            epoch: int, ago: float, consumed_after: float = 0.0) -> Dict[str, Any]:
+        created = now - ago
+        taken = created + consumed_after if consumed_after else 0.0
+        return {
+            "generation": n,
+            "created_at": created,
+            "created_at_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created)),
+            "source_host": src,
+            "pushed_by": pushed,
+            "target_shell": target,
+            "epoch": epoch,
+            "artifact_bytes": 28_605_440 if n != 2 else 28_311_552,
+            "manifest_sha256": "3f8c1a" + f"{n:02d}" + "9b7d4e2c5a60",
+            "consumed_by": consumed,
+            "consumed_at": taken,
+            "consumed_at_readable": (
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(taken)) if taken else ""
+            ),
+            "artifact_sha256": "9d2e5b71" + f"{n:02d}" + "c4a8f360e1b2",
+        }
+
+    generations = [
+        gen(1, src="nas-box", pushed="nas-box", target="my-laptop",
+            consumed="my-laptop", epoch=1, ago=5 * 24 * hour, consumed_after=23.0),
+        gen(2, src="my-laptop", pushed="my-laptop", target="nas-box",
+            consumed="nas-box", epoch=2, ago=4 * 24 * hour, consumed_after=6.0),
+        gen(3, src="nas-box", pushed="nas-box", target="my-laptop",
+            consumed="", epoch=3, ago=41 * 60.0),
+    ]
+
+    backups = [
+        {
+            "name": "backup-20260101T031500-nas-box.tar.gz",
+            "bytes": 6_942_720,
+            "after_generation": 2,
+            "created_at_readable": time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(now - 3 * hour)
+            ),
+        },
+        {
+            "name": "backup-20260101T032500-nas-box.tar.gz",
+            "bytes": 6_951_313,
+            "after_generation": 2,
+            "created_at_readable": time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(now - 2 * hour)
+            ),
+        },
+    ]
+
+    heartbeats = {
+        "nas-box": {
+            "shell_id": "nas-box",
+            "label": "nas-box",
+            "generation": 3,
+            "note": "homer / bounce",
+            "last_seen": now - 4.0,
+            "age_seconds": 4.0,
+            "stale": False,
+            "roles": ["homer", "bounce"],
+        },
+        "my-laptop": {
+            "shell_id": "my-laptop",
+            "label": "my-laptop",
+            "generation": 0,
+            "note": "agent",
+            "last_seen": now - 9.0,
+            "age_seconds": 9.0,
+            "stale": False,
+            "roles": ["agent"],
+        },
+    }
+
+    return {
+        "root": "(示例)",
+        "generated_at": now,
+        "generated_at_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+        "current_epoch": 5,
+        "last_accepted_epoch": 4,
+        "rejected_write_count": 1,
+        "generation_count": len(generations),
+        "total_bytes": sum(g["artifact_bytes"] for g in generations),
+        "generations": generations,
+        "backups": backups,
+        "heartbeats": heartbeats,
+        "log": [
+            "[示例] 19:02:11 租约：nas-box -> epoch 3（90 秒）",
+            "[示例] 19:02:34 收到第 3 代快照，27.3 MB，sha256 校验通过",
+            "[示例] 19:02:34 已登记第 3 代：目标壳 my-laptop",
+        ],
+    }
+
+
+def render_timeline(
+    history: Dict[str, Any],
+    *,
+    title: str = "它搬过几次家",
+    note: str = "",
+) -> str:
     """渲染一页完整的时间轴。`history` 就是 `Warden.history()` 的返回值。"""
     generations: List[Dict[str, Any]] = list(history.get("generations") or [])
     backups = list(history.get("backups") or [])
@@ -223,7 +370,8 @@ def render_timeline(history: Dict[str, Any], *, title: str = "它搬过几次家
 <body>
 <div class="wrap">
   <h1>它搬过几次家</h1>
-  <p class="sub">同一个它，换了几次身体。数据来自账本本身 —— 这里没有一条是编的。</p>
+  <p class="sub">{esc(_subtitle(note))}</p>
+  {_note_block(note)}
 
   <div class="cards">{cards_html}</div>
 

@@ -20,7 +20,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-AGENT_PATH = ROOT / "tools" / "molt-agent.py"
+# 加载**真模块**，不是 `tools/molt-agent.py` 那个垫片：垫片只把名字复制进自己的
+# globals，`monkeypatch.setattr(垫片, ...)` 改不到真正执行的那份代码 ——
+# 补丁打在影子上时，测试看起来成功，实际上什么都没改。
+AGENT_PATH = ROOT / "molt" / "daemon" / "agent.py"
 
 
 def _load_agent():

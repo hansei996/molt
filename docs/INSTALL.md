@@ -15,12 +15,18 @@
 
 ## 0. 装代码（两台都要）
 
+从 PyPI 装，**一条命令**：
+
 ```bash
-git clone https://github.com/hansei996/molt
-cd molt
-pip install molt-handoff  # 装出 `molt` 命令；或者直接用 `python -m molt.cli`
-# 从仓库装： git clone … && cd molt && pip install -e .
-molt --version
+pip install molt-handoff   # 装出发行包；导入名和命令都还是 molt
+molt --version             # 应该打印 molt 1.1.0（或更新）
+```
+
+只有想改代码、或者还没发版时才需要仓库：
+
+```bash
+git clone https://github.com/hansei996/molt && cd molt
+pip install -e .
 ```
 
 > 只要 Python ≥ 3.10 和标准库。Warden 那台机器**不需要**装任何第三方包 ——
@@ -55,19 +61,22 @@ docker run -d --name molt-warden -p 6186:6186 \
 ## 1. 甲：先把账本立起来
 
 ```bash
-molt init --role warden --root /var/lib/molt
+molt init --role warden --root ./warden
 ```
 
 它会做两件事：
 
-1. 生成一个 token，写进 `/var/lib/molt/warden.token`（权限 `600`）
+1. 生成一个 token，写进 `./warden/warden.token`（权限 `600`）
 2. 打印一行 `serve` 命令，把那个 token 带在里面
 
-照抄它打印的那行：
+照抄它打印的那行（**这条命令在任何系统上都一样**，Windows 也是）：
 
 ```bash
-python3 -m molt.cli serve --root /var/lib/molt --host 0.0.0.0 --port 6186 --token <它打印的 token>
+molt serve --root ./warden --host 0.0.0.0 --port 6186 --token <它打印的 token>
 ```
+
+> 想放到别处就换 `--root`：Linux 上常见 `/var/lib/molt`，Windows 上建议
+> `%LOCALAPPDATA%\molt\warden`。路径里带空格没关系，加引号即可。
 
 验一下（在**另一台**机器上跑，这样才能证明它真的对局域网开放了）：
 
@@ -80,7 +89,7 @@ curl -sS http://192.168.50.50:6186/status -H "X-Molt-Token: <那个 token>"
 不想手抄 token？
 
 ```bash
-cat /var/lib/molt/warden.token
+cat ./warden/warden.token
 ```
 
 或者让乙直接问甲要 —— 但**不要**把 token 写进 shell 历史：
@@ -163,10 +172,13 @@ molt doctor --config ./molt-agent.json --role agent
 ## 4. 空跑一轮（不动手）
 
 ```bash
-molt-agent.py --config ./molt-agent.json --once
+molt agent --config ./molt-agent.json --once
 ```
 
-（脚本在仓库的 `tools/` 下；Windows 上用 `python tools\molt-agent.py …`。）
+> 这一行在 **pip 装的环境里也能直接跑** —— 守护进程是包的一部分
+> （`molt/daemon/`），不是仓库里一个需要 clone 才能拿到的脚本。
+> 万一你的 `molt` 命令不在 PATH 里，等价写法是
+> `python -m molt.daemon.agent --config ./molt-agent.json --once`。
 
 `execute: false` 的时候它只读账本、只打印判断，不会 land、不会开机、不会关机。
 你会看到类似：
@@ -187,8 +199,11 @@ molt-agent.py --config ./molt-agent.json --once
 交给 `tools/molt-supervise.py`，它**只补不杀**，可以放心进 cron：
 
 ```bash
-*/2 * * * * /usr/bin/python3 /path/to/molt/tools/molt-supervise.py --quiet
+*/2 * * * * /path/to/venv/bin/molt agent --config /path/to/agent.json >> /var/log/molt-agent.log 2>&1
 ```
+
+（`molt agent` 自己就是那个常驻循环；`molt-supervise.py` 是仓库里给多个守护进程
+一起看门的脚本，装在 pip 环境里的人用不到它。）
 
 （还要来一条 `@reboot` 兜底：`@reboot` 可能比你的数据盘挂载更早触发。）
 
@@ -209,7 +224,7 @@ CreateObject("WScript.Shell").Run """G:\molt-fish\molt-agent.cmd""", 0, False
 `molt-agent.cmd` 里是：
 
 ```bat
-G:\venv\Scripts\python.exe C:\path\to\molt\tools\molt-agent.py --config C:\path\to\molt-agent.json >> G:\logs\agent.log 2>> G:\logs\agent.err
+C:\path\to\venv\Scripts\molt.exe agent --config C:\path\to\agent.json >> C:\logs\agent.log 2>> C:\logs\agent.err
 ```
 
 启动项只会在**有人登录之后**跑。如果你要让它在你不在的时候自己起来，得开自动登录
@@ -295,3 +310,9 @@ molt init --role homer \
 已落地，而它还在读写上一代 —— 这不是崩溃，是两边各说各话。
 
 `homer` 的 `dashboard_host` 默认是 `0.0.0.0`：容器里监听 `127.0.0.1` 等于没监听。
+
+先空跑一轮确认它读得到账本，再交给 `molt-supervise.py` 或 cron：
+
+```bash
+molt homer --config ./molt-homer.json --once
+```

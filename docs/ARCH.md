@@ -3463,3 +3463,68 @@ shell 侧（任一壳）
 ---
 
 *本文档的证据等级标注请严格遵守。任何"【推断】"在实现前必须升级为"【查证】"或"【实测】"。*
+
+### 14.8 发布物里少了一个目录：v1.1 陌生人复核（2026-11-15）
+
+v1.0 发布之后，我做了一次"陌生人冷启动复核"：在一个全新的 venv 里 `pip install molt-handoff`，
+然后逐条照 `README.md` + `docs/INSTALL.md` 敲。结论是**装出来的东西根本跑不起来** ——
+四次撞墙，其中一次不是文档错，是代码位置错。
+
+| 撞到的东西 | 根因 | 修法 |
+|---|---|---|
+| `molt init --role warden` 打印 `python3 -m molt.cli serve` | Windows 上 `python3` 是应用商店占位符（退出码 9009），而 `molt serve` 本来就有 | 提示改成 `molt serve ...`，括注 `python -m molt.cli serve` 等价写法 |
+| `molt init --role agent` 报 `找不到 .../site-packages/tools/molt-agent.py` | **两个守护进程住在仓库 `tools/` 下，而 `tools/` 不进 wheel** | `molt/daemon/{agent,homer}.py` + `packages = ["molt", "molt.daemon"]`；`tools/*.py` 降级成垫片 |
+| `molt-agent.py --config ... --once` 在 PowerShell 里 `CommandNotFoundException` | 脚本不在 PATH 上（只有仓库里才有那条路径） | `molt agent` / `molt homer` 两个真正的入口；`molt init` 直接打印它们 |
+| `molt timeline` 在空账本上给一页白纸 | 陌生人**永远没有迁徙记录**，"看见迁移日志"这条验收没有任何一条命令能让他看到东西 | `molt timeline --demo`：同一套模板 + 琥珀色横幅 + 假壳名（`nas-box` / `my-laptop`） |
+
+四条里第二条最值得记：**它在仓库里是绿的、在 `pip install -e .` 下也是绿的**，
+因为仓库恰好有那个目录；只有真正的 wheel 少它。判据不是"我的机器上能跑"，
+而是"别人的机器上有没有那个文件"。所以新测试钉的是 `pyproject.toml` 里那行
+`"molt.daemon"` —— 有人为了干净把它改回 `["molt"]` 时会立刻红。
+
+另一个细节：`molt agent` 一开始想做成 argparse 子命令（`nargs=REMAINDER`），
+实测不行 —— 顶层 parser 会先把未知开关判成 `unrecognized arguments`，
+`add_help=False` 也救不了。它们**是进程入口，不是子命令**，所以在 `main()` 开头
+按 `argv[0]` 直接分发到 `molt.daemon.<name>.main()`。
+
+### 14.9 测试把机器睡过去了：一次真实的自我伤害（2026-11-15）
+
+这不是设计缺陷，是一次**我自己的测试把我的主机挂起**的事故。记在这里因为它的
+教训比很多"功能 bug"更值钱。
+
+**发生了什么**（Windows 事件日志 + `G:\molt-fish\logs\agent.log`）：
+
+| 时间 | 事件 |
+|---|---|
+| 15:11:30 / 15:26:53 / 15:27:03 / 15:29:06 / 15:29:30 | `Kernel-Power 42`（进入睡眠）→ `107`（唤醒），四次 |
+| 15:29:32 | `molt-agent` 记 `WindowsError 10051`（网络不可达）—— 那只鱼的主人正在被挂起 |
+| 15:31:29 | `Kernel-Power 41` + `6008`：**非正常关机**，整机重启 |
+| 15:32:21 / 15:32:48 | agent 自愈拉起 AstrBot；QQ websocket 重连成功 |
+
+**根因链**：
+
+1. v1.1 把守护进程从 `tools/` 搬进 `molt/daemon/`，`tools/*.py` 变成垫片
+   （`globals().update(...)` 复制名字后再调真模块）。
+2. 但 `molt/tests/test_molt_agent.py` / `test_molt_homer.py` 的加载器**还在按路径
+   加载 `tools/` 下那个垫片**，测试里 `monkeypatch.setattr(mod, "_suspend_now", ...)`
+   打在垫片的 globals 上。
+3. 真正执行的是 `molt.daemon.agent._suspend_now` —— 补丁没生效，
+   `SetSuspendState(False, False, False)` 真的被调用了。
+4. 于是"测睡眠失败"的用例每跑一次，这台机器就真的睡一次。跑完整套测试要 20 分钟
+   （平时 100 秒），那 20 分钟里机器被挂起了四次，最后一次以非正常关机收场。
+
+**两条修法**（都已用测试钉住）：
+
+- 加载器改成指向**真模块**（`molt/daemon/agent.py` / `homer.py`）。垫片只留给真机部署。
+- `molt/tests/conftest.py` 加一道**总闸**：`_suspend_now` 换成"一调用就 AssertionError"的
+  桩，两台守护进程模块里的 `subprocess` 换成会挑食的代理（`shutdown` / `powercfg` /
+  `rundll32` / `SetSuspendState` 一律拒）。谁忘了注入假 runner，谁就红 ——
+  而不是让跑测试的人电脑被关掉。
+
+**判据**：修好之后整套测试 **942 passed in 100.27s**（事故期间同一套是 1186 秒，
+多出来的 1086 秒全是"机器睡过去又醒来"）。
+
+**教训**：「补丁打在影子上时，测试看起来成功，机器真的睡了。」—— 一个 monkeypatch
+到底改到了谁，是必须验证的东西，不是可以假设的东西；而"测试自己也属于被测系统"
+这条以前只写在断点续传的注释里，现在它有了自己的事故编号。
+
