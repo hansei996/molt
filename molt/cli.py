@@ -863,8 +863,10 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     #: 只有**真的读到过新鲜心跳**才算"确认活着"。跳过检查时它是 False ——
     #: 那不等于"它活着"，只是"这次没查"。
     target_confirmed_alive = False
+    target_age: Optional[float] = None
     if cross_machine and not getattr(args, "skip_target_check", False):
         age = _target_heartbeat_age(be, target_name)
+        target_age = age
         if age is not None and age <= TARGET_ALIVE_SECONDS and _target_is_alive_now(
             be, target_name
         ):
@@ -898,8 +900,13 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         dim("  在那台机器上登记一次，之后每次搬家都会自动叫醒：")
         dim(f"    molt declare --shell {target_name} --wakeable --wake-mac AA-BB-CC-DD-EE-FF")
 
-    # 目标已经在报心跳，就别再发封包 —— 那是噪音，还会让人以为"它刚才睡着"。
-    if wake_mac and target_confirmed_alive:
+    # 只有"刚刚还在跳"才免掉封包。2026-11-15 23:38:29 的根因就在这里：
+    # 当时判据是"心跳年龄 ≤ 60 秒"，机器 23:37:30 关机、23:38:29 时年龄 59 秒
+    # —— 被判成"还活着"，于是**封包一个都没发**，鱼被推给了一台正在关机的机器。
+    # 现在留 10 秒的余量：超过它即使"看起来活着"也照发一封，封包是幂等的，
+    # 多发一封没有代价，少发一封就是四分钟的静默。
+    FRESH_ENOUGH_TO_SKIP_WAKE = 10.0
+    if wake_mac and target_confirmed_alive and (target_age is None or target_age <= FRESH_ENOUGH_TO_SKIP_WAKE):
         print()
         ok(f"{target_name} 已经活着 —— 不用发魔术封包")
         wake_mac = None

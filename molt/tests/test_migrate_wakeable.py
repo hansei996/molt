@@ -415,3 +415,27 @@ def test_a_heartbeat_that_stopped_59_seconds_ago_is_not_alive(
     assert rc == 5
     assert len(spy.calls) == 1, "判成关着就该去叫醒它"
     assert Warden(root=root).status()["generation_count"] == 0
+
+def test_a_fresh_but_not_fresh_enough_shell_still_gets_the_packet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """23:38 的最后一层：心跳 15 秒前 —— 看着活着，但还是要发封包。
+
+    封包是幂等的：多发一封没有代价，少发一封就是四分钟静默。
+    """
+    data = _make_source_data(tmp_path)
+    root = tmp_path / "warden"
+    _declare(root, role="desktop", wakeable=True, wake_mac="D8-BB-C1-11-C3-D2")
+    Warden(root=root).record_heartbeat("shell-b", generation=0, note="agent")
+
+    # "又跳了一拍"为真，但年龄刚好落在 10–25 秒之间。
+    monkeypatch.setattr(cli_module, "_target_is_alive_now", lambda *a, **k: True)
+    monkeypatch.setattr(cli_module, "_target_heartbeat_age", lambda *a, **k: 18.0)
+    spy = _WakeSpy()
+    monkeypatch.setattr(cli_module.W, "wake", spy)
+
+    rc = _migrate_gated(root, data, "--no-wait-wake")
+
+    assert rc == 0
+    assert len(spy.calls) == 1, "心跳不够新就必须发封包"
+    assert "不用发魔术封包" not in capsys.readouterr().out
