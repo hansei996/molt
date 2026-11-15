@@ -52,6 +52,7 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from .errors import Fatal, MoltError, NeedsHuman
+from .render import render_timeline
 from .version import PROTOCOL_VERSION, __version__
 from .warden import Warden
 
@@ -306,6 +307,20 @@ class WardenServer:
             if head == "where" and method == "GET":
                 return _Response(
                     200, {"ok": True}, html=_where_html(self.warden.status())
+                )
+
+            # ---- GET /history ----
+            # 时间轴的数据面。和 /where 分开：一个回答「现在」，一个回答「过程」。
+            if head == "history" and method == "GET":
+                return _ok(history=self.warden.history())
+
+            # ---- GET /timeline ----
+            # 时间轴的页面。和 /where 一样是给人看的，所以也认 `?token=`。
+            if head == "timeline" and method == "GET":
+                return _Response(
+                    200,
+                    {"ok": True},
+                    html=render_timeline(self.warden.history()),
                 )
 
             # ---- POST /acquire ----
@@ -582,6 +597,7 @@ class WardenServer:
                 f"如果目标文件正被另一个进程读取，等它结束再试。"
             ) from e
 
+        self.warden.record_archive_sha(generation, got)
         self.warden.append_log(
             "INFO", f"收到归档 gen-{generation:06d} {size} 字节 sha256={got[:16]}…"
         )
@@ -607,12 +623,13 @@ class WardenServer:
                 got = self.headers.get(TOKEN_HEADER, "")
                 if secrets.compare_digest(got, server.token):
                     return True
-                # `/where` 是给人用手机浏览器打开的一页纸，而浏览器没法加自定义头。
-                # 只给它一个人开后门：token 走查询串，并且**只认这一个路径**。
-                # 理由：一个能读账本、能改租约的 token 出现在 URL 里会被记进
-                # 浏览历史、被转发、被截图，所以这个口子必须窄到只剩一个只读页面。
+                # `/where` 与 `/timeline` 是给人用手机浏览器打开的一页纸，而浏览器
+                # 没法加自定义头。只给它们开后门：token 走查询串，并且**只认这两个
+                # 只读页面**。`/history` 不在名单里 —— 它是给脚本用的 JSON，脚本加
+                # 一个头没有任何代价，而"把它也放进来"会让能改租约的 token 有更多
+                # 机会出现在浏览历史、转发和截图里。
                 parsed = urlparse(self.path)
-                if parsed.path.rstrip("/").endswith("/where"):
+                if parsed.path.rstrip("/").endswith(("/where", "/timeline")):
                     given = (parse_qs(parsed.query).get("token") or [""])[0]
                     return secrets.compare_digest(given, server.token)
                 return False

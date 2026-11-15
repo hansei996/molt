@@ -72,6 +72,9 @@ class LocalBackend:
     def status(self) -> Dict[str, Any]:
         return self.warden.status()
 
+    def history(self) -> Dict[str, Any]:
+        return self.warden.history()
+
     def where(self) -> str:
         return f"本地 {self.warden.root}"
 
@@ -258,6 +261,9 @@ class RemoteBackend:
 
     def status(self) -> Dict[str, Any]:
         return self.client.status()
+
+    def history(self) -> Dict[str, Any]:
+        return self.client.history()
 
     def where(self) -> str:
         return f"远端 {self.client.base_url}"

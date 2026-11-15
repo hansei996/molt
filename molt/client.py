@@ -198,6 +198,9 @@ class WardenClient:
     def status(self) -> Dict[str, Any]:
         return self._request("GET", "/status").get("status", {})
 
+    def history(self) -> Dict[str, Any]:
+        return self._request("GET", "/history").get("history", {})
+
     def acquire(self, shell_id: str, ttl_seconds: Optional[int] = None) -> Dict[str, Any]:
         body: Dict[str, Any] = {"shell_id": shell_id}
         if ttl_seconds is not None:

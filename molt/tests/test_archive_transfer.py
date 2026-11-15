@@ -166,12 +166,18 @@ def test_upload_refuses_empty_body(live):
 
 
 def test_upload_leaves_no_part_file_on_success(live):
-    """成功之后归档目录里只应有那一个正式文件，没有 `.part`。"""
+    """成功之后归档目录里只应有正式文件，没有 `.part`。
+
+    除了归档本身，现在还多一个 `<归档>.sha256` sidecar —— 那是收归档时
+    算出来的指纹，跟着它描述的那份字节走（见 `Warden.archive_sha_path`）。
+    所以这条用例的判据是"没有半成品"，而不是"目录里只有一个文件"。
+    """
     srv, base = live
     data = _payload(2048)
     _put(f"{base}/archive/6", "tok", data)
     names = sorted(p.name for p in srv.warden.archive_dir().iterdir())
-    assert names == ["gen-000006.tar.gz"]
+    assert names == ["gen-000006.tar.gz", "gen-000006.tar.gz.sha256"]
+    assert not any(n.endswith(".part") for n in names)
 
 
 def test_upload_replaces_existing_archive(live):

@@ -908,6 +908,45 @@ class Warden:
     def archive_path(self, generation: int) -> Path:
         return self.archive_dir() / f"gen-{generation:06d}.tar.gz"
 
+    # ---- 归档指纹 --------------------------------------------------------
+    #
+    # ## 为什么指纹要单独存一个 sidecar，而不是塞进账本记录
+    #
+    # 上传的顺序是**先传字节、后登记 generation**（见 `server.accept_archive`
+    # 与 `cli` 里「先让字节到位，再让账本承认这件事」）。收归档的那一刻，
+    # 账本里还没有这一代，没有记录可以写。
+    #
+    # 硬塞的话只有两个办法：给账本加一张"待认领指纹"的表（多一份要维护的
+    # 中间状态），或者在 push 之后回头再补一条（忘了补就永久缺失，而且不报错）。
+    # 两个都比"指纹跟着它描述的那份字节走"更容易出错。
+    #
+    # 放在归档旁边还有一个好处：删归档时指纹一起没了，不会留下一条指向
+    # 空气的指纹。
+
+    def archive_sha_path(self, generation: int) -> Path:
+        return self.archive_dir() / f"gen-{generation:06d}.tar.gz.sha256"
+
+    def record_archive_sha(self, generation: int, sha256: str) -> None:
+        """把收归档时算出来的指纹写在这份归档旁边。"""
+        value = str(sha256 or "").strip().lower()
+        if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+            raise Fatal(f"归档指纹不是 64 位十六进制：{value!r}")
+        path = self.archive_sha_path(generation)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(value + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+
+    def archive_sha(self, generation: int) -> str:
+        """读归档指纹；没有或读坏了返回空串（"不知道"，不是"没有"）。"""
+        try:
+            text = self.archive_sha_path(generation).read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+        if len(text) != 64:
+            return ""
+        return text.lower()
+
     # ---- 归档保留策略 ----------------------------------------------------
     #
     # ## 为什么需要清理
@@ -1201,6 +1240,73 @@ class Warden:
             "dry_run": dry_run,
             "keep_recent": keep_recent,
             "backup_dir": str(self.backup_dir()),
+        }
+
+    def log_tail(self, limit: int = 40) -> List[str]:
+        """最后 N 行日志 —— 给时间轴当脚注用。
+
+        **不用 `readlines()` 再切片**：一台跑了半年的机器上这个文件可能几十 MB，
+        而人打开 `/timeline` 只是想看"最近发生了什么"。用 deque(maxlen) 单趟扫，
+        内存占用与文件大小无关。
+
+        读不到就返回空：日志是可选的旁证，它不该让一张时间轴打不开。
+        """
+        if limit <= 0:
+            return []
+        try:
+            p = self.log_path()
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                from collections import deque
+
+                return [line.rstrip("\n") for line in deque(f, maxlen=limit)]
+        except OSError:
+            return []
+
+    def history(self, *, log_lines: int = 40) -> Dict[str, Any]:
+        """把「它搬过几次家」摊成一条时间轴需要的全部数据。
+
+        为什么要单独一个方法，而不是让调用方自己拼 `status()`：
+        `status()` 回答的是**现在**（谁在线、第几代），而时间轴回答的是**过程**
+        （第 3 代是谁推的、多少字节、谁取走的、隔了多久）。两者字段几乎不重叠，
+        塞进一个 dict 只会让人分不清哪个是"此刻"哪个是"当时"。
+
+        这里的 `generations` 是**账本里的全部代次**（不是最近一条）：4.5 MB 一份，
+        一台家用机器一年也就几十代，全给出来比做分页简单，也比"只显示最近 5 条"
+        更诚实 —— 时间轴少了早期那几代，就看不出"它第一次是怎么过去的"。
+        """
+        with self._lock():
+            self._reload_locked()
+            now = time.time()
+            generations = []
+            for g in self._generations:
+                item = g.to_dict()
+                # 指纹跟着归档走（见 archive_sha_path 的注释）。
+                # 早期那几代上传时还没有这个 sidecar，所以会是空串 ——
+                # 时间轴显示「—」，那是诚实的结果，不是缺字段。
+                item["artifact_sha256"] = self.archive_sha(g.generation)
+                generations.append(item)
+            heartbeats = self._heartbeat_view(now)
+            current_epoch = self._state.current_epoch
+            last_accepted = self._state.last_accepted_epoch
+            rejected = self._state.rejected_write_count
+
+        backups = self.list_backups()
+        total_bytes = sum(int(g.get("artifact_bytes") or 0) for g in generations)
+        return {
+            "root": str(self.root),
+            "generated_at": now,
+            "generated_at_readable": time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(now)
+            ),
+            "current_epoch": current_epoch,
+            "last_accepted_epoch": last_accepted,
+            "rejected_write_count": rejected,
+            "generation_count": len(generations),
+            "total_bytes": total_bytes,
+            "generations": generations,
+            "backups": backups,
+            "heartbeats": heartbeats,
+            "log": self.log_tail(log_lines),
         }
 
     def log_path(self) -> Path:

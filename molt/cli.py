@@ -65,6 +65,7 @@ from .soul import (
     sqlite_check,
 )
 from .transfer import extract_archive, make_archive, restore_into
+from .render import render_timeline
 from .overlay import (
     DEFAULT_DASHBOARD_PORT,
     apply_overlay,
@@ -1839,6 +1840,61 @@ def _human_size(n: int) -> str:
     return f"{size:.1f} GB"
 
 
+def cmd_timeline(args: argparse.Namespace) -> int:
+    """把「它搬过几次家」渲染成一页 HTML（或打出 JSON）。
+
+    ## 为什么这一页必须能离线打开
+
+    这一页是准备发出去给人看的：陌生人点开它、看见那条时间轴，才相信
+    「同一个它真的换了身体」。所以它**不引用任何外部资源**（CDN、字体、
+    图片、脚本都没有），断网的机器上、手机上、别人的电脑上打开都一样。
+
+    ## 为什么不直接 print 到终端
+
+    时间轴是二维的（代次 × 时间），终端里只能一行一行往下滚，反而比
+    日志更难读。终端里给一句摘要和文件路径，看图去浏览器里看。
+
+    ## 退出码
+
+    0 = 成功（`--json` 也算成功）
+    2 = 参数不合法
+    4 = 连不上 Warden / Warden 报错
+    """
+    be = _backend(args)
+    try:
+        history = be.history()
+    except MoltError as e:
+        bad(f"读不到账本：{e}")
+        return 4
+
+    if getattr(args, "json", False):
+        print(json.dumps(history, ensure_ascii=False, indent=2))
+        return 0
+
+    page = render_timeline(history)
+    out = Path(args.out).expanduser() if args.out else Path("molt-timeline.html")
+    if out.parent and str(out.parent) not in ("", "."):
+        out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out.write_text(page, encoding="utf-8")
+    except OSError as e:
+        bad(f"写不进去：{out}（{e}）")
+        return 2
+
+    generations = history.get("generations") or []
+    done = sum(1 for g in generations if g.get("consumed_by"))
+    ok(f"已经搬过 {len(generations)} 次，完成落地 {done} 次。")
+    if generations:
+        latest = generations[-1]
+        kv("最新一代", f"第 {latest.get('generation')} 代")
+        kv("从哪来", str(latest.get("source_host") or "—"))
+        kv("谁取走的", str(latest.get("consumed_by") or "还没人取走"))
+    kv("搬到", str(out.resolve()))
+    print()
+    dim("  把这一页发出去，或者自己打开看一眼。它不联网，断网也能看。")
+    return 0
+
+
 def cmd_prune(args: argparse.Namespace) -> int:
     """清理 Warden 中转区里"账本不认"的归档。
 
@@ -2640,6 +2696,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="真的删。不给这个开关只报告不删",
     )
     s.set_defaults(func=cmd_prune)
+
+    # timeline
+    s = add(
+        "timeline",
+        "把「它搬过几次家」渲染成一页 HTML（零外部资源，断网也能看）",
+    )
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.add_argument(
+        "--out",
+        default="molt-timeline.html",
+        help="写到哪个文件（默认 ./molt-timeline.html）",
+    )
+    s.add_argument(
+        "--json",
+        action="store_true",
+        help="不打摘要，直接把时间轴的原始数据打成 JSON（给脚本用）",
+    )
+    s.set_defaults(func=cmd_timeline)
 
     # observe
     s = add(

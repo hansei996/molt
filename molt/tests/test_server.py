@@ -388,3 +388,84 @@ def test_server_records_state_on_disk(tmp_path: Path) -> None:
     assert "win-a" in raw
     parsed = json.loads(raw)
     assert parsed["protocol_version"] == PROTOCOL_VERSION
+
+# ---------------------------------------------------------------------------
+# 只读页面：/where 与 /timeline 认 ?token=，/history 不认
+#
+# 这三条是同一条安全边界的三个面，必须一起测：
+# 能改租约的 token 出现在 URL 里，会被记进浏览历史、被转发、被截图。
+# 所以「哪个端点允许它出现在 URL 里」是个白名单，而不是默认行为。
+# ---------------------------------------------------------------------------
+
+
+def _get(url: str, token: str = "") -> tuple:
+    req = urllib.request.Request(url, method="GET")
+    if token:
+        req.add_header(TOKEN_HEADER, token)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def test_where_accepts_the_token_in_the_query(live) -> None:
+    srv, url = live
+    status, body = _get(url + "/where?token=test-token")
+    assert status == 200
+    assert b"<!doctype html>" in body
+
+
+def test_timeline_accepts_the_token_in_the_query(live) -> None:
+    srv, url = live
+    status, body = _get(url + "/timeline?token=test-token")
+    assert status == 200
+    assert b"<!doctype html>" in body
+    assert "它搬过几次家".encode("utf-8") in body
+
+
+def test_timeline_rejects_a_wrong_token_in_the_query(live) -> None:
+    srv, url = live
+    status, _ = _get(url + "/timeline?token=wrong")
+    assert status == 401
+
+
+def test_history_does_not_accept_the_token_in_the_query(live) -> None:
+    """`/history` 是给脚本读的 JSON —— 脚本加一个头没有代价，所以不开这个口子。"""
+    srv, url = live
+    status, _ = _get(url + "/history?token=test-token")
+    assert status == 401
+
+
+def test_history_works_with_the_header(live) -> None:
+    srv, url = live
+    status, body = _get(url + "/history", token="test-token")
+    assert status == 200
+    payload = json.loads(body.decode("utf-8"))
+    assert payload["history"]["generation_count"] == 0
+    assert "heartbeats" in payload["history"]
+
+
+def test_history_lists_a_generation_after_a_push(srv: WardenServer) -> None:
+    lease = srv.dispatch("POST", "/acquire", {"shell_id": "win-a"}).payload["lease"]
+    srv.dispatch(
+        "POST",
+        "/push",
+        {"shell_id": "win-a", "epoch": lease["epoch"], "manifest": _manifest(1)},
+    )
+    h = srv.dispatch("GET", "/history", None).payload["history"]
+    assert h["generation_count"] == 1
+    assert h["generations"][0]["generation"] == 1
+    assert h["current_epoch"] == 1
+
+
+def test_timeline_page_renders_the_same_history_as_the_json(srv: WardenServer) -> None:
+    lease = srv.dispatch("POST", "/acquire", {"shell_id": "win-a"}).payload["lease"]
+    srv.dispatch(
+        "POST",
+        "/push",
+        {"shell_id": "win-a", "epoch": lease["epoch"], "manifest": _manifest(1)},
+    )
+    page = srv.dispatch("GET", "/timeline", None).html
+    assert page and "第 1 代" in page
+    assert "<!doctype html>" in page
