@@ -1462,11 +1462,17 @@ def cmd_sync_plugins(args: argparse.Namespace) -> int:
     manifest = pluginsync.read_bundle_manifest(payload)
     manifest_plugins = [str(n) for n in (manifest.get("plugins") or [])]
     remote_plugins = manifest_plugins or sorted(remote_configs)
+    remote_versions = {
+        str(k): str(v) for k, v in (manifest.get("versions") or {}).items()
+    }
+    local_versions = pluginsync.read_plugin_versions(data_dir, local_plugins)
     plan = pluginsync.plan_sync(
         remote_plugins=remote_plugins,
         local_plugins=local_plugins,
         remote_configs=remote_configs,
         local_configs=local_configs,
+        remote_versions=remote_versions,
+        local_versions=local_versions,
     )
 
     print()
@@ -1488,6 +1494,15 @@ def cmd_sync_plugins(args: argparse.Namespace) -> int:
         print(f"  {C.DIM}·{C.R} {name}  {C.DIM}那边有、这边没装 —— 不装也不写{C.R}")
     for name in sorted(plan.only_local):
         print(f"  {C.DIM}·{C.R} {name}  {C.DIM}这边独有 —— 不动{C.R}")
+
+    if plan.version_mismatch:
+        print()
+        warn(f"{len(plan.version_mismatch)} 个插件两边版本不一样：")
+        for name in sorted(plan.version_mismatch):
+            pair = plan.version_mismatch[name]
+            dim(f"  {name}：对面 {pair.get('remote') or '?'} / 这边 {pair.get('local') or '?'}")
+        dim("  插件代码不跟着快照走 —— 同一个插件在两台上可以是两个大版本。")
+        dim("  版本不同时，配置结构不同往往只是表象；先决定升级哪一台，再同步。")
 
     if plan.suspect and not args.force:
         print()

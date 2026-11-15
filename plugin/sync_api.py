@@ -112,6 +112,52 @@ def do_publish(settings: Any, client: Any) -> Dict[str, Any]:
     }
 
 
+def _read_version_text(meta: Path) -> str:
+    """从 metadata.yaml 里抠 `version:` 那一行；读不到就是空串。"""
+    try:
+        for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("version:"):
+                return stripped[len("version:"):].strip().strip("'\"")
+    except OSError:
+        return ""
+    return ""
+
+
+def _plugin_versions(data_dir: Path, plugins: List[str]) -> Dict[str, str]:
+    """读插件版本。
+
+    先用 `pluginsync.read_plugin_versions`（正常安装时就在那儿）；如果当前进程里
+    那份 pluginsync 是**热重载前**的旧对象（没有这个函数），就自己读一遍。
+    重复十几行逻辑，好过让页面在 500 里说"模块没有这个属性"。
+    """
+    getter = getattr(pluginsync, "read_plugin_versions", None)
+    if getter is not None:
+        try:
+            return getter(data_dir, plugins)
+        except Exception:  # pragma: no cover - 旧模块内部签名不符时退化成自己读
+            pass
+    root = Path(data_dir) / "plugins"
+    return {name: _read_version_text(root / name / "metadata.yaml") for name in plugins}
+
+
+def _plan_sync(**kwargs: Any) -> Any:
+    """调 `pluginsync.plan_sync`，但先确认它接受版本参数。
+
+    热重载场景下 `plan_sync` 可能还是旧签名 —— 传了新关键字就直接 TypeError，
+    而那个异常会变成一次 HTTP 500，看起来像"同步坏了"。
+    """
+    code = getattr(pluginsync.plan_sync, "__code__", None)
+    # 必须看 co_varnames 全表，不能只切 co_argcount：plan_sync 的参数全是
+    # keyword-only，co_argcount 是 0 —— 第一次这么写就把版本参数永远剥掉了，
+    # 症状是「版本永远一致」：一个永远为真的判据。
+    names = list(code.co_varnames) if code else []
+    if "remote_versions" not in names:
+        kwargs.pop("remote_versions", None)
+        kwargs.pop("local_versions", None)
+    return pluginsync.plan_sync(**kwargs)
+
+
 def do_preview(
     settings: Any, client: Any, *, source: str, force: bool = False
 ) -> Dict[str, Any]:
@@ -123,11 +169,16 @@ def do_preview(
     local_plugins = pluginsync.list_plugins(data_dir)
     local_configs = pluginsync.read_plugin_configs(data_dir, local_plugins)
     manifest_plugins = [str(n) for n in (manifest.get("plugins") or [])]
-    plan = pluginsync.plan_sync(
+    remote_versions = {
+        str(k): str(v) for k, v in (manifest.get("versions") or {}).items()
+    }
+    plan = _plan_sync(
         remote_plugins=manifest_plugins or sorted(remote_configs),
         local_plugins=local_plugins,
         remote_configs=remote_configs,
         local_configs=local_configs,
+        remote_versions=remote_versions,
+        local_versions=_plugin_versions(data_dir, local_plugins),
     )
 
     rows: List[Dict[str, Any]] = []
@@ -136,13 +187,12 @@ def do_preview(
     for name in sorted(plan.unchanged):
         rows.append({"plugin": name, "action": ACTION_SAME})
     for name in sorted(plan.suspect):
-        rows.append(
-            {
-                "plugin": name,
-                "action": ACTION_SKIP_SCHEMA,
-                "detail": "顶层键几乎不重合，多半是两边插件版本不同",
-            }
-        )
+        pair = plan.version_mismatch.get(name) or {}
+        detail = "顶层键几乎不重合"
+        if pair:
+            # 版本号比"多半是版本不同"值钱得多：它直接告诉人该升级哪一台。
+            detail = f"版本不一样（对面 {pair.get('remote') or '?'} / 这边 {pair.get('local') or '?'}），顶层键几乎不重合"
+        rows.append({"plugin": name, "action": ACTION_SKIP_SCHEMA, "detail": detail})
     for name in sorted(plan.no_remote_config):
         rows.append({"plugin": name, "action": ACTION_KEEP_LOCAL})
     for name in sorted(plan.only_remote):
@@ -163,6 +213,9 @@ def do_preview(
             "only_local": len(plan.only_local),
         },
         "writable": len(plan.sync) + (len(plan.suspect) if force else 0),
+        "version_mismatch": {
+            name: dict(pair) for name, pair in sorted(plan.version_mismatch.items())
+        },
     }
 
 
@@ -182,11 +235,16 @@ def do_apply(
     local_plugins = pluginsync.list_plugins(data_dir)
     local_configs = pluginsync.read_plugin_configs(data_dir, local_plugins)
     manifest_plugins = [str(n) for n in (manifest.get("plugins") or [])]
-    plan = pluginsync.plan_sync(
+    remote_versions = {
+        str(k): str(v) for k, v in (manifest.get("versions") or {}).items()
+    }
+    plan = _plan_sync(
         remote_plugins=manifest_plugins or sorted(remote_configs),
         local_plugins=local_plugins,
         remote_configs=remote_configs,
         local_configs=local_configs,
+        remote_versions=remote_versions,
+        local_versions=_plugin_versions(data_dir, local_plugins),
     )
     if only:
         wanted = set(str(n) for n in only)

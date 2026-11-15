@@ -193,11 +193,17 @@ async function preview(source) {
     // 注意参数名是 from —— 它是关键字，所以这里用对象字面量的字符串键。
     const res = await bridge.apiGet("sync/preview", { from: source });
     renderRows(res);
-    banner(
-      "ok",
-      `预览完了：${res.writable || 0} 个可以写过来`,
-      `空跑，一个字都没写。来源 ${source}（${res.source_created_at || "时间未知"}）。`
-    );
+    const drift = res.version_mismatch || {};
+    const driftNames = Object.keys(drift);
+    let note = `空跑，一个字都没写。来源 ${source}（${res.source_created_at || "时间未知"}）。`;
+    if (driftNames.length) {
+      const sample = driftNames
+        .slice(0, 3)
+        .map((n) => `${n} 对面 ${drift[n].remote} / 这边 ${drift[n].local}`)
+        .join("；");
+      note += ` 另外 ${driftNames.length} 个插件两边版本不一样：${sample}。插件代码不跟着快照走，先决定升级哪一台。`;
+    }
+    banner("ok", `预览完了：${res.writable || 0} 个可以写过来`, note);
   } catch (err) {
     $("counts").textContent = "";
     banner("bad", `预览失败：${describeError(err)}`, "空跑失败不会改任何文件。");

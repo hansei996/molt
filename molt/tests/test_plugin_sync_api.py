@@ -310,3 +310,53 @@ def test_routes_are_registered_under_the_plugin_prefix(tmp_path):
     assert routes["/astrbot_plugin_molt/sync/publish"] == ["POST"]
     assert routes["/astrbot_plugin_molt/sync/preview"] == ["GET"]
     assert routes["/astrbot_plugin_molt/sync/apply"] == ["POST"]
+
+# ---------------------------------------------------------------------------
+# 版本漂移：真机上咬过一次（private_companion 7.1.18 vs 6.5.6）
+# ---------------------------------------------------------------------------
+
+
+def _write_plugin_with_version(root: Path, name: str, config, version: str) -> None:
+    _write_plugin(root, name, config)
+    (root / "plugins" / name / "metadata.yaml").write_text(
+        f"name: {name}\nversion: {version}\n", encoding="utf-8"
+    )
+
+
+def _bundle_with_versions(spec, versions) -> bytes:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name, config in spec.items():
+            _write_plugin_with_version(root, name, config, versions.get(name, ""))
+        payload, _ = pluginsync.make_bundle(root, pluginsync.list_plugins(root))
+        return payload
+
+
+def test_preview_reports_version_drift_between_the_two_shells(tmp_path):
+    root = tmp_path / "local"
+    _write_plugin_with_version(root, "alpha", {"n": 1}, "6.5.6")
+    payload = _bundle_with_versions({"alpha": {"n": 2}}, {"alpha": "7.1.18"})
+    client = FakeClient([("nas", payload, ["alpha"])])
+
+    res = sync_api.do_preview(FakeSettings(root, shell="desk"), client, source="nas")
+
+    assert res["version_mismatch"] == {"alpha": {"remote": "7.1.18", "local": "6.5.6"}}
+
+
+def test_a_schema_skip_says_which_versions_it_saw(tmp_path):
+    """「结构不一样」本身不解释任何事；版本号才告诉人该升级哪一台。"""
+    root = tmp_path / "local"
+    _write_plugin_with_version(root, "alpha", {f"local_{i}": i for i in range(20)}, "6.5.6")
+    payload = _bundle_with_versions(
+        {"alpha": {f"remote_{i}": i for i in range(20)}}, {"alpha": "7.1.18"}
+    )
+    client = FakeClient([("nas", payload, ["alpha"])])
+
+    res = sync_api.do_preview(FakeSettings(root, shell="desk"), client, source="nas")
+
+    rows = {row["plugin"]: row for row in res["rows"]}
+    assert rows["alpha"]["action"] == "skip_schema"
+    assert "7.1.18" in rows["alpha"]["detail"]
+    assert "6.5.6" in rows["alpha"]["detail"]

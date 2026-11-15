@@ -3338,6 +3338,78 @@ def power_verdict(*, requires_permission: bool, tickets: Any, shell: str) -> str
 配套的一致性测试：`molt/tests/test_homer_power.py`（12 条，含两个守护进程对
 `keep`/`ask` 的逐档比对）与 `molt/tests/test_molt_want.py` 的可归因/定时两组。
 
+### 14.14 插件版本漂移：同一个插件在两台上可以是两个大版本（2026-11-15）
+
+#### 真机事实
+
+| 项 | NAS | Windows |
+|---|---|---|
+| `astrbot_plugin_private_companion` | **7.1.18** | **6.5.6** |
+| 它声明的 AstrBot 要求 | `>=4.27.2` | `>=4.22.0` |
+| 它支持的平台数 | 5 | 2 |
+| 配置顶层键数量 | **1008** | **15** |
+
+这不是配置写错了，是**插件代码本身不同**。而 `molt/soul.py` 的
+`COPY_ARTIFACTS` 里只有 `cmd_config.json` / `mcp_server.json` / `skills` /
+`workspaces` / `attachments` / `knowledge_base` / `plugin_data` ——
+**没有 `plugins/`，也没有 `config/`**。所以：
+
+- 插件代码不跟着快照走（每个壳各留一份，这是刻意的）；
+- 插件配置原先也不走，同步功能是后加的；
+- 于是"同一只鱼"落到不同壳上，**能力集**可能不同。
+
+#### 这为什么是"严重"的
+
+`7.1.18` 的 `plugin_data` 里有一份 `.storage-backend-state.json`：
+
+```json
+{"backend": "json", "sqlite_path": "G:\\molt-fish\\data\\plugin_data\\astrbot_plugin_private_companion\\companions.db"}
+```
+
+**一条 Windows 绝对路径被写进了要跟着鱼搬家的数据里。** `plugin_data` 在
+`COPY_ARTIFACTS` 里，所以它会真的被搬到 NAS；而 NAS 上那个路径不存在。
+
+同类风险还有 `req041_*.db`（7.x 的迁移控制表）：6.5.6 不认识它，
+读到的就是"少了一堆东西"，而不是"版本不对"。
+
+#### 做了什么（只做检测，不做自动升级）
+
+1. `molt/pluginsync.py` 新增 `read_plugin_versions()`：从每个插件的
+   `metadata.yaml` 里读 `version:`，读不到给空串（**"不知道"不能等于"相同"**）。
+2. 打出来的包里，`manifest.json` 多一个 `versions` 字段。
+3. `plan_sync(remote_versions=…, local_versions=…)` 产出 `version_mismatch`。
+   **它只记录原因，不改变同步判断** —— 版本不同不代表配置不能同步，只代表
+   「结构不一样」这句话有了可验证的解释。
+4. CLI 和 dashboard 页面都把它说出来：
+   - CLI：`2 个插件两边版本不一样：… 对面 7.1.18 / 这边 6.5.6`
+   - 面板预览横幅：`另外 1 个插件两边版本不一样：astrbot_plugin_private_companion 对面 7.1.18 / 这边 6.5.6。插件代码不跟着快照走，先决定升级哪一台。`
+   - 「结构不一样，跳过」那一行的说明也带上两个版本号。
+
+#### 一个热重载陷阱（这一次真的咬到了）
+
+`POST /api/plugin/reload` 只重载 Star，**不清 `sys.modules`**。所以把
+`_vendor/molt/pluginsync.py` 换新之后，跑着的那个进程里
+`from molt import pluginsync` 拿到的还是**上一版对象**，页面直接 500：
+
+```
+module 'molt.pluginsync' has no attribute 'read_plugin_versions'
+plan_sync() got an unexpected keyword argument 'remote_versions'
+```
+
+修法是让 `plugin/sync_api.py` 自己兜底：拿不到新函数就**就地读
+`metadata.yaml`**；`plan_sync` 签名里没有新参数就不传。**热重载能不能
+生效，不能靠调用方记得重启。**
+
+还有一个自己挖的坑：判断"签名里有没有 `remote_versions`"时只看
+`co_varnames[:co_argcount]` —— 而 `plan_sync` 的参数全是 keyword-only，
+`co_argcount` 是 0，于是**版本参数永远被剥掉**，表现为"版本永远一致"，
+**一个永远为真的判据**。
+
+#### 没做（等拍板）
+
+要不要**同步插件代码**。见 `docs/DECISIONS.md` 的 D6：现在的默认是"不碰代码，
+只检测版本并把话说清楚"。
+
 ## 15. 开放问题（需要决策）
 
 | # | 问题 | 选项 | 建议 |

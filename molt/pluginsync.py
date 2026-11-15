@@ -110,6 +110,37 @@ def read_plugin_configs(data_dir: Path, plugins: List[str]) -> Dict[str, bytes]:
     return out
 
 
+def read_plugin_versions(data_dir: Path, plugins: List[str]) -> Dict[str, str]:
+    """读每个插件自己声明的版本（`metadata.yaml` 里的 `version:`）。
+
+    为什么值得单独读：插件**代码不会跟着快照走**（`COPY_ARTIFACTS` 里没有
+    `plugins/`），所以两台机器上同一个插件完全可能是两个大版本 —— 2026-11-15
+    真机上 `astrbot_plugin_private_companion` 就是 NAS `7.1.18` / Windows
+    `6.5.6`，配置顶层键 1008 vs 15。那种情况下"结构看起来不一样"不是巧合，
+    而是版本不同；**把原因说出来，人才知道该升级哪一台**。
+
+    读不出来就返回空串（不是 `None`）：表示"不知道"，调用方据此不比较。
+    """
+    out: Dict[str, str] = {}
+    root = Path(data_dir) / PLUGINS_DIRNAME
+    for plugin in plugins:
+        meta = root / plugin / "metadata.yaml"
+        version = ""
+        try:
+            text = meta.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            out[plugin] = ""
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("version:"):
+                continue
+            version = stripped[len("version:"):].strip().strip("'\"")
+            break
+        out[plugin] = version
+    return out
+
+
 def _top_level_keys(raw: bytes) -> Optional[set]:
     try:
         value = json.loads(raw.decode("utf-8-sig"))
@@ -162,6 +193,8 @@ class SyncPlan:
     only_local: List[str] = field(default_factory=list)
     #: 两边都有但远端没有配置文件（没什么可同步的）
     no_remote_config: List[str] = field(default_factory=list)
+    #: 两边都有、但插件版本不同 -> {插件名: {"remote": …, "local": …}}
+    version_mismatch: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     @property
     def common(self) -> List[str]:
@@ -174,6 +207,8 @@ def plan_sync(
     local_plugins: List[str],
     remote_configs: Dict[str, bytes],
     local_configs: Dict[str, bytes],
+    remote_versions: Optional[Dict[str, str]] = None,
+    local_versions: Optional[Dict[str, str]] = None,
 ) -> SyncPlan:
     """算出"该怎么同步"，**不碰磁盘**。
 
@@ -188,6 +223,16 @@ def plan_sync(
     # 主人定的那条规则，在这里只有一行：
     plan.only_remote = sorted(remote - local)
     plan.only_local = sorted(local - remote)
+
+    remote_versions = remote_versions or {}
+    local_versions = local_versions or {}
+    for plugin in sorted(remote & local):
+        # 版本不同不影响"要不要同步"的决定，但它解释了"为什么结构不一样"，
+        # 而且它是**人的**决定依据（该升级哪一台）。所以只记录，不参与判断。
+        rv = str(remote_versions.get(plugin) or "")
+        lv = str(local_versions.get(plugin) or "")
+        if rv and lv and rv != lv:
+            plan.version_mismatch[plugin] = {"remote": rv, "local": lv}
 
     for plugin in sorted(remote & local):
         incoming = remote_configs.get(plugin)
@@ -316,6 +361,7 @@ def make_bundle(data_dir: Path, plugins: List[str]) -> Tuple[bytes, Dict[str, An
     manifest = {
         "plugins": sorted(plugins),
         "configs": manifest_configs,
+        "versions": read_plugin_versions(data_dir, plugins),
         "bundled_at": time.time(),
         "bundled_at_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
