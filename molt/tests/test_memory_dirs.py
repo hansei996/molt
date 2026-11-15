@@ -75,6 +75,8 @@ def _migrate(data: Path, root: Path, *extra: str) -> int:
     return main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data",
             str(data),
             "--shell",

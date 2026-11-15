@@ -150,6 +150,7 @@ def test_the_view_does_not_leak_internal_keys(root: Path) -> None:
         "wakeable",
         "cost_per_hour",
         "label",
+        "wake_mac",
         "updated_at",
         "updated_at_readable",
         "updated_by",
@@ -183,3 +184,22 @@ def test_a_declared_false_stays_false(root: Path) -> None:
     w.set_shell("box", gpu="")
     assert w.shells_view()["box"]["gpu"] == "", "空串 = 确认过没有显卡"
 
+def test_a_wake_mac_is_normalised_and_kept_apart_from_wakeable(root: Path) -> None:
+    """MAC 存进账本时要归一化；它是「怎么叫醒」，不是「能不能叫醒」。
+
+    分成两个字段的理由：`wakeable` 是**判断**（要不要发包），`wake_mac` 是
+    **参数**（包发给谁）。合成一个的话，"知道地址"就会被当成"能叫醒"。
+    """
+    w = Warden(root=root)
+    w.set_shell("box", wakeable=True, wake_mac="d8:bb:c1:11:c3:d2")
+    view = w.shells_view()["box"]
+    assert view["wake_mac"] == "D8-BB-C1-11-C3-D2"
+    assert view["wakeable"] is True
+
+
+def test_a_bogus_wake_mac_is_refused(root: Path) -> None:
+    from molt.errors import NeedsHuman
+
+    w = Warden(root=root)
+    with pytest.raises(NeedsHuman):
+        w.set_shell("box", wake_mac="not-a-mac")

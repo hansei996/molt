@@ -112,6 +112,10 @@ python tools\reload-plugin.py --config G:\molt-fish\data\cmd_config.json `
   之前只有一条路径，in-place 重启出来的子进程打不动它，agent 会每 40 秒失败一次，
   而鱼卡在「两边都没连 QQ」的半路（2026-11-15 21:30 真机）。
 
+- 搬家前先确认目标壳活着：关着就先发魔术封包，**叫不醒就不搬**（退出码 5，源壳继续说话）。
+  `wake_mac` 成为壳属性（`molt declare --wake-mac`），`migrate` 会自动用它。
+- 落地时主动问一句「旧壳要不要关」（`/molt shutdown` / `/molt keep`），问句不再只写进日志。
+
 ### 已知限制
 
 - **插件版本漂移会被念出来**：同步包里带每个插件的版本（\metadata.yaml\ 的

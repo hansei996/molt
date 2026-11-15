@@ -60,7 +60,7 @@ HEARTBEAT_STALE_SECONDS = 600
 SHELL_ROLES = ("nas", "desktop", "cloud", "unknown")
 
 #: 账本给每个壳记的字段（`label` 在这里是"声明"，心跳里的那份是"自报"）。
-SHELL_ATTR_FIELDS = ("role", "gpu", "wakeable", "cost_per_hour", "label")
+SHELL_ATTR_FIELDS = ("role", "gpu", "wakeable", "cost_per_hour", "label", "wake_mac")
 
 
 from .epoch import (
@@ -783,6 +783,22 @@ class Warden:
             if cost < 0 or cost > 10000:
                 raise NeedsHuman(f"cost_per_hour 不像一笔钱：{value!r}")
             return round(cost, 4)
+        if key == "wake_mac":
+            # MAC 存在账本里，理由只有一条：**叫醒别人的那台机器需要它**。
+            # 它不属于"那台机器是什么"（所以放在属性里有点别扭），但它必须
+            # 有一份双方都能读到的地方 —— 配置只在本机，账本是唯一共享的。
+            from .wake import parse_mac
+
+            mac = (value or "").strip() if isinstance(value, str) else ""
+            if not mac:
+                return ""
+            try:
+                raw_mac = parse_mac(mac)
+            except Fatal as e:
+                raise NeedsHuman(f"wake_mac 不像一个 MAC：{e}")
+            # 存成**一种**写法（AA-BB-CC-DD-EE-FF）：同一个 MAC 从四个地方来，
+            # 四种写法都合法，但账本里若原样保留，读的人就要自己再归一化一遍。
+            return "-".join(f"{b:02X}" for b in raw_mac)
         if key == "label":
             return str(value or "").strip()[:80]
         raise NeedsHuman(f"不认识的壳属性：{key}")
@@ -796,6 +812,7 @@ class Warden:
         wakeable: Any = None,
         cost_per_hour: Any = None,
         label: Any = None,
+        wake_mac: Any = None,
         by: str = "",
     ) -> Dict[str, Any]:
         """登记/更新一个壳的属性。**局部更新**：只改传进来的字段。
@@ -815,6 +832,7 @@ class Warden:
             ("wakeable", wakeable),
             ("cost_per_hour", cost_per_hour),
             ("label", label),
+            ("wake_mac", wake_mac),
         ):
             if value is None:
                 continue
@@ -867,6 +885,7 @@ class Warden:
                 "wakeable": attrs.get("wakeable") if "wakeable" in attrs else None,
                 "cost_per_hour": attrs.get("cost_per_hour") if "cost_per_hour" in attrs else None,
                 "label": str(attrs.get("label") or ""),
+                "wake_mac": str(attrs.get("wake_mac") or ""),
                 "updated_at": attrs.get("updated_at", 0),
                 "updated_at_readable": attrs.get("updated_at_readable", ""),
                 "updated_by": attrs.get("updated_by", ""),

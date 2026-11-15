@@ -96,6 +96,8 @@ def test_migrate_uploads_archive_to_warden(tmp_path: Path, warden):
     rc = main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data", str(data),
             "--shell", "shell-a",
             "--target", "shell-b",
@@ -133,6 +135,8 @@ def test_migrate_default_transport_is_warden_when_remote(tmp_path: Path, warden)
     rc = main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data", str(data),
             "--shell", "shell-a",
             "--warden-url", base,
@@ -155,6 +159,8 @@ def test_migrate_transport_warden_rejected_for_local_backend(tmp_path: Path):
     rc = main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data", str(data),
             "--shell", "shell-a",
             "--root", str(tmp_path / "warden"),
@@ -172,6 +178,8 @@ def test_migrate_bad_transport_value_is_rejected(tmp_path: Path):
         main(
             [
                 "migrate",
+                # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+                "--skip-target-check",
                 "--data", str(data),
                 "--shell", "shell-a",
                 "--transport", "smb",
@@ -199,6 +207,8 @@ def test_migrate_upload_failure_releases_lease(tmp_path: Path, warden, monkeypat
     rc = main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data", str(data),
             "--shell", "shell-a",
             "--warden-url", base,
@@ -225,6 +235,8 @@ def _migrate_then_land(tmp_path: Path, warden, *, yes: bool = True):
     rc = main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data", str(src),
             "--shell", "shell-a",
             "--target", "shell-b",

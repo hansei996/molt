@@ -648,6 +648,44 @@ def _control_client(args: argparse.Namespace) -> Optional[AstrBotControl]:
     return AstrBotControl(url, token)
 
 
+#: 目标壳"还活着"的门槛。心跳每 10 秒一次，这里给 60 秒 —— 容许一轮慢的。
+TARGET_ALIVE_SECONDS = 60.0
+
+
+def _target_heartbeat_age(be: Any, shell: str) -> Optional[float]:
+    """目标壳上次报心跳是多久前。读不到就返回 None（"不知道"，不是"活着"）。"""
+    try:
+        status = be.status() or {}
+    except Exception:
+        return None
+    beat = ((status.get("heartbeats") or {}).get(shell)) or {}
+    try:
+        return float(beat.get("age_seconds"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _wait_for_target_heartbeat(
+    be: Any, shell: str, *, timeout: float, interval: float = 5.0
+) -> Optional[float]:
+    """等目标壳自己来账本报到。成功返回它这次的心跳年龄，超时返回 None。
+
+    ## 为什么判据是"心跳"而不是 ICMP / TCP
+
+    搬家需要的是**那台机器上的守护进程活着**，不是"网卡能回 ping"。
+    一台刚开机、还没登录的机器 ping 得通，但没人会接住快照 —— 于是源壳
+    已经把鱼交出去了，目标壳却什么也没做。心跳是唯一"它能干活"的证据。
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        age = _target_heartbeat_age(be, shell)
+        if age is not None and age <= TARGET_ALIVE_SECONDS:
+            return age
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(interval)
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     """一条命令走完整个迁徙：热备 → 打包 → 登记。
 
@@ -726,14 +764,47 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     # 把 None 当成 False 会让一台没登记的机器**永远收不到封包**，而症状
     # 看起来是"叫不醒" —— 这正是"默认值伪装成事实"最贵的那个后果。
     target_wakeable: Optional[bool] = None
+    target_mac = ""
     target_name = str(getattr(args, "target", "") or "")
     if target_name:
         try:
             declared = ((be.status() or {}).get("shells") or {}).get(target_name) or {}
             if "wakeable" in declared:
                 target_wakeable = declared.get("wakeable")
+            target_mac = str(declared.get("wake_mac") or "")
         except Exception:
             target_wakeable = None
+            target_mac = ""
+
+    # --- 第 -1.5 步：目标壳现在到底在不在？ ---
+    #
+    # ## 为什么这一步必须在 drain 之前
+    #
+    # 2026-11-15 23:04 的真事：NAS→Windows 的迁徙没有 MAC 可发（账本里没有），
+    # 于是它直接在 NAS 上 drain 掉、把快照推出去 —— 而 Windows 是关着的。
+    # 结果：**两边都没有鱼**，持续四分钟，直到机器被开机。
+    #
+    # 判据是**心跳**，不是 ping：搬家需要的是那台机器上的守护进程活着。
+    # 一台刚开机还没人登录的机器 ping 得通，但没人接住快照。
+    #
+    # 顺序：先看 → 不在就叫 → 等它自己来报到 → **报到了才继续**。
+    # 任何一步不成立就不搬，源壳一个字都不动（鱼还在）。
+    cross_machine = bool(target_name) and target_name != str(getattr(args, "shell", "") or "")
+    target_ready = True
+    #: 只有**真的读到过新鲜心跳**才算"确认活着"。跳过检查时它是 False ——
+    #: 那不等于"它活着"，只是"这次没查"。
+    target_confirmed_alive = False
+    if cross_machine and not getattr(args, "skip_target_check", False):
+        age = _target_heartbeat_age(be, target_name)
+        if age is not None and age <= TARGET_ALIVE_SECONDS:
+            ok(f"目标壳 {target_name} 还在报心跳（{age:.0f} 秒前）—— 可以直接搬")
+            target_confirmed_alive = True
+        else:
+            if age is None:
+                warn(f"账本里没有 {target_name} 的心跳 —— 不知道它开没开机。")
+            else:
+                warn(f"目标壳 {target_name} 已经 {age:.0f} 秒没报心跳 —— 它多半是关着的。")
+            target_ready = False
 
     wake_mac = getattr(args, "wake_mac", None)
     if wake_mac and target_wakeable is False:
@@ -744,10 +815,23 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         dim("  这台机器要人手动开。包照发只会让人去查网卡，而问题在电源键上。")
         dim("  如果这个声明写错了：molt declare --shell <壳名> --wakeable")
         wake_mac = None
+    elif not wake_mac and target_wakeable is not False and target_mac:
+        # 账本里记着这台机器的 MAC —— 那是迁移方唯一能读到它的地方
+        # （配置只在本机，而叫醒别人的恰恰是另一台机器）。
+        wake_mac = target_mac
+        print()
+        info(f"账本里记着 {target_name} 的 MAC（{target_mac}）——用它发魔术封包")
     elif not wake_mac and target_wakeable is True:
         print()
-        warn(f"账本说 {target_name} 可以被叫醒（wakeable: true），但没给 --wake-mac。")
-        dim("  账本里不存 MAC（它是地址，不是属性）——想让它自己醒就补一个。")
+        warn(f"账本说 {target_name} 可以被叫醒（wakeable: true），但账本里没有它的 MAC。")
+        dim("  在那台机器上登记一次，之后每次搬家都会自动叫醒：")
+        dim(f"    molt declare --shell {target_name} --wakeable --wake-mac AA-BB-CC-DD-EE-FF")
+
+    # 目标已经在报心跳，就别再发封包 —— 那是噪音，还会让人以为"它刚才睡着"。
+    if wake_mac and target_confirmed_alive:
+        print()
+        ok(f"{target_name} 已经活着 —— 不用发魔术封包")
+        wake_mac = None
 
     if wake_mac:
         wake_host = getattr(args, "wake_host", "") or ""
@@ -799,6 +883,29 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         else:
             dim("  没等它起来（不判断是否真的开机了）")
         print()
+
+    # --- 第 -1.4 步：目标没在跑就不搬（鱼不能死在这儿） ---
+    #
+    # 走到这里只有两种可能：目标本来就活着；或者上面刚发过魔术封包。
+    # 前者直接过，后者必须**等到它自己来报到** —— 只看"包发出去了"是不够的：
+    # 包出去和机器起来之间，隔着 BIOS、快速启动、网卡 arm、登录。
+    if cross_machine and not target_ready and not getattr(args, "skip_target_check", False):
+        if not wake_mac:
+            bad(f"目标壳 {target_name} 没在跑，账本里也没有它的 MAC —— 叫不醒它。")
+            dim("  不搬。源壳还在说话，鱼没死。")
+            dim("  要么先把那台机器打开，要么在它上面登记一次：")
+            dim(f"    molt declare --shell {target_name} --wakeable --wake-mac AA-BB-CC-DD-EE-FF")
+            return 5
+        wait = float(getattr(args, "wake_timeout", 180.0) or 180.0)
+        info(f"等 {target_name} 来账本报到（最多 {wait:.0f} 秒）…")
+        age = _wait_for_target_heartbeat(be, target_name, timeout=wait)
+        if age is None:
+            bad(f"发包之后 {wait:.0f} 秒，{target_name} 还是没有来账本报到。")
+            dim("  不搬。源壳还在说话，鱼没死 —— 这次迁徙没有发生。")
+            dim("  去那台机器看一眼：卡在登录界面？网卡没 arm？还是包没出去？")
+            return 5
+        ok(f"目标壳起来了（{age:.0f} 秒前的心跳）—— 继续搬")
+    print()
 
     # --- 第 0 步：先看能不能开始，别做完备份才发现进不去 ---
     #
@@ -2171,8 +2278,10 @@ def cmd_declare(args: argparse.Namespace) -> int:
         attrs["cost_per_hour"] = args.cost_per_hour
     if args.label is not None:
         attrs["label"] = args.label
+    if getattr(args, "wake_mac", None) is not None:
+        attrs["wake_mac"] = args.wake_mac
     if not attrs:
-        bad("什么都没给 —— 至少要 --role / --gpu / --wakeable / --cost-per-hour 之一")
+        bad("什么都没给 —— 至少要 --role / --gpu / --wakeable / --cost-per-hour / --wake-mac 之一")
         return 2
 
     be = _backend(args)
@@ -2184,7 +2293,7 @@ def cmd_declare(args: argparse.Namespace) -> int:
 
     head("已登记")
     kv("壳", got.get("shell", shell_id) or shell_id)
-    for key in ("role", "gpu", "wakeable", "cost_per_hour", "label"):
+    for key in ("role", "gpu", "wakeable", "cost_per_hour", "label", "wake_mac"):
         if key in attrs:
             kv(key, got.get(key))
     dim("  这是**声明**，不是探测：账本只记你说它是什么。")
@@ -2906,6 +3015,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="等这个 TCP 端口能连上才算起来（不给就用 ICMP）",
     )
     s.add_argument(
+        "--skip-target-check",
+        action="store_true",
+        help="不做「目标壳在不在」的闸门（默认会先确认心跳，叫不醒就不搬）",
+    )
+    s.add_argument(
         "--no-wait-wake",
         action="store_true",
         help="发完封包就继续，不确认目标是否真的开机了（不推荐）",
@@ -3173,6 +3287,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_const",
         const=False,
         help="明确声明它叫不醒（老主板 / 网卡不支持 PCI-E 唤醒）；molt migrate 就不会白等",
+    )
+    s.add_argument(
+        "--wake-mac",
+        default=None,
+        help="这台机器的网卡地址（存在账本里，别的机器搬家时用它发魔术封包）",
     )
     s.add_argument(
         "--cost-per-hour",

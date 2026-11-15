@@ -86,6 +86,9 @@ def _migrate(root: Path, data: Path, *extra: str) -> int:
             str(root),
             "--target",
             "shell-b",
+            # 这些用例验的是**封包策略**，不是"目标在不在"那道闸门；
+            # 闸门有自己的几条（见文件末尾），否则每条都要先伪造心跳。
+            "--skip-target-check",
             "--no-color",
             *extra,
         ]
@@ -251,3 +254,129 @@ def test_the_cli_can_declare_that_a_shell_can_be_woken(
     assert "可唤醒" in out
     assert "不可唤醒" not in out
 
+def test_migrate_uses_the_mac_recorded_in_the_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """账本里记着 MAC 时不用 --wake-mac —— 这是「搬家自动叫醒」那条路的判据。
+
+    为什么值得一条测试：这条路的价值全在"人不用记得带参数"。少了它，
+    NAS→Windows 就会像 2026-11-15 23:04 那次一样：机器睡着、没人叫、
+    鱼在中间消失了四分钟。
+    """
+    data = _make_source_data(tmp_path)
+    root = tmp_path / "warden"
+    _declare(root, role="desktop", wakeable=True, wake_mac="D8-BB-C1-11-C3-D2")
+
+    spy = _WakeSpy()
+    monkeypatch.setattr(cli_module.W, "wake", spy)
+
+    rc = _migrate(root, data, "--no-wait-wake")
+
+    assert rc == 0
+    assert len(spy.calls) == 1, "账本里有 MAC，就该发封包"
+    assert spy.calls[0]["mac"].upper().replace(":", "-") == "D8-BB-C1-11-C3-D2"
+    out = capsys.readouterr().out
+    assert "账本里记着" in out
+
+# --------------------------------------------------------------------------- 目标在不在
+
+def _migrate_gated(root: Path, data: Path, *extra: str) -> int:
+    """和 `_migrate` 一样，但**不**跳过「目标在不在」那道闸门。"""
+    return main(
+        [
+            "migrate",
+            "--data",
+            str(data),
+            "--shell",
+            "shell-a",
+            "--root",
+            str(root),
+            "--target",
+            "shell-b",
+            "--no-color",
+            *extra,
+        ]
+    )
+
+
+def test_migration_refuses_when_the_target_is_off_and_has_no_mac(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """2026-11-15 23:04 那次的回归：目标关着、又没有 MAC 可发 —— 不许搬。
+
+    那次的后果是**两边都没有鱼**，持续四分钟。判据只有一条：
+    迁徙没有发生（账本里没有新的一代），源壳没被 drain。
+    """
+    data = _make_source_data(tmp_path)
+    root = tmp_path / "warden"
+    _declare(root, role="desktop", wakeable=True)  # 没有 wake_mac
+
+    spy = _WakeSpy()
+    monkeypatch.setattr(cli_module.W, "wake", spy)
+
+    rc = _migrate_gated(root, data)
+
+    assert rc == 5, "叫不醒就不该搬"
+    assert spy.calls == [], "没有 MAC 时连包都不该发"
+    out = capsys.readouterr().out
+    assert "鱼没死" in out
+    assert Warden(root=root).status()["generation_count"] == 0, "账本里不该出现新的一代"
+
+
+def test_migration_does_not_wake_a_target_that_is_already_reporting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """目标还在报心跳 —— 直接搬，不发包（发了也没坏处，但那是噪音）。"""
+    data = _make_source_data(tmp_path)
+    root = tmp_path / "warden"
+    _declare(root, role="desktop", wakeable=True, wake_mac="D8-BB-C1-11-C3-D2")
+    Warden(root=root).record_heartbeat("shell-b", generation=0, note="agent")
+
+    spy = _WakeSpy()
+    monkeypatch.setattr(cli_module.W, "wake", spy)
+
+    rc = _migrate_gated(root, data, "--no-wait-wake")
+
+    assert rc == 0
+    assert spy.calls == []
+    assert "还在报心跳" in capsys.readouterr().out
+
+
+def test_migration_waits_for_the_target_to_report_after_waking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """包发出去不算数 —— 得等它自己来账本报到，才允许把鱼交出去。"""
+    data = _make_source_data(tmp_path)
+    root = tmp_path / "warden"
+    _declare(root, role="desktop", wakeable=True, wake_mac="D8-BB-C1-11-C3-D2")
+
+    spy = _WakeSpy()
+    monkeypatch.setattr(cli_module.W, "wake", spy)
+    monkeypatch.setattr(cli_module, "_wait_for_target_heartbeat", lambda *a, **k: 4.0)
+
+    rc = _migrate_gated(root, data, "--no-wait-wake")
+
+    assert rc == 0
+    assert len(spy.calls) == 1
+    assert "目标壳起来了" in capsys.readouterr().out
+
+
+def test_migration_aborts_when_the_target_never_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """发了包、等超时、还是不报到 —— 不搬，鱼留在原地。"""
+    data = _make_source_data(tmp_path)
+    root = tmp_path / "warden"
+    _declare(root, role="desktop", wakeable=True, wake_mac="D8-BB-C1-11-C3-D2")
+
+    spy = _WakeSpy()
+    monkeypatch.setattr(cli_module.W, "wake", spy)
+    monkeypatch.setattr(cli_module, "_wait_for_target_heartbeat", lambda *a, **k: None)
+
+    rc = _migrate_gated(root, data, "--no-wait-wake", "--wake-timeout", "1")
+
+    assert rc == 5
+    out = capsys.readouterr().out
+    assert "没有来账本报到" in out
+    assert "这次迁徙没有发生" in out
+    assert Warden(root=root).status()["generation_count"] == 0

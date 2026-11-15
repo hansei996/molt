@@ -82,6 +82,8 @@ def test_migrate_happy_path(tmp_path: Path):
     rc = main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data",
             str(data),
             "--shell",
@@ -141,6 +143,8 @@ def test_migrate_keep_lease_option(tmp_path: Path):
     rc = main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data",
             str(data),
             "--shell",
@@ -180,6 +184,8 @@ def test_migrate_no_archive_still_registers(tmp_path: Path):
     rc = main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data",
             str(data),
             "--shell",
@@ -256,6 +262,8 @@ def test_migrate_refuses_missing_data_dir(tmp_path: Path):
     rc = main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data",
             str(tmp_path / "nope"),
             "--shell",
@@ -276,6 +284,8 @@ def test_migrate_refuses_ambiguous_backend(tmp_path: Path):
     rc = main(
         [
             "migrate",
+            # 这些用例验的不是「目标在不在」那道闸门（见 test_migrate_wakeable.py）。
+            "--skip-target-check",
             "--data",
             str(data),
             "--shell",
