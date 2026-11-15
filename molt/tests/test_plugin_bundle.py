@@ -94,4 +94,6 @@ def test_the_page_cannot_apply_without_a_confirm_checkbox():
 
     app_js = (PLUGIN / "views/sync/app.js").read_text("utf-8")
     assert 'confirm: true' in app_js
+    # 账本给的是 updated_at_readable；页面必须认这个名字，否则来源时间永远是空的
+    assert "updated_at_readable" in app_js
     assert 'id="apply"' not in app_js  # 按钮状态统一由 syncApplyButton 管

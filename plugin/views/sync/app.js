@@ -126,7 +126,7 @@ function renderPeers() {
     name.textContent = peer.shell;
     const meta = document.createElement("div");
     meta.className = "meta";
-    const when = peer.created_at || "（不知道什么时候）";
+    const when = peer.updated_at_readable || peer.created_at_readable || "不知道什么时候";
     const count = (peer.plugins || []).length;
     meta.textContent = `${when} · ${count} 个插件 · ${kb(peer.bytes)}`;
 

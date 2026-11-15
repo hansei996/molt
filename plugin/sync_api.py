@@ -58,6 +58,32 @@ def _client(settings: Any) -> WardenClient:
     return WardenClient(settings.warden_url, settings.warden_token)
 
 
+def _readable_when(item: Any) -> str:
+    """账本里这一份包「什么时候收下的」。
+
+    账本的字段名是 ``updated_at_readable``（每个壳只保留最新一份，所以它就是
+    「最近一次发布」）。早年页面按 ``created_at_readable`` 读，于是永远是空串 ——
+    两个名字之间没有一条测试连接。这里两个都认，**不再让调用方猜**。
+    """
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("updated_at_readable") or item.get("created_at_readable") or "").strip()
+
+
+def _source_when(client: Any, shell: str) -> str:
+    """某个壳的包是什么时候收下的（页面横幅用）。读不到就是空串，不编。"""
+    if not shell:
+        return ""
+    try:
+        bundles = client.plugin_bundles() or []
+    except Exception:  # pragma: no cover - 账本抖一下不该让预览失败
+        return ""
+    for item in bundles:
+        if isinstance(item, dict) and str(item.get("shell") or "") == str(shell):
+            return _readable_when(item)
+    return ""
+
+
 def collect_state(settings: Any, client: Any) -> Dict[str, Any]:
     """这台壳是谁、数据在哪、对面哪些壳发布过配置包。"""
     data_dir = Path(settings.data_dir)
@@ -70,7 +96,8 @@ def collect_state(settings: Any, client: Any) -> Dict[str, Any]:
         peers.append(
             {
                 "shell": shell,
-                "created_at_readable": item.get("created_at_readable") or "",
+                "created_at_readable": _readable_when(item),
+                "updated_at_readable": _readable_when(item),
                 "bytes": item.get("bytes") or 0,
                 "plugins": list(item.get("plugins") or []),
             }
@@ -202,6 +229,7 @@ def do_preview(
 
     return {
         "source": source,
+        "source_created_at": _source_when(client, source),
         "has_manifest": bool(manifest_plugins),
         "rows": rows,
         "counts": {

@@ -58,7 +58,7 @@ class FakeClient:
                     "shell": shell,
                     "bytes": len(payload),
                     "plugins": list(plugins),
-                    "created_at_readable": f"{shell} 刚刚",
+                    "updated_at_readable": f"{shell} just-now",
                 }
             )
         return out
@@ -163,6 +163,11 @@ def test_state_excludes_this_shell_from_peers(tmp_path):
 
     assert state["shell"] == "desk"
     assert [p["shell"] for p in state["peers"]] == ["nas"]
+    # 账本给的是 updated_at_readable；peers 里两个名字都要有值，
+    # 否则页面又会退回「时间未知」
+    peer = state["peers"][0]
+    assert peer["updated_at_readable"] == "nas just-now"
+    assert peer["created_at_readable"] == "nas just-now"
 
 
 # ---------------------------------------------------------------------------
@@ -360,3 +365,14 @@ def test_a_schema_skip_says_which_versions_it_saw(tmp_path):
     assert rows["alpha"]["action"] == "skip_schema"
     assert "7.1.18" in rows["alpha"]["detail"]
     assert "6.5.6" in rows["alpha"]["detail"]
+
+def test_preview_carries_when_the_source_was_published(tmp_path):
+    """横幅上那句话要有时间 —— 字段名错位一次，那行就永远写「时间未知」。"""
+    root = _local_dir(tmp_path)
+    payload = _bundle_for({"alpha": {"n": 1}})
+    client = FakeClient([("nas", payload, ["alpha"])])
+
+    result = sync_api.do_preview(FakeSettings(root), client, source="nas")
+
+    assert result["source"] == "nas"
+    assert result["source_created_at"] == "nas just-now"
