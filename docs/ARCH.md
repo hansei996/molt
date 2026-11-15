@@ -3410,6 +3410,39 @@ plan_sync() got an unexpected keyword argument 'remote_versions'
 要不要**同步插件代码**。见 `docs/DECISIONS.md` 的 D6：现在的默认是"不碰代码，
 只检测版本并把话说清楚"。
 
+
+### 14.18 一条"指向本机"的 provider：删它是对的默认，留它要有人点名（2026-11-15）
+
+`workbuddy` 的 `api_base` 是 `http://127.0.0.1:17863/v1`。覆写层从 v0.1 起就在
+Windows 分支里把它删掉，理由写得很直白：**回环地址永远指向"运行它的那台机器"**，
+搬到别处就是一条指向空气的配置（`provider.manager` 还会顺带抛 `KeyError: 'type'`）。
+
+2026-11-15 真机把这条默认推翻了一半：
+
+| 观察 | 结果 |
+|---|---|
+| Windows 上 `netstat` 找 17863 | 空 —— 看起来"默认删得对" |
+| 但 `astrbot_plugin_workbuddy` 两台都装了 | 网关是**插件自己**在 `initialize()` 里起的本地服务 |
+| 为什么不监听 | 插件读 `plugin_data` 里的 `credentials.enc`，密钥来自环境变量 `WORKBUDDY_MASTER_KEY`；Windows 的 `plugin_data` 是空的、环境也没有那个变量 → `_fail()` → 网关不 bind |
+| 补齐凭据 + 环境变量之后 | `127.0.0.1:17863` LISTENING，`/v1/models` 返回 16 个模型，AstrBot 日志 `Loading model openai_chat_completion(workbuddy/deepseek-v4.1-flash)` |
+
+所以同一条回环地址，在两种机器上是两种事实。**判据不是地址，是"那台机器上到底有没有那个服务"** ——
+而这件事只有人（或那台机器的配置）知道，代码猜不出来。于是留了一个显式开口：
+
+- `molt land --keep-provider-source workbuddy`（可重复）
+- agent 配置 `keep_provider_sources: ["workbuddy"]`
+- `overlay_for_windows(..., keep_provider_sources=[...])`
+
+**默认仍然是删。** 猜错的方向不对称：多留一条死 provider 只是启动日志里多一条 WARN，
+少留一条活的会让人少一个模型 —— 但"默认保留"会让每一台没装那个插件的机器都背上一条死配置。
+所以默认保守、点名放开，和 `wakeable` 那次的处理同一路数（**别替人猜，给人一个入口**）。
+
+配套的一处：`plugin_data/astrbot_plugin_workbuddy` 也进了搬家名单（16 KB 的凭据 + 调度状态）。
+没有它，上面那个"点名保留"会变成一个能加载但用不了的 provider —— 那比没有更糟。
+
+判据：`molt/tests/test_keep_provider_sources.py` 7 条（默认删 / 点名留 / 点名不存在的没影响 /
+显式 drop 优先 / 平台护栏不受影响 / CLI 暴露开关 / agent 把开关转给 land）。
+
 ## 15. 开放问题（需要决策）
 
 | # | 问题 | 选项 | 建议 |

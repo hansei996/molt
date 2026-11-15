@@ -81,6 +81,12 @@ COPY_ARTIFACTS = (
 #: 名单里的这些是**记忆**：丢了就真的没了。
 MEMORY_PLUGIN_DATA = (
     "plugin_data/astrbot_plugin_private_companion",
+    # WorkBuddy 的登录凭据（`credentials.enc`）和调度状态住在这里。没有它，
+    # 插件在新壳上 `initialize()` 会直接 `_fail()` —— 它的本地网关根本不会
+    # 起监听，`workbuddy/*` 那条 provider 就成了一条指向空气的配置。
+    # 2026-11-15 真机：两台都装了 `astrbot_plugin_workbuddy`，但只有 NAS 的
+    # `plugin_data` 里有凭据，所以到 Windows 网关不监听。16 KB，没有搬的成本。
+    "plugin_data/astrbot_plugin_workbuddy",
 )
 
 #: 明确不搬的 plugin_data 子目录（纯缓存）。写出来是为了让"为什么不搬"可查，

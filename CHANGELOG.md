@@ -7,6 +7,11 @@
 
 ---
 
+
+- 落位时的机器覆写层新增 `--keep-provider-source <id>`（agent 侧 `keep_provider_sources`）：
+  指向回环地址的 provider 默认仍会被删，但那台机器上真的跑着该服务时可以点名保留。
+  同批把 `plugin_data/astrbot_plugin_workbuddy` 纳入搬家名单（WorkBuddy 的登录凭据）。
+
 ## [未发布] v1.3.0
 
 > 代码在 `main` 上、CI 绿、演练脚本 20/20 通过，但**还没有打 tag、没有推 PyPI / ghcr**。

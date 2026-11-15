@@ -43,7 +43,7 @@ import copy
 import json
 import secrets
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from .errors import Fatal, NeedsHuman
 
@@ -311,6 +311,7 @@ def overlay_for_windows(
     shell_id: str = "windows",
     port: int = DEFAULT_DASHBOARD_PORT,
     drop_provider_sources: Optional[List[str]] = None,
+    keep_provider_sources: Optional[Sequence[str]] = None,
 ) -> tuple:
     """Windows 壳的覆写预设。
 
@@ -321,7 +322,24 @@ def overlay_for_windows(
     `disable_platforms` 默认 `True`，而且**不给调用方关闭它的便利**：
     这条护栏一旦允许按机器关掉，第一台关掉它的机器就会变成事故现场。
     要打开平台是"交接完成后的一次显式人工动作"，不是覆写层的事。
+
+    ## `keep_provider_sources`：那台机器上真的跑着这个服务
+
+    默认会删掉 `workbuddy`（指向 `http://127.0.0.1:17863/v1`）——理由是
+    "Windows 上没有那个服务"。但这条默认在 2026-11-15 被真机推翻了一次：
+    WorkBuddy 是**插件自己**在 `initialize()` 里起的本地网关（`astrbot_plugin_workbuddy`
+    读 `plugin_data` 里的凭据 + 环境变量 `WORKBUDDY_MASTER_KEY`），两台机器都装了
+    这个插件，所以那条回环地址在 Windows 上**也是有东西在听的**。
+    删掉它，等于把一条真的能用的 provider 丢掉。
+
+    所以留了一个显式开口：调用方知道"这台机器上确实有那个服务"时，把它列进
+    `keep_provider_sources`。**默认仍然是删** —— 猜错方向不对称：多留一条死
+    provider 会让 AstrBot 启动日志里多一条 WARN，少留一条活的会让人少一个模型。
     """
+    drop = ["workbuddy"]
+    if keep_provider_sources:
+        keep = {str(x).strip() for x in keep_provider_sources if str(x).strip()}
+        drop = [x for x in drop if x not in keep]
     return apply_overlay(
         config,
         shell_id=shell_id,
@@ -329,7 +347,7 @@ def overlay_for_windows(
         drop_provider_sources=(
             drop_provider_sources
             if drop_provider_sources is not None
-            else ["workbuddy"]   # 指向 NAS 上的 127.0.0.1:17863，Windows 没有
+            else drop
         ),
         dashboard_host="127.0.0.1",
         dashboard_port=port,

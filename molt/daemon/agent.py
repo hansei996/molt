@@ -110,6 +110,10 @@ class Settings:
     #: 这台壳自己的 dashboard 监听地址/端口。留空 = 保持快照里原样。
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = DEFAULT_PORT
+    #: 这台机器上**确实跑着**的 provider 服务（比如插件自带的本地网关）。
+    #: 列在这里的来源，落位时不会被覆写层当成"本机没有这个服务"删掉。
+    #: 默认空 = 保留旧行为（删掉指向回环地址的 workbuddy）。
+    keep_provider_sources: list = field(default_factory=list)
     #: AstrBot 起来之后顺手拉起来的东西（形如 `[{"argv": [...], "skip_if": "x.exe"}]`）。
     #: 鱼的身体是 AstrBot；这里放的是"人干活要用的东西"，比如 DSH 自己。
     boot_extra: list = field(default_factory=list)
@@ -526,6 +530,8 @@ class Agent:
             ["--dashboard-host", s.dashboard_host] if s.dashboard_host else []
         ) + (
             ["--dashboard-port", str(s.dashboard_port)] if s.dashboard_port else []
+        ) + (
+            sum((["--keep-provider-source", str(x)] for x in (s.keep_provider_sources or [])), [])
         )
 
     def switch_argv(self) -> list:

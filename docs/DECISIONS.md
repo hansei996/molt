@@ -217,3 +217,17 @@ D4 的补充（2026-11-15）：**页面上那个同步按钮只写这台机器**
 | 机器绑定键 | 保留本机值（表在 `landcfg.MACHINE_BOUND_KEYS`，目前只有 `dsh_connector.http_base_url`） |
 | 旧文件 | 改成 `<名字>.molt-before-land-<时间戳>`，不删 |
 | 生效时机 | 写完要重载那个插件（`tools/reload-plugin.py`），不是整机重启 |
+
+## D9 · 指向本机服务的 provider，搬家时删还是留（已定案，2026-11-15，主人：「这个帮同步 workbuddy/deepseek-v4.1-flash 吧，这个应该可以同步」）
+
+| 情形 | 默认动作 | 怎么改 |
+|---|---|---|
+| `api_base` 是回环地址（`127.0.0.1` / `localhost`） | **删**（source + 引用它的 provider 一起删） | 那台机器上确实有那个服务时，`molt land --keep-provider-source <id>` 或 agent 配置 `keep_provider_sources: [<id>]` |
+| `api_base` 是局域网/公网地址 | 原样保留 | 无需动作 |
+| 想连"本机没有这个服务"也保留 | 用 `--keep-provider-source` 点名即可（代码不判断服务是否真的在听） | 后果自负：AstrBot 启动日志会多一条 WARN |
+
+为什么默认是删：**猜错的方向不对称**。多留一条死配置只是日志里多一行；默认保留会让每一台
+没装那个插件的机器都背上一条指向空气的 provider，而这类"看起来配好了"的配置最难查。
+
+配套（同一批改的、不需要单独拍板的）：`plugin_data/astrbot_plugin_workbuddy` 进搬家名单
+—— 16 KB 的登录凭据和调度状态，没有它，点名保留的 provider 能加载但用不了。

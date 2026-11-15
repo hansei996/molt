@@ -1907,6 +1907,7 @@ def cmd_land(args: argparse.Namespace) -> int:
                     base_cfg,
                     shell_id=args.shell or "windows",
                     port=args.dashboard_port or DEFAULT_DASHBOARD_PORT,
+                    keep_provider_sources=getattr(args, "keep_provider_source", None) or (),
                 )
                 save_config(patched, cfg_path)
                 head("机器覆写层（Windows）")
@@ -2980,6 +2981,14 @@ def build_parser() -> argparse.ArgumentParser:
         dest="no_plugin_configs",
         action="store_true",
         help="不把搬来的插件配置写回这台壳（默认会写，只写这边也装了的插件）",
+    )
+    s.add_argument(
+        "--keep-provider-source",
+        dest="keep_provider_source",
+        action="append",
+        metavar="来源 id",
+        help="这台机器上确实跑着这个 provider 服务时，别在覆写层里把它删掉（可重复）。"
+             "默认会删掉指向回环地址的 workbuddy —— 除非你在这里点名。",
     )
     s.set_defaults(func=cmd_land)
 
