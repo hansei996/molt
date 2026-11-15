@@ -210,6 +210,7 @@ class WardenClient:
         wakeable: Optional[bool] = None,
         cost_per_hour: Optional[float] = None,
         label: Optional[str] = None,
+        wake_mac: Optional[str] = None,
         by: str = "",
     ) -> Dict[str, Any]:
         """登记"这台机器是什么"。**只传你想声明的字段** —— 没传的保持原样。
@@ -225,6 +226,7 @@ class WardenClient:
             ("wakeable", wakeable),
             ("cost_per_hour", cost_per_hour),
             ("label", label),
+            ("wake_mac", wake_mac),
         ):
             if value is not None:
                 body[key] = value

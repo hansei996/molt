@@ -344,6 +344,7 @@ class WardenServer:
                     wakeable=body.get("wakeable"),
                     cost_per_hour=body.get("cost_per_hour"),
                     label=body.get("label"),
+                    wake_mac=body.get("wake_mac"),
                     by=str(body.get("by") or ""),
                 )
                 return _ok(shell=attrs)
