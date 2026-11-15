@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import tempfile
 import time
 from pathlib import Path
@@ -78,6 +79,21 @@ class LocalBackend:
     def set_shell(self, shell_id: str, **attrs: Any) -> Dict[str, Any]:
         return self.warden.set_shell(shell_id, **attrs)
 
+    def wake(self, mac: str, *, host: str = "", prefix_len: int = 24) -> Dict[str, Any]:
+        """本地后端：就由这个进程发。它跑在宿主上，广播出得去。"""
+        from .wake import magic_packet, wake_targets
+
+        sent: List[str] = []
+        failures: List[str] = []
+        for target in wake_targets(host, prefix_len=prefix_len):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                    sock.sendto(magic_packet(mac), (target, 9))
+                sent.append(target)
+            except OSError as e:
+                failures.append(f"{target}: {e}")
+        return {"ok": bool(sent), "sent": sent, "failed": failures}
     def shells(self) -> Dict[str, Dict[str, Any]]:
         return self.warden.shells_view()
 
@@ -302,6 +318,9 @@ class RemoteBackend:
     def history(self) -> Dict[str, Any]:
         return self.client.history()
 
+    def wake(self, mac: str, *, host: str = "", prefix_len: int = 24) -> Dict[str, Any]:
+        """远端后端：让账本那台机器发。容器里的广播出不了 docker0。"""
+        return self.client.wake(mac, host=host, prefix_len=prefix_len)
     def set_shell(self, shell_id: str, **attrs: Any) -> Dict[str, Any]:
         return self.client.set_shell(shell_id, **attrs)
 

@@ -346,6 +346,15 @@ class Settings:
 
     confirm_ttl_seconds: int = DEFAULT_CONFIRM_TTL_SECONDS
 
+    #: "叫醒那一步"给多久。叫醒之后提议不立即作废 —— 人还要再确认一次才搬。
+    #: 600 秒是冷启动 + 登录 + agent 上报的余量，不是"等它一辈子"。
+    wake_phase_ttl_seconds: int = 600
+
+    #: 心跳多新才算"它现在真的开着"。**25 秒**，不是 60：
+    #: 2026-11-15 23:38 那次就是 59 秒前的心跳被当成"还活着"，
+    #: 于是封包一个都没发，鱼被推给一台正在关机的机器。
+    alive_seconds: float = 25.0
+
     #: 它自己提出「我想搬」时的有效期。比 `confirm_ttl_seconds` 长得多，
     #: 因为它提出这句话的时候主人可能在睡觉，而 120 秒是给人当场回话用的。
     #: 长有效期不降低安全性：`confirm` 永远要人来说，而且执行前还会重新过一遍
@@ -844,8 +853,33 @@ class MoltMover:
                 + "\n这些是你自己在配置里写下的约束。改掉之后我就能提了。"
             )
 
+        # 目标现在开着还是关着 —— 这是主人要的第一句话。
+        # 「先告诉他 Windows 是开着还是关着」不是一个客套，它是"要不要先开机"
+        # 这个问题的前提；不知道就别问，问了也只是让人猜。
+        power, age = self.target_state(st, want)
+        attrs0 = None
+        if isinstance(st, dict) and isinstance(st.get("shells"), dict):
+            attrs0 = st["shells"].get(want)
+        what0 = _shell_what(attrs0 or {}) if isinstance(attrs0, dict) else ""
+
+        if power != "on":
+            ttl = int(getattr(cfg, "self_propose_ttl_seconds", 1800))
+            self._proposal = (self._clock() + ttl, src, want, src, quote_text, "wake")
+            state_line = (
+                f"最后心跳 {age:.0f} 秒前 —— 那是关着的" if isinstance(age, float)
+                else "账本里没有它的心跳 —— 我不知道它开没开机"
+            )
+            return Reply(
+                f"搬去 **{want}** 之前先说清楚：\n"
+                f"· {want}：{state_line}"
+                + (f"\n· 那边是：{what0}" if what0 else "")
+                + f"\n\n要我先把它叫醒吗？回 `/molt confirm` 我就发魔术封包；"
+                f"\n它上线之后我会再问你一次「要不要搬」—— **一共两次确认**。"
+                f"\n`/molt cancel` 就算了，鱼哪儿都不去。"
+            )
+
         ttl = int(cfg.self_propose_ttl_seconds)
-        self._proposal = (self._clock() + ttl, src, want, src, quote_text)
+        self._proposal = (self._clock() + ttl, src, want, src, quote_text, "move")
         why = str(reason or "").strip()
         # 目标那台机器是什么。账本里有声明就写，没有就**不编** ——
         # 一句"搬去 nas-1（存疑）"远好过"搬去 nas-1（NAS）"这种凭空断言。
@@ -894,6 +928,65 @@ class MoltMover:
                 # 在 request_move 里逐次核对（引用必须能在原话里找到）。
         return out
 
+    def target_state(self, st: Any, shell: str) -> Tuple[str, Optional[float]]:
+        """目标现在是开着还是关着。**读不到就说读不到。**
+
+        返回 `("on", age)` / `("off", age)` / `("unknown", None)`。
+        `age` 是最后一次心跳距今多少秒。
+        """
+        if not isinstance(st, dict):
+            return ("unknown", None)
+        beats = st.get("heartbeats")
+        if not isinstance(beats, dict):
+            return ("unknown", None)
+        entry = beats.get(shell)
+        if not isinstance(entry, dict):
+            return ("unknown", None)
+        age = entry.get("age_seconds")
+        try:
+            age_f = float(age)
+        except (TypeError, ValueError):
+            return ("unknown", None)
+        threshold = 25.0
+        try:
+            threshold = float(getattr(self.settings(), "alive_seconds", 25.0))
+        except Exception:
+            pass
+        return ("on" if age_f <= threshold else "off", age_f)
+
+    def wake_target(self, cfg: Settings, shell: str) -> Tuple[bool, str]:
+        """请**账本那台机器**发魔术封包。
+
+        为什么不在这里发：容器用的是 bridge 网络，往 255.255.255.255 的广播
+        出不了 docker0 —— 包生成得出来、日志也"发了"，但它到不了网卡。
+        2026-11-16 00:11 那次就是这么没叫醒的。
+        """
+        st = self.ledger_status()
+        mac = ""
+        wakeable: Optional[bool] = None
+        if isinstance(st, dict) and isinstance(st.get("shells"), dict):
+            attrs = st["shells"].get(shell) or {}
+            if isinstance(attrs, dict):
+                mac = str(attrs.get("wake_mac") or "").strip()
+                if "wakeable" in attrs:
+                    wakeable = bool(attrs.get("wakeable"))
+        if not mac:
+            mac = str(getattr(cfg, "wake_mac", "") or "").strip()
+        if not mac:
+            return (False, f"账本里没有 {shell} 的 MAC —— 我不知道往哪个网卡发。\n"
+                           f"在那台机器上登记一次：`molt declare --shell {shell} --wakeable --wake-mac AA-BB-CC-DD-EE-FF`")
+        if wakeable is False:
+            return (False, f"账本说 {shell} 不可唤醒（wakeable: false）—— 这台机器只能人手动开。")
+        try:
+            client = WardenClient(cfg.warden_url, cfg.warden_token)
+            got = client.wake(mac, host=str(getattr(cfg, "wake_host", "") or ""))
+        except Exception as exc:
+            return (False, f"让账本发包失败：{exc}")
+        sent = got.get("sent") or []
+        if not sent:
+            return (False, "账本那边一个包都没发出去：" + "；".join(got.get("failed") or []))
+        return (True, f"已由账本发出 {len(sent)} 个封包（{' / '.join(sent)}）")
+
     def _expired(self) -> bool:
         if self._proposal is None:
             return True
@@ -930,10 +1023,43 @@ class MoltMover:
             else (SELF_PROPOSER if was == SELF_PROPOSER else "human")
         )
         # 目标以**提议里记下的那个**为准：它自己挑的时候，配置里的 target 可能不是那台。
+        phase = str(self._proposal[5]) if len(self._proposal) > 5 else "move"
         wanted = self._proposal[2] if len(self._proposal) > 2 else ""
         wanted = str(wanted or "").strip() or cfg.target
         # 那句原话要在清空提议**之前**取出来，否则确认文案里就只剩"你那句话"四个字。
         quote_text = str(self._proposal[4] or "").strip() if len(self._proposal) > 4 else ""
+
+        if phase == "wake":
+            # 第一段：叫醒。**它不搬。** 搬是第二段的事，
+            # 而第二段之前会再确认一次"它现在真的开着"。
+            ok_sent, msg = self.wake_target(cfg, wanted)
+            if not ok_sent:
+                self._proposal = None
+                return Reply(f"没叫醒它：{msg}\n鱼没动，还在这台机器上。")
+            ttl = int(getattr(cfg, "wake_phase_ttl_seconds", 600))
+            self._proposal = (self._clock() + ttl, self._proposal[1], wanted,
+                              self._proposal[3], quote_text, "move")
+            return Reply(
+                f"好，发包了 —— {msg}。\n"
+                f"等它开机（我这边看的是心跳，不是 ping）。\n\n"
+                f"它上线之后，你回 `/molt confirm` —— **那一次就是第二次确认，我会直接动身**。\n"
+                f"如果还没上线，我会告诉你「它还没上线」，鱼一直在这台机器上。"
+            )
+
+        # 第二段：真的搬。但先自己核一遍目标是不是真的起来了 ——
+        # 人按 confirm 的时候可能只是"以为它开了"。
+        st = self.ledger_status()
+        power, age = self.target_state(st, wanted)
+        if power != "on":
+            state_line = (
+                f"最后心跳 {age:.0f} 秒前" if isinstance(age, float) else "账本里没有它的心跳"
+            )
+            return Reply(
+                f"先不搬：**{wanted} 现在还没有上线**（{state_line}）。\n"
+                f"鱼没动，还在这台机器上 —— 点了确认也不会把它推进一台关着的机器里。\n"
+                f"等它起来再发 `/molt confirm`；不想搬了就 `/molt cancel`。"
+            )
+
         self._proposal = None
         plan = build_plan(cfg, target=wanted)
         self._pending = plan

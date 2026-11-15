@@ -1,4 +1,4 @@
-"""它自己想搬：`molt_request_move` / `molt_propose_go_home` 这一层的契约。
+﻿"""它自己想搬：`molt_request_move` / `molt_propose_go_home` 这一层的契约。
 
 ## 这一层是什么
 
@@ -244,7 +244,13 @@ def test_confirming_goes_where_it_asked_not_where_the_config_says(plugin_dir: Pa
     payload = {
         "status": {
             "lease": None,
-            "heartbeats": {"win-shell": {}, "nas-shell": {}, "gpu-box": {}},
+            # gpu-box 是开着的（3 秒前心跳）—— 这条用例验的是"去哪台"，
+            # 不是"目标关着时怎么办"（后者由 test_plugin_two_step 专门验）。
+            "heartbeats": {
+                "win-shell": {"age_seconds": 4},
+                "nas-shell": {"age_seconds": 9},
+                "gpu-box": {"age_seconds": 3},
+            },
             "latest_generation": {"target_shell": "nas-shell"},
         }
     }

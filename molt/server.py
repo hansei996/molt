@@ -44,6 +44,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -53,6 +54,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .errors import Fatal, MoltError, NeedsHuman
 from .render import render_timeline
+from .wake import magic_packet, wake_targets
 from .version import PROTOCOL_VERSION, __version__
 from .warden import SHELL_ATTR_FIELDS, Warden
 
@@ -352,6 +354,40 @@ class WardenServer:
             # ---- GET /shells ----
             if head == "shells" and method == "GET":
                 return _ok(shells=self.warden.shells_view())
+
+            # ---- POST /wake ----（魔术封包必须由宿主发）
+            #
+            # 2026-11-16 00:11 那次没叫醒：迁移是在 **容器里** 跑的，容器用的是
+            # bridge 网络。往 255.255.255.255 发的 UDP 广播在容器里出不了 docker0
+            # —— 包生成得出来、看起来也"发出去了"，但它到不了那台机器的网卡。
+            # 而 2026-11-14 12:40 那次真的叫醒了，是因为发包的是 **宿主** 上的脚本。
+            #
+            # 所以这个端点存在的理由只有一个：让包从宿主网络发出去。
+            # 它不是"再包一层"，它是把这件事放回唯一能做成它的地方。
+            if head == "wake" and parts[1:2] == [] and method == "POST":
+                mac = str(body.get("mac") or "").strip()
+                if not mac:
+                    return _err(400, "缺少 mac", "bad_request")
+                try:
+                    targets = wake_targets(
+                        str(body.get("host") or ""),
+                        prefix_len=int(body.get("prefix_len") or 24),
+                    )
+                except (NeedsHuman, ValueError) as e:
+                    return _err(400, str(e), "bad_request")
+                sent: List[str] = []
+                failures: List[str] = []
+                for target in targets:
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                            sock.sendto(magic_packet(mac), (target, 9))
+                        sent.append(target)
+                    except OSError as e:
+                        failures.append(f"{target}: {e}")
+                if not sent:
+                    return _err(500, "一个封包都没发出去：" + "; ".join(failures), "wake_failed")
+                return _ok(sent=sent, failed=failures)
 
             # ---- POST /power ----（「走」和「关」是两件事，这是第二件）
             if head == "power" and parts[1:2] == [] and method == "POST":

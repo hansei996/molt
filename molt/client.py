@@ -234,6 +234,22 @@ class WardenClient:
             body["by"] = by
         return self._request("POST", "/shell", body).get("shell", {})
 
+    def wake(
+        self,
+        mac: str,
+        *,
+        host: str = "",
+        prefix_len: int = 24,
+    ) -> Dict[str, Any]:
+        """让**账本所在的那台机器**发魔术封包。
+
+        为什么不让调用方自己发：容器里的广播出不了 docker0（2026-11-16 00:11
+        那次就是这么没叫醒的）。这件事只有一个地方能做对 —— 宿主网络。
+        """
+        return self._request(
+            "POST", "/wake", {"mac": mac, "host": host, "prefix_len": prefix_len}
+        )
+
     def shells(self) -> Dict[str, Dict[str, Any]]:
         return self._request("GET", "/shells").get("shells", {})
 

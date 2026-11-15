@@ -915,24 +915,52 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         wake_host = getattr(args, "wake_host", "") or ""
         print()
         info(f"先叫醒目标 {W.format_mac(wake_mac)}（{wake_host or '全网广播'}）")
-        try:
-            wr = W.wake(
-                wake_mac,
-                host=wake_host,
-                prefix_len=getattr(args, "wake_prefix", 24),
-                count=getattr(args, "wake_count", W.DEFAULT_COUNT),
-                interval=getattr(args, "wake_interval", W.DEFAULT_INTERVAL),
-                quiet=True,
-            )
-        except Fatal as e:
-            bad(str(e))
-            return 4
-        if not wr["any_sent"]:
-            bad("封包一个都没发出去——是本机网络的问题，不是目标机。")
-            for r in wr["rounds"][0]["results"]:
-                dim(f"    {r['target']}: {r['error']}")
-            return 4
-        kv("发包", f"{wr['rounds_ok']}/{wr['rounds_sent']} 轮，路径 {' / '.join(wr['targets'])}")
+        # **封包必须从宿主发。** 2026-11-16 00:11 那次迁移是在容器里跑的：
+        # 容器用 bridge 网络，往 255.255.255.255 的广播出不了 docker0 ——
+        # 包生成得出来、日志也"发出去了"，但它到不了那台机器的网卡。
+        # 而 2026-11-14 12:40 那次真的叫醒了，因为发包的是宿主上的脚本。
+        # 所以优先让账本那台机器发（它一定在宿主网络上），本机发是退路。
+        wr: Optional[Dict[str, Any]] = None
+        remote_sent: List[str] = []
+        remote_failed: List[str] = []
+        if be.kind == "remote":
+            try:
+                got = be.wake(
+                    wake_mac,
+                    host=wake_host,
+                    prefix_len=getattr(args, "wake_prefix", 24),
+                )
+                remote_sent = list(got.get("sent") or [])
+                remote_failed = list(got.get("failed") or [])
+            except Exception as e:  # 账本发不出去时退回本机，别让一次故障变成"搬不了家"
+                warn(f"让账本发包失败（{e}）—— 改用本机发。")
+        if remote_sent:
+            kv("发包", f"由账本 {be.where()} 发出，路径 {' / '.join(remote_sent)}")
+            if remote_failed:
+                for line in remote_failed:
+                    dim(f"    {line}")
+        else:
+            if remote_failed:
+                for line in remote_failed:
+                    dim(f"    账本那边：{line}")
+            try:
+                wr = W.wake(
+                    wake_mac,
+                    host=wake_host,
+                    prefix_len=getattr(args, "wake_prefix", 24),
+                    count=getattr(args, "wake_count", W.DEFAULT_COUNT),
+                    interval=getattr(args, "wake_interval", W.DEFAULT_INTERVAL),
+                    quiet=True,
+                )
+            except Fatal as e:
+                bad(str(e))
+                return 4
+            if not wr["any_sent"]:
+                bad("封包一个都没发出去——是本机网络的问题，不是目标机。")
+                for r in wr["rounds"][0]["results"]:
+                    dim(f"    {r['target']}: {r['error']}")
+                return 4
+            kv("发包", f"{wr['rounds_ok']}/{wr['rounds_sent']} 轮，路径 {' / '.join(wr['targets'])}")
 
         if wake_host and not getattr(args, "no_wait_wake", False):
             wait_port = getattr(args, "wake_port_check", 0) or None

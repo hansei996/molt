@@ -1,4 +1,4 @@
-"""聊天指令层：`/molt go` → 提议 → `/molt confirm` → 真的搬。
+﻿"""聊天指令层：`/molt go` → 提议 → `/molt confirm` → 真的搬。
 
 这一层是整个项目里**唯一一处"鱼可以因为一句话而离开"**的地方，
 所以测试的重心不是"功能能不能用"，而是"它在什么情况下会拒绝"。
@@ -82,7 +82,16 @@ class FakeLedger:
     """假的 Warden：只回答 `GET /status`。"""
 
     def __init__(self, payload=None, *, boom: bool = False):
-        self.payload = payload if payload is not None else {"status": {"current_epoch": 8}}
+        # 默认账本里 **目标壳是开着的**（心跳 3 秒前）。
+        # 这不是为了让测试好过，而是这批用例验的是"提议→确认→执行"，
+        # 而"目标关着"是另一条路（先叫醒、再问第二次），由 test_plugin_two_step 专门验。
+        self.payload = payload if payload is not None else {
+            "status": {
+                "current_epoch": 8,
+                "heartbeats": {"win-shell": {"age_seconds": 3.0, "last_seen_readable": "刚刚"}},
+                "shells": {"win-shell": {"role": "desktop", "wakeable": True}},
+            }
+        }
         self.boom = boom
         self.calls: list = []
 
