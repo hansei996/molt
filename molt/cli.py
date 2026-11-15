@@ -2270,6 +2270,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         kv("租约", s["lease"]["state"])
     except Fatal as e:
         bad(f"state.json 有问题：{e}")
+    except Exception as e:  # noqa: BLE001 - 诊断命令的契约是"说清楚"，不是"崩给你看"
+        # 这一条吃到的第一例：默认根目录指向一个别人机器上不存在的路径，
+        # 于是 doctor 在最该帮上忙的时候抛异常退出（CI 陌生人演练，2026-11-15）。
+        bad(f"读不了那边的账本：{e}")
+        dim("  这通常说明根目录指向了别的机器上的路径。要么建好它，要么用 --root 指个本地目录。")
 
     head("SQLite")
     import sqlite3

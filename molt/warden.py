@@ -124,18 +124,20 @@ def _parse_generation_from_name(name: str) -> Optional[int]:
 
 
 def _default_root() -> Path:
-    """Warden 根目录的默认值，按平台给。
+    """Warden 根目录的默认值：**陌生人也能创建的那个目录**。
 
-    **为什么不能只写死 `/mnt/dm-0/astrbot/_molt`**：在 Windows 上
-    `Path("/mnt/dm-0/astrbot/_molt")` 会变成 `\\mnt\\dm-0\\astrbot\\_molt`
-    ——一个盘符根下的、不存在的、而且不该被创建的路径。实测时
-    `molt doctor` 就在 Windows 上打印了这个路径。
+    这里踩过一次很典型的坑：最初 POSIX 分支返回 `/mnt/dm-0/astrbot/_molt`
+    —— 也就是作者那台 NAS 上的生产路径。后果是陌生人（和 CI）在 Linux 上
+    跑 `molt init --role warden` 会拿到一个他不该、往往也不能创建的目录，
+    而 `molt doctor` 会在那台机器上直接抛异常死掉。
 
-    真实部署里 Warden 只跑在 NAS 上，所以 POSIX 默认值就是生产路径；
-    Windows 上的默认值只是为了让**开发和测试**能跑起来，不承担生产职责。
+    规则现在是这样：
 
-    环境变量 `MOLT_ROOT` 永远优先——这是"换机器不用改代码"的通用解法，
-    和 AstrBot 用 `ASTRBOT_ROOT` 是同一个套路。
+    - 生产环境**永远显式传 `--root`**（`tools/start-warden.py` 里就是），
+      所以默认值不需要、也不应该照顾某一台具体的机器；
+    - 默认值只服务"第一次在陌生机器上试一下"的人，那就必须是他的用户目录；
+    - `MOLT_ROOT` 永远优先 —— 换机器不用改代码，和 AstrBot 用
+      `ASTRBOT_ROOT` 是同一个套路。
     """
     override = os.environ.get("MOLT_ROOT")
     if override:
@@ -143,9 +145,10 @@ def _default_root() -> Path:
 
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home())
-        return Path(base) / "molt"
+        return Path(base) / "molt" / "warden"
 
-    return Path("/mnt/dm-0/astrbot/_molt")
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "molt" / "warden"
 
 
 def default_root() -> Path:
