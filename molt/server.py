@@ -203,6 +203,22 @@ def _where_html(status: Dict[str, Any]) -> str:
 </body></html>"""
 
 
+def _local_ipv4() -> str:
+    """本机在这张 LAN 上的地址。只为算定向广播用。
+
+    `connect()` 到一个不会真的发包的外部地址（UDP 只是选路由，不握手），
+    然后问内核"你会从哪个地址出去"。比读 `/proc/net/route` 稳，
+    也不用 netifaces 这种装不上的依赖。
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            ip = str(sock.getsockname()[0])
+        return "" if ip.startswith("127.") else ip
+    except OSError:
+        return ""
+
+
 def _ok(**fields: Any) -> _Response:
     body = {"ok": True}
     body.update(fields)
@@ -368,11 +384,19 @@ class WardenServer:
                 mac = str(body.get("mac") or "").strip()
                 if not mac:
                     return _err(400, "缺少 mac", "bad_request")
+                # 没给地址时，用**本机的**地址算定向广播（x.y.z.255）。
+                # 只发 255.255.255.255 是不够的：不少交换机会丢掉 limited
+                # broadcast，而 2026-11-14 12:40 那次真正叫醒它的是定向广播那一路。
+                wake_host = str(body.get("host") or "").strip() or _local_ipv4()
                 try:
-                    targets = wake_targets(
-                        str(body.get("host") or ""),
-                        prefix_len=int(body.get("prefix_len") or 24),
-                    )
+                    targets = [
+                        t
+                        for t in wake_targets(
+                            wake_host,
+                            prefix_len=int(body.get("prefix_len") or 24),
+                        )
+                        if t != wake_host
+                    ]
                 except (NeedsHuman, ValueError) as e:
                     return _err(400, str(e), "bad_request")
                 sent: List[str] = []
