@@ -88,6 +88,34 @@ DEFAULT_SELF_PROPOSE_TTL_SECONDS = 1800
 #: 因为"它想走"和"你让它走"是两件事，哪怕按下去的是同一只手。
 SELF_PROPOSER = "self"
 
+#: 触发源：**是谁让"想搬"这件事发生的**。
+#:
+#: 现在真的会产生提议的只有两种：`human`（人在聊天里敲 `/molt go`）与
+#: `self`（模型自己调 `molt_propose_go_home`）。
+#:
+#: `utterance` 与 `schedule` 是**留给未来的接口**，不是现在能用的功能：
+#: 前者是"主人一句话，它自己把那句话翻译成一次搬迁"（"去打会儿游戏吧"），
+#: 后者是"到点了"（`0 3 * * *`）。它们一旦实装，走的仍然是同一个
+#: `request_move()` —— 同一套校验、同一条 `/molt confirm`、同一个提议槽。
+#:
+#: **新增一个触发源不该新增一条执行路径。** 执行路径只有一条，
+#: 所以 `molt` 的 fencing、租约、先死后生这些性质只需要在一个地方成立。
+MOVE_SOURCES: Dict[str, str] = {
+    "human": "你提的",
+    "self": "我自己想走的",
+    "utterance": "你那句话",
+    "schedule": "到点了",
+}
+
+
+def source_label(source: str) -> str:
+    """把触发源翻成一句能嵌进确认文案的话；不认识就返回空串。
+
+    返回空串而不是"未知"是刻意的：调用方拿到空串就会退回"这次是你提的"这个
+    保守说法，而不是在界面上打出 `source=xyz` 这种机器话。
+    """
+    return MOVE_SOURCES.get(str(source or "").strip(), "")
+
 #: `migrate` 最长跑多久。真机上一次 1.4–2 秒，但热备大库、上传慢的时候会更久；
 #: 900 秒是"防止卡死"而不是"预期耗时"。
 MIGRATE_TIMEOUT_SECONDS = 900
@@ -190,6 +218,16 @@ class Settings:
     #: 长有效期不降低安全性：`confirm` 永远要人来说，而且执行前还会重新过一遍
     #: 配置检查、租约检查、唤醒与落地校验。
     self_propose_ttl_seconds: int = DEFAULT_SELF_PROPOSE_TTL_SECONDS
+
+    #: 未来触发规则的配置槽。**本版本不解释它的内容，只做一件事：**
+    #: 里面出现任何这个版本还不认识的东西，就把它当成阻塞项（见
+    #: `MoltMover.move_policy_refusals`）。
+    #:
+    #: 为什么是"不认识就拦"而不是"不认识就忽略"：一个人往配置里写
+    #: `"triggers": {"cron": "0 3 * * *"}`，他的意思肯定是"凌晨三点去"。
+    #: 如果代码默默忽略，那条规则**永远不会生效，而且不会有任何提示** ——
+    #: 他会以为配好了，直到某天发现鱼没动。宁可当场说"这个我还不认识"。
+    triggers: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def load(path: Path) -> "Settings":
@@ -473,7 +511,7 @@ class MoltMover:
                 )
 
         ttl = int(cfg.confirm_ttl_seconds)
-        self._proposal = (self._clock() + ttl, sender, cfg.target)
+        self._proposal = (self._clock() + ttl, sender, cfg.target, "human")
         return Reply(
             f"搬去 **{cfg.target}**？\n"
             f"{ttl} 秒内回 `/molt confirm` 我就动身；回 `/molt cancel` 或者不管它，就算了。\n"
@@ -510,7 +548,12 @@ class MoltMover:
         return out
 
     def request_move(
-        self, cfg: Settings, *, target: str = "", reason: str = ""
+        self,
+        cfg: Settings,
+        *,
+        target: str = "",
+        reason: str = "",
+        source: str = SELF_PROPOSER,
     ) -> Reply:
         """由**它自己**发起一次"我想搬"。只写提议，绝不执行。
 
@@ -565,8 +608,26 @@ class MoltMover:
                 )
             )
 
+        src = str(source or "").strip()
+        if src not in MOVE_SOURCES:
+            # 来源不明时连"要不要提"都不该提 —— 即使其它检查全都通过，
+            # 我也不该替一个说不清身份的东西发出这条提议：确认时那句
+            # 「这次是谁提的」是要给人看的，不能靠猜。
+            return Reply(
+                f"我不知道这次是谁想搬（`source={src or '空'}`）。\n"
+                "不认识的来源我不提。"
+            )
+
+        blockers = self.move_policy_refusals(cfg, target=want, source=src)
+        if blockers:
+            return Reply(
+                f"我想搬去 **{want}**，但现在不能提：\n· "
+                + "\n· ".join(blockers)
+                + "\n这些是你自己在配置里写下的约束。改掉之后我就能提了。"
+            )
+
         ttl = int(cfg.self_propose_ttl_seconds)
-        self._proposal = (self._clock() + ttl, SELF_PROPOSER, want)
+        self._proposal = (self._clock() + ttl, src, want, src)
         why = str(reason or "").strip()
         return Reply(
             f"我想搬去 **{want}**。"
@@ -574,6 +635,37 @@ class MoltMover:
             + f"\n\n你说一句 `/molt confirm`，我就动身；`/molt cancel` 就算了。"
             f"\n这条提议 {ttl // 60} 分钟内有效 —— 你说要搬，才是搬。"
         )
+
+    def move_policy_refusals(
+        self, cfg: Settings, *, target: str, source: str = SELF_PROPOSER
+    ) -> List[str]:
+        """未来所有「什么时候可以搬」的判断都该加在这里。
+
+        现在它只做一件事：**把配置里写着、但本版本还不认识的触发规则当成阻塞项**。
+
+        这一条是给未来留的接口，但它现在就有用：一个人照着文档写
+        `"triggers": {"cron": "0 3 * * *"}`，而 `cron` 还没实装时，正确表现是
+        "我不搬，并且告诉你为什么"，不是安安静静地不搬。
+
+        实装 `schedule` 那天，往这里加的就该是"现在到点了吗"；
+        实装"那句话"那天，加的是"主人的意思是去还是不去"。**它们都只产出阻塞理由，
+        不产出执行动作** —— 执行动作永远只有 `confirm` 之后那一条路。
+        """
+        out: List[str] = []
+        triggers = getattr(cfg, "triggers", None)
+        if isinstance(triggers, dict):
+            for name in sorted(triggers):
+                if name not in MOVE_SOURCES:
+                    out.append(
+                        f"`triggers.{name}` 这个触发源这个版本还不认识"
+                        f"（认识的有：{'、'.join(sorted(MOVE_SOURCES))}）"
+                    )
+                else:
+                    out.append(
+                        f"`triggers.{name}` 已经写进配置了，但「{source_label(name)}」"
+                        "这个触发方式这个版本还没有实装 —— 我不想装作它已经在工作"
+                    )
+        return out
 
     def _expired(self) -> bool:
         if self._proposal is None:
@@ -603,14 +695,24 @@ class MoltMover:
             return Reply("配置不完整，我搬不了：\n· " + "\n· ".join(problems))
 
         was = self._proposal[1]
+        # 老的四元组里有显式的来源；三元组（v0.5 的 `/molt go`）只能从
+        # "谁提的"推：`self` 就是它自己，其它都是人。
+        source = (
+            self._proposal[3]
+            if len(self._proposal) > 3
+            else (SELF_PROPOSER if was == SELF_PROPOSER else "human")
+        )
         # 目标以**提议里记下的那个**为准：它自己挑的时候，配置里的 target 可能不是那台。
         wanted = self._proposal[2] if len(self._proposal) > 2 else ""
         wanted = str(wanted or "").strip() or cfg.target
         self._proposal = None
         plan = build_plan(cfg, target=wanted)
         self._pending = plan
-        if was == SELF_PROPOSER:
+        label = source_label(source)
+        if source == SELF_PROPOSER:
             note = "\n（这次是我想走的，不是你说要走的 —— 但按下去的是你）"
+        elif label:
+            note = f"\n（这次是{label}）"
         elif was:
             note = "\n（这次是你提的）"
         else:

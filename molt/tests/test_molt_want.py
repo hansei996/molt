@@ -287,3 +287,85 @@ def test_the_llm_tool_is_off_by_default(plugin_dir: Path) -> None:
     cfg = _cfg(plugin_dir, llm_tool_enabled=False)
     assert cfg.llm_tool_enabled is False
     assert Settings().llm_tool_enabled is False
+
+
+# --------------------------------------------------------------------------- 触发源
+
+#: 这一节钉的是 v0.6 的**接口层**（用户 2026-11-15 的要求：「这个要给未来留足接口，
+#: 我们现在只是做通用的设计」）。四个来源里今天真的会用的只有 `human` 与 `self`；
+#: `utterance`（「去打会儿游戏吧」）与 `schedule`（定时）只把路铺好，**不实装**。
+#:
+#: 两条不变量：
+#:   1. 不认识的来源 -> 拒绝。宁可不动，也不要在确认文案里写一句猜出来的「是谁提的」。
+#:   2. 配置里写了、代码还没实装的触发源 -> 拒绝并说明。默默忽略等于让人以为配好了。
+
+
+def test_source_labels_are_explicit(plugin_dir: Path) -> None:
+    assert cmd.source_label("human") == "你提的"
+    assert cmd.source_label("self") == "我自己想走的"
+    assert cmd.source_label("utterance") == "你那句话"
+    assert cmd.source_label("schedule") == "到点了"
+    # 不认识 -> 空串（调用方会退回「这次是你提的」这个保守说法，而不是打出 source=xyz）
+    assert cmd.source_label("telepathy") == ""
+    assert cmd.source_label("") == ""
+
+
+def test_an_unknown_source_is_refused(plugin_dir: Path) -> None:
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir)
+    reply = m.request_move(cfg, target="nas-shell", reason="", source="telepathy")
+    assert "不知道这次是谁想搬" in reply.text
+    assert m._proposal is None
+
+
+def test_the_utterance_source_shows_up_in_the_confirm_note(plugin_dir: Path) -> None:
+    """「去打会儿游戏吧」翻译成一次搬迁时，确认文案要说是**那句话**。"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir)
+    reply = m.request_move(
+        cfg, target="nas-shell", reason="主人说去打会儿游戏", source="utterance"
+    )
+    assert "nas-shell" in reply.text
+    assert m._proposal is not None
+    assert m._proposal[3] == "utterance"
+    confirmed = m._confirm(cfg)
+    assert confirmed.plan is not None
+    assert "这次是你那句话" in confirmed.text
+
+
+def test_a_trigger_this_version_does_not_understand_blocks_the_proposal(plugin_dir: Path) -> None:
+    """写进配置但代码不认识的触发源 -> 拒绝，并指着那条配置说清楚。"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir, triggers={"cron": "0 3 * * *"})
+    reply = m.request_move(cfg, target="nas-shell", reason="")
+    assert "triggers.cron" in reply.text
+    assert "还不认识" in reply.text
+    assert m._proposal is None
+
+
+def test_a_known_trigger_that_is_not_implemented_also_blocks(plugin_dir: Path) -> None:
+    """`schedule` 是认识的来源，但本版本没实装 —— 同样拒绝，不许装作它在工作。"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir, triggers={"schedule": "每天 03:00"})
+    reply = m.request_move(cfg, target="nas-shell", reason="")
+    assert "triggers.schedule" in reply.text
+    assert "没有实装" in reply.text
+    assert m._proposal is None
+
+
+def test_an_empty_triggers_slot_blocks_nothing(plugin_dir: Path) -> None:
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir, triggers={})
+    reply = m.request_move(cfg, target="nas-shell", reason="")
+    assert m._proposal is not None
+    assert "nas-shell" in reply.text
+
+
+def test_a_legacy_three_element_proposal_still_confirms(plugin_dir: Path) -> None:
+    """v0.5 写下的三元组（没有来源字段）不能因为加了第四位就读不出来。"""
+    m = mover(plugin_dir)
+    cfg = _cfg(plugin_dir)
+    m._proposal = (m._clock() + 60, "hansei", "nas-shell")
+    reply = m._confirm(cfg)
+    assert reply.plan is not None
+    assert "这次是你提的" in reply.text

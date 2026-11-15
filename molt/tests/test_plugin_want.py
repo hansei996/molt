@@ -43,8 +43,8 @@ class _FakeMover:
     def settings(self) -> "cmd.Settings":
         return self._cfg
 
-    def request_move(self, cfg, *, target="", reason=""):
-        self.calls.append({"target": target, "reason": reason})
+    def request_move(self, cfg, *, target="", reason="", source="self"):
+        self.calls.append({"target": target, "reason": reason, "source": source})
         self._has = True
         return cmd.Reply(self._text)
 
@@ -97,7 +97,9 @@ def test_when_open_it_hands_the_request_over_verbatim(tmp_path: Path) -> None:
     mover = _FakeMover(_settings(tmp_path))
     text = _call(_plugin(mover), target="nas-shell", reason="这边要关机了")
     assert text == "我想搬去 nas-shell。"
-    assert mover.calls == [{"target": "nas-shell", "reason": "这边要关机了"}]
+    assert mover.calls == [
+        {"target": "nas-shell", "reason": "这边要关机了", "source": "self"}
+    ]
 
 
 def test_a_broken_config_does_not_break_the_conversation(tmp_path: Path) -> None:
@@ -134,7 +136,7 @@ def test_the_tool_registration_survives_astrbot_docstring_parsing(tmp_path: Path
     params = [
         name for name in inspect.signature(func).parameters if name not in ("self", "event")
     ]
-    assert params == ["target", "reason"]
+    assert params == ["target", "reason", "source"]
 
     # 2) 每个参数在 `Args:` 段里都有一行 `名字(类型): 说明`
     #    `inspect.getdoc` 会去掉公共缩进，所以这里只看"Args: 之后"那一段，不依赖缩进宽度。

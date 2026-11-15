@@ -734,16 +734,23 @@ class MoltControlPlugin(Star):
 
     @filter.llm_tool(name="molt_propose_go_home")
     async def molt_propose_go_home(
-        self, event: AstrMessageEvent, target: str, reason: str
+        self, event: AstrMessageEvent, target: str, reason: str, source: str = "self"
     ) -> str:
         """提出想搬到另一台机器上。**只是提议**：主人说 confirm 才会真的动身。
 
         什么时候用它：你觉得自己该换一台机器了（比如这边要关机、那边本来就该常开），
         想问问主人行不行。它不是"搬家"，它只是"一句请求"。
 
+        这次搬迁是谁的念头，要老实说 —— 确认时主人看到的那句话会写着它：
+        你自己觉得该换机器了，填 `self`；主人刚说了「去打会儿游戏吧」这种话、
+        你只是在替他把那句话变成一次搬迁，填 `utterance`。
+        填错的后果不是搬错地方（去哪由 `target` 决定，执行永远要主人 confirm），
+        而是主人在最需要看清「谁想搬」的时候，看到的是一句假话。
+
         Args:
             target(string): 想去的机器的名字，必须和账本上的一致，例如 ugreen-776b-8b7896df。留空表示搬去配置里写好的那台。
             reason(string): 你为什么想搬过去，一句话，会原样转告主人。
+            source(string): 这次是谁的念头。你自己觉得该换机器了填 self；主人刚说了「去打会儿游戏吧」这种话、你只是替他把那句话变成一次搬迁，填 utterance。
         """
         if self._mover is None:
             return "这台壳上没有迁徙配置，我不能搬。"
@@ -756,10 +763,13 @@ class MoltControlPlugin(Star):
                 "模型还不能替我提这件事（`molt_command.json` 里 `llm_tool_enabled` 是 false）。"
                 "这不是故障，是默认的关。"
             )
-        reply = self._mover.request_move(cfg, target=target, reason=reason)
+        reply = self._mover.request_move(
+            cfg, target=target, reason=reason, source=source
+        )
         logger.info(
-            "[Molt] 工具请求迁徙：target=%r 提议=%s",
+            "[Molt] 工具请求迁徙：target=%r source=%r 提议=%s",
             target or "(配置默认)",
+            source,
             "已写下" if self._mover.has_proposal() else "没接受",
         )
         return reply.text
