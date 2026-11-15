@@ -138,7 +138,12 @@ def test_backup_snapshot_matches_the_source(tmp_path: Path):
     name = _backup_files(root)[0]
     out_dir = tmp_path / "unpacked"
     with tarfile.open(root / "backups" / name) as tf:
-        tf.extractall(out_dir, filter="data")
+        # `filter` 参数 3.12 才有。CI 的 py3.10 是 3.10.11，没有它 ——
+        # 产品代码 `molt/transfer.py` 早就两条路都留着，这里漏了。
+        try:
+            tf.extractall(out_dir, filter="data")
+        except TypeError:
+            tf.extractall(out_dir)
 
     conn = sqlite3.connect(str(out_dir / "data_v4.db"))
     try:

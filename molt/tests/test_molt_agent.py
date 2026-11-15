@@ -802,6 +802,11 @@ def test_self_heal_does_not_boot_twice_in_a_row(tmp_path):
                       status_fetcher=lambda: st,
                       # 端口一直没人听：模拟"刚拉起来、还在启动"的那 20 多秒
                       port_probe=lambda port: False,
+                      # 必须给假 runner：真实的 do_switch_on() 会去跑 platform-switch.py，
+                      # 而它在 CI 上必然失败（`py` 在 ubuntu 没有、`data_dir` 也不存在），
+                      # 自愈就会在 do_boot 之前 return —— 那样测的是"脚本能不能跑"，
+                      # 不是这条用例要钉的"冷却期内不许拉第二个"。
+                      runner=FakeRunner(),
                       spawner=spawner, log=lambda m: None)
     agent.run_once()
     assert len(boots) == 1, "第一次该拉起来"
