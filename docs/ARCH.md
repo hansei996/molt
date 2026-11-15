@@ -3897,3 +3897,28 @@ COPY_ARTIFACTS = ("cmd_config.json", "mcp_server.json", "skills", "workspaces",
 
 判据：新增 8 条测试（`molt/tests/test_plugin_config_carry.py`），覆盖带上 / 备份不带上 /
 写入并留备份 / 没装不写 / 完全一样不写 / 结构不同不写 / 机器绑定键保留本机 / 空跑不写。
+
+### 14.17 优雅停机失败之后：必须有人能硬把它按下去（2026-11-15）
+
+真机现场（21:30–21:34）：NAS 的 bounce 把第 23 代推给 Windows，Windows 的 agent
+每 40 秒打印一次 `✗ 停不下来：pid 28580 没有在超时内退出`，而 NAS 那边已经 drain 了
+—— **两只壳都没连 QQ，鱼卡在半路**，面板上点什么都没有反应。
+
+根因不是判断错，是**只有一条停机路径**：`_send_ctrl_c()` 走 AttachConsole +
+`GenerateConsoleCtrlEvent(0, 0)`，而 in-place 重启（`POST /api/stat/restart-core`）
+派生的子进程没有可附加的控制台 —— 那个调用返回 False，然后这一轮就结束了。
+
+修法：`Agent` 新增可注入的 `force_killer`，`do_stop()` 在优雅停机失败后调用它；
+默认实现 `_force_kill(pid)` 是 `taskkill /PID <pid> /T /F` 再等进程真的消失。
+`/T` 不是可选项：真机上 6199 由 AstrBot 的子进程持有，只杀父进程会让端口继续被占
+（那比没杀更难查：`molt status` 说没在跑，端口却在听）。
+
+**代价写在 detail 里**：强制结束后那条 step 的文案是
+「优雅停机没在超时内完成，已强制结束 pid …（taskkill /T /F）—— 它最后一次 checkpoint 可能没写完」。
+为什么接受这个代价：账本里已经有一代在等我，落位会用快照覆盖 `data/`，
+真正需要保住的字节已经在快照里了；而"整只鱼不可达"没有任何补偿。
+
+判据：`molt/tests/test_molt_agent.py` 新增 4 条 —— 卡死时强停并继续落位（用
+`landed_generation == 7` 判定，因为 `do_land` 的 step 名字是 `py`）、强停也失败则不落位、
+优雅成功时绝不调用强制结束、没有注入 `force_killer` 时保持旧行为。
+全量 **1074 passed**。

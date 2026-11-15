@@ -1,4 +1,4 @@
-﻿"""molt-agent —— 目标机上的常驻看门人。
+"""molt-agent —— 目标机上的常驻看门人。
 
 ## 它解决什么问题
 
@@ -441,6 +441,10 @@ class Agent:
     pid_probe: Optional[Callable[[], Optional[int]]] = None
     #: 让那个 pid 优雅退出。返回 True 表示"它真的没了"。
     stopper: Optional[Callable[[int], bool]] = None
+    #: 优雅停机超时后的兜底：强制结束整个进程树。返回 True 表示"它真的没了"。
+    #: 2026-11-15 21:30 的教训 —— in-place 重启出来的子进程没有可附加控制台，
+    #: 只靠优雅停机，agent 会每 40 秒失败一次，而鱼卡在"两边都没连 QQ"的半路。
+    force_killer: Optional[Callable[[int], bool]] = None
     log: Callable[[str], None] = field(default=_log_line)
 
     # -- 状态 ------------------------------------------------------
@@ -784,6 +788,29 @@ class Agent:
         except OSError as exc:
             return StepResult("stop", False, f"停不下来（pid {pid}）：{exc}")
         if not gone:
+            # 优雅停机失败了 —— 但"停不下来"不等于"这一轮什么都不做"。
+            #
+            # 2026-11-15 21:30 真机：in-place 重启（`POST /api/stat/restart-core`）
+            # 派生的子进程没有可附加的控制台，`GenerateConsoleCtrlEvent` 打不动它。
+            # 于是 agent 每 40 秒试一次、每 40 秒失败一次，而 NAS 那边已经 drain 了
+            # ——**两只壳都没连 QQ，鱼卡在半路**，面板上点什么都没反应。
+            #
+            # 强制结束当然会丢掉最后一次 checkpoint（WAL 里未合并的事务）。
+            # 但那笔损失远小于"整只鱼不可达"：账本里已经有一代在等我，
+            # 落位会用它覆盖 data/，真正需要保住的字节已经在快照里了。
+            # 代价要**说出来**，所以这条 detail 里写清楚发生了什么。
+            if self.force_killer is not None:
+                try:
+                    killed = self.force_killer(pid)
+                except OSError as exc:
+                    return StepResult("stop", False, f"停不下来（pid {pid}）：{exc}")
+                if killed:
+                    return StepResult(
+                        "stop",
+                        True,
+                        f"优雅停机没在超时内完成，已强制结束 pid {pid}"
+                        f"（taskkill /T /F）—— 它最后一次 checkpoint 可能没写完",
+                    )
             return StepResult("stop", False, f"pid {pid} 没有在超时内退出")
         return StepResult("stop", True, f"已让它优雅退出（pid {pid}）")
 
@@ -1384,6 +1411,30 @@ def _send_ctrl_c(pid: int, *, timeout: float = 30.0) -> bool:
     return False
 
 
+def _force_kill(pid: int, *, timeout: float = 20.0) -> bool:
+    """`taskkill /T /F` 掉整棵进程树，然后等它真的消失。
+
+    为什么要 `/T`：AstrBot 进程下面常挂着一个子进程（实测 2026-11-14
+    `parent → child` 两层，6199 由子进程持有）。只杀父进程，子进程会
+    继续占着端口 —— 那比没杀更难查（`molt status` 显示"没在跑"，端口却在听）。
+    """
+    if os.name != "nt":                       # pragma: no cover - 仅 Windows 有意义
+        return False
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def _process_running(image_name: str) -> bool:
     """这台机器上有没有这个映像名的进程。
 
@@ -1477,6 +1528,7 @@ def main(argv: Optional[list] = None) -> int:
         spawner=_default_spawn,
         pid_probe=lambda: _listening_pid(settings.port),
         stopper=lambda pid: _send_ctrl_c(pid, timeout=settings.timeout * 2),
+        force_killer=_force_kill,
     )
     return agent.run_forever(once=args.once)
 

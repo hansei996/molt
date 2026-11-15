@@ -82,6 +82,10 @@ python tools\reload-plugin.py --config G:\molt-fish\data\cmd_config.json `
   结构差太多的跳过、机器绑定的键（如 dsh_connector 的 `http_base_url`）保留本机的，
   每次都留 `.molt-before-land-*` 备份。不想带就加 `molt land --no-plugin-configs`。
 
+- 落位前的停机多了一条兜底：优雅停机超时后 `taskkill /T /F` 整棵进程树。
+  之前只有一条路径，in-place 重启出来的子进程打不动它，agent 会每 40 秒失败一次，
+  而鱼卡在「两边都没连 QQ」的半路（2026-11-15 21:30 真机）。
+
 ### 已知限制
 
 - **插件版本漂移会被念出来**：同步包里带每个插件的版本（\metadata.yaml\ 的

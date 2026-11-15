@@ -1170,3 +1170,74 @@ def test_fix_is_skipped_when_the_connector_is_not_installed(tmp_path):
     a, logs = _port_agent(tmp_path)
     a.maybe_fix_dsh_port({})             # 没有配置文件，不该炸
     assert logs == []
+
+
+# ------------------------------------------------ 落位前的强制停机兜底
+#
+# 2026-11-15 21:30 真机：in-place 重启（POST /api/stat/restart-core）派生的子进程
+# 没有可附加的控制台，优雅停机打不动它；agent 每 40 秒失败一次，而 NAS 已经 drain
+# ——两只壳都没连 QQ，鱼卡在半路。这里钉住"超时之后必须能硬停下来"。
+
+
+def _wedged_agent(tmp_path, *, stopper, force_killer=None, force_killer_present=True):
+    kw = dict(
+        cfg=settings(),
+        status_fetcher=lambda: ledger(target=ME, consumed_by=""),
+        pid_probe=lambda: 5150,
+        stopper=stopper,
+    )
+    if force_killer_present:
+        kw["force_killer"] = force_killer
+    return _agent(tmp_path, **kw)
+
+
+def test_a_wedged_shell_is_force_killed_after_the_graceful_timeout(tmp_path):
+    a, runner, spawned, logs = _wedged_agent(
+        tmp_path, stopper=lambda pid: False, force_killer=lambda pid: True
+    )
+    decision, steps = a.run_once()
+
+    stop = [s for s in steps if s.name == "stop"]
+    assert stop and stop[0].ok is True
+    assert "强制结束" in stop[0].detail
+    assert "taskkill" in stop[0].detail
+    # 硬停成功之后必须真的继续落位 —— 否则兜底等于没做。
+    # 注意 `do_land` 走的是子进程，StepResult 的 name 是 argv[0]（"py"），不是 "land"；
+    # 所以判据用落位成功后才会写下的状态，而不是 step 名字。
+    assert a.load_state().get("landed_generation") == 7
+    assert any(s.name == "boot" for s in steps)
+
+
+def test_if_the_force_kill_also_fails_the_round_stops(tmp_path):
+    a, runner, spawned, logs = _wedged_agent(
+        tmp_path, stopper=lambda pid: False, force_killer=lambda pid: False
+    )
+    decision, steps = a.run_once()
+
+    assert not [s for s in steps if s.name == "land"]
+    assert any("停不下来" in line for line in logs)
+
+
+def test_a_graceful_stop_never_reaches_the_force_killer(tmp_path):
+    def boom(pid):
+        raise AssertionError("优雅停机成功时不该调用强制结束")
+
+    a, runner, spawned, logs = _wedged_agent(
+        tmp_path, stopper=lambda pid: True, force_killer=boom
+    )
+    decision, steps = a.run_once()
+
+    stop = [s for s in steps if s.name == "stop"]
+    assert stop and stop[0].ok is True
+    assert "优雅退出" in stop[0].detail
+
+
+def test_without_a_force_killer_the_old_behaviour_is_kept(tmp_path):
+    a, runner, spawned, logs = _wedged_agent(
+        tmp_path, stopper=lambda pid: False, force_killer_present=False
+    )
+    decision, steps = a.run_once()
+
+    stop = [s for s in steps if s.name == "stop"]
+    assert stop and stop[0].ok is False
+    assert "没有在超时内退出" in stop[0].detail
