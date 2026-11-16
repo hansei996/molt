@@ -2472,6 +2472,95 @@ def cmd_shells(args: argparse.Namespace) -> int:
     return 0
 
 
+def _next_due_text(policy, *, now: float) -> str:
+    """下一次会在什么时候触发。算不出来就明说，不要假装。"""
+    import time as _time
+
+    from .schedule import schedule_due, schedule_spec
+
+    if not schedule_spec(policy.get("schedule")):
+        return "定时规则读不懂 —— 它永远不会自己搬"
+    for step in range(0, 24 * 60, 5):
+        probe = now + step * 60
+        if schedule_due(policy.get("schedule"), probe):
+            delta = max(int(probe - now), 0)
+            hh, mm = divmod(delta // 60, 60)
+            stamp = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(probe))
+            return f"{stamp}（还有 {hh} 小时 {mm} 分）"
+    return "24 小时内不会再触发（或已经过了今天的窗口）"
+
+
+def _policy_status(be, args) -> int:
+    """把「它明早会不会真的自己搬」拆成一条条能当场验的检查。"""
+    import time as _time
+
+    st = be.status() or {}
+    policy = st.get("policy") or {}
+    if not policy:
+        warn("现在没有自动搬家策略 —— 它不会自己搬。")
+        dim("  设一条：molt policy set --id night-home --source <壳> --target <壳> --at 23:30")
+        return 0
+
+    head("自动搬家：它会不会自己动")
+    kv("id", str(policy.get("id")))
+    kv("从哪到哪", f"{policy.get('source')} → {policy.get('target')}")
+    kv("下次触发", _next_due_text(policy, now=_time.time()))
+
+    attempts = st.get("attempts") or []
+    today = _time.strftime("%Y-%m-%d")
+    used = len([a for a in attempts if str(a.get("at_readable", "")).startswith(today)])
+    limit = int(policy.get("daily_limit") or 0)
+    kv("今天已经自动试过", f"{used} / {limit} 次" if limit else f"{used} 次（不限）")
+
+    shell = str(getattr(args, "shell", "") or "").strip()
+    source = str(policy.get("source") or "")
+    target = str(policy.get("target") or "")
+    beat = (st.get("heartbeats") or {}).get(target) or {}
+    age = beat.get("age_seconds")
+    lease = st.get("lease") or {}
+    attrs = (st.get("shells") or {}).get(target) or {}
+
+    checks = [
+        ("策略开在源壳上", shell == source, f"我是 {shell or '？（没给 --shell）'}，策略在 {source}"),
+        (
+            "目标壳最近在报心跳",
+            isinstance(age, (int, float)) and age <= 25,
+            f"最后心跳 {age:.0f} 秒前" if isinstance(age, (int, float)) else "账本里没有它的心跳",
+        ),
+        ("现在没有租约", lease.get("state") == "no-lease", f"租约 {lease.get('state')}"),
+        (
+            "目标壳叫得醒（活着，或账本里有它的 MAC）",
+            (isinstance(age, (int, float)) and age <= 25)
+            or bool(attrs.get("wake_mac"))
+            or attrs.get("wakeable") is not False,
+            f"心跳 {age:.0f} 秒前 / wake_mac={attrs.get('wake_mac') or '（空）'}"
+            if isinstance(age, (int, float))
+            else f"没有心跳 / wake_mac={attrs.get('wake_mac') or '（空）'}",
+        ),
+        (
+            "搬完关旧壳的判据齐了",
+            not policy.get("power_off_source") or policy.get("power_action") in ("shutdown", "sleep"),
+            f"power_off_source={policy.get('power_off_source')} / action={policy.get('power_action')}",
+        ),
+    ]
+
+    print()
+    head("到点那一刻还要过这些（现在逐条验）")
+    passed = 0
+    for name, good, detail in checks:
+        if good:
+            passed += 1
+            ok(f"{name}  ·  {detail}")
+        else:
+            bad(f"{name}  ·  {detail}")
+    print()
+    if passed == len(checks):
+        ok(f"{passed}/{len(checks)} 条都成立 —— 到点它会自己动。")
+    else:
+        warn(f"{passed}/{len(checks)} 条成立；不成立的那几条会让它到点按兵不动（鱼不会死，只是不走）。")
+    return 0
+
+
 def cmd_policy(args: argparse.Namespace) -> int:
     """自动搬家策略（M2）：看、设、撤。
 
@@ -2528,6 +2617,9 @@ def _run_policy(be, args: argparse.Namespace, action: str) -> int:
                 mark = {"ok": "✓", "failed": "✗", "skipped": "·"}.get(item.get("result"), "?")
                 print(f"  {mark} {item.get('at_readable', '')}  {item.get('reason', '')[:80]}")
         return 0
+
+    if action == "status":
+        return _policy_status(be, args)
 
     if action == "off":
         got = be.clear_policy()
@@ -3649,6 +3741,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_show = psub.add_parser("show", help="看现在的策略与最近几次尝试")
     _warden_opts(p_show)
     p_show.set_defaults(func=cmd_policy)
+    p_status = psub.add_parser("status", help="它到点会不会真的自己动：逐条预检")
+    _warden_opts(p_status)
+    p_status.add_argument("--shell", help="以哪台壳的身份检查（默认取本机名）")
+    p_status.set_defaults(func=cmd_policy)
     p_off = psub.add_parser("off", help="撤销策略（立刻生效）")
     _warden_opts(p_off)
     p_off.set_defaults(func=cmd_policy)

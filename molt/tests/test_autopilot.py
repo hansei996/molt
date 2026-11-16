@@ -350,3 +350,23 @@ def test_an_unknown_power_action_is_refused():
 def test_the_arrival_timeout_is_bounded():
     problems = autopilot.policy_problems(_power_policy(arrival_timeout_seconds=1.0))
     assert any("arrival_timeout_seconds" in p for p in problems)
+
+# ------------------------------------------------- 预检：status 只说它真能验的事
+
+
+def test_next_due_text_says_how_long_until_the_window_opens():
+    import datetime as dt
+
+    from molt.cli import _next_due_text
+
+    now = dt.datetime(2026, 11, 17, 1, 5).astimezone().timestamp()
+    policy = {"schedule": "09:00", "window_minutes": 30}
+    text = _next_due_text(policy, now=now)
+    assert "2026-11-17 09:" in text
+    assert "还有 7 小时" in text
+
+
+def test_next_due_text_refuses_to_pretend_when_the_rule_is_unreadable():
+    from molt.cli import _next_due_text
+
+    assert "读不懂" in _next_due_text({"schedule": "每天九点"}, now=0.0)
