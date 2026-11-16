@@ -192,3 +192,20 @@ def test_status_carries_policy_and_attempts(tmp_path: Path):
     st = Warden(root=tmp_path).status()
     assert st["policy"]["id"] == "night-home"
     assert st["attempts"][-1]["result"] == "ok"
+
+def test_policy_commands_can_point_at_a_remote_ledger(tmp_path, capsys):
+    """`molt policy` 必须能指向远端账本 —— 否则它只能在 NAS 的那台机器上敲。"""
+    import argparse
+
+    from molt.cli import cmd_policy
+
+    ns = argparse.Namespace(
+        policy_action="show",
+        root=None,
+        warden_url="http://127.0.0.1:1",
+        warden_token="t0ken",
+    )
+    rc = cmd_policy(ns)
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "127.0.0.1:1" in out

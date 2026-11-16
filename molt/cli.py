@@ -2483,6 +2483,18 @@ def cmd_policy(args: argparse.Namespace) -> int:
     """
     be = _backend(args)
     action = getattr(args, "policy_action", "") or "show"
+    try:
+        return _run_policy(be, args, action)
+    except Fatal as e:
+        bad(str(e))
+        return 2
+    except NeedsHuman as e:
+        bad(str(e))
+        return 2
+
+
+def _run_policy(be, args: argparse.Namespace, action: str) -> int:
+    """`molt policy` 的真正执行体 —— 把异常留给调用方统一翻译成退出码。"""
 
     if action == "show":
         got = be.policy()
@@ -3604,16 +3616,30 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_declare)
 
     s = add("policy", "自动搬家策略（M2）：看、设、撤")
-    s.add_argument("--root", help="Warden 根目录（本地模式）")
+
+    def _warden_opts(parser: argparse.ArgumentParser, *, parent: bool = False) -> None:
+        """每个 `policy` 子命令都要能指向远端账本。
+
+        `--root` 写本地、`--warden-url/--warden-token` 写远端 —— 只给前者，
+        这条命令就只能在账本那台机器上敲，而那台通常是 NAS 的容器外。
+        `parent=True` 时只补 `--root`：父解析器从 `parents=[common]` 已经带了
+        那两个远端开关，再加一次会 `conflicting option string`。
+        """
+        parser.add_argument("--root", help="Warden 根目录（本地模式）")
+        if not parent:
+            parser.add_argument("--warden-url", help="Warden 地址（远端模式）")
+            parser.add_argument("--warden-token", help="Warden token")
+
+    _warden_opts(s, parent=True)
     psub = s.add_subparsers(dest="policy_action", required=True)
     p_show = psub.add_parser("show", help="看现在的策略与最近几次尝试")
-    p_show.add_argument("--root", help=argparse.SUPPRESS)
+    _warden_opts(p_show)
     p_show.set_defaults(func=cmd_policy)
     p_off = psub.add_parser("off", help="撤销策略（立刻生效）")
-    p_off.add_argument("--root", help=argparse.SUPPRESS)
+    _warden_opts(p_off)
     p_off.set_defaults(func=cmd_policy)
     p_set = psub.add_parser("set", help="设一条定时自动搬家策略")
-    p_set.add_argument("--root", help=argparse.SUPPRESS)
+    _warden_opts(p_set)
     p_set.add_argument("--id", required=True, help="给它起个名字，比如 night-home")
     p_set.add_argument("--source", required=True, help="在哪台壳上执行（通常是鱼现在所在的那台）")
     p_set.add_argument("--target", required=True, help="自动搬去哪台壳")

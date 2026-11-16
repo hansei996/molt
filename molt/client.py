@@ -257,18 +257,18 @@ class WardenClient:
 
     def policy(self) -> Dict[str, Any]:
         """读当前的自动搬家策略与最近的尝试。"""
-        return self._get("/policy")
+        return self._request("GET", "/policy")
 
     def set_policy(self, policy: Dict[str, Any], *, by: str = "") -> Dict[str, Any]:
         """写入策略。校验不过服务端会抛 `needs_human`。"""
         body = dict(policy or {})
         if by:
             body["by"] = by
-        return self._post("/policy", body)
+        return self._request("POST", "/policy", body)
 
     def clear_policy(self) -> Dict[str, Any]:
         """撤销策略（删文件，不是设成关着）。"""
-        return self._post("/policy/off", {})
+        return self._request("POST", "/policy/off", {})
 
     def record_attempt(
         self,
@@ -280,7 +280,8 @@ class WardenClient:
         by: str = "",
     ) -> Dict[str, Any]:
         """记一次自动尝试（ok / failed / skipped）。"""
-        return self._post(
+        return self._request(
+            "POST",
             "/policy/attempt",
             {
                 "result": result,
