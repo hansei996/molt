@@ -85,6 +85,7 @@ from .observed import (  # noqa: E402  (放在常量后面，读起来更顺)
     compose_observation,
     pick_generation,
 )
+from .notify import DEFAULT_PUSH_WAIT, POLL_SECONDS
 from .arrival import (  # noqa: E402
     ArrivalState,
     compose_arrival_note,
@@ -102,6 +103,16 @@ ARRIVAL_STATE_FILENAME = "arrival_state.json"
 #: 账本问不到时最多试几次。每次 ledger_status() 自带 5 秒超时，
 #: 所以最坏情况是某一条回复多等 15 秒 —— 再多就该直接放弃说话了。
 ARRIVAL_MAX_ATTEMPTS = 3
+
+
+def _prettify(shell: str) -> str:
+    """把壳名说成人话（desktop-h2kgiao -> DESKTOP-H2KGIAO）。"""
+    try:
+        from .arrival import prettify_shell
+
+        return prettify_shell(shell)
+    except Exception:  # pragma: no cover - 防御性
+        return str(shell or "").replace("-", " ").upper()
 
 
 class MoltControlPlugin(Star):
@@ -128,6 +139,7 @@ class MoltControlPlugin(Star):
             logger.warning("[Molt] 聊天指令层没起来：%s", exc, exc_info=True)
         #: 落地之后"我自己看一眼我在哪"的那条后台任务（见 `observed.py`）。
         self._obs_task: asyncio.Task | None = None
+        self._push_task: asyncio.Task | None = None
         self._obs_state = None
         #: 落地播报（"我刚从 X 搬过来"）说过没有。
         self._arrival_state = None
@@ -153,6 +165,65 @@ class MoltControlPlugin(Star):
         # 事件循环不等于之后真正在跑的服务循环（2026-11-15 实测：create_task 建出来的
         # 任务永远不被调度，连 loop.call_later 都不触发）。改成等 `on_astrbot_loaded()`
         # —— 那个钩子由 core_lifecycle 在主循环上发出来。
+
+    def _start_push_task(self) -> None:
+        """搬完之后主动发一条消息给你 —— 不用你先开口。
+
+        为什么要等 `on_astrbot_loaded`：平台适配器在这之后才连上；发早了
+        只会拿到「没有可用的平台实例」。
+        """
+        if self._push_task is not None and not self._push_task.done():
+            return
+        try:
+            self._push_task = asyncio.create_task(self._arrival_push_loop())
+            logger.info("[Molt] 落地主动通知已启动（最多等 %.0f 秒让平台连上）", DEFAULT_PUSH_WAIT)
+        except Exception as exc:  # pragma: no cover - 防御性
+            logger.warning("[Molt] 落地主动通知没起来：%s", exc, exc_info=True)
+
+    async def _arrival_push_loop(self) -> None:
+        from pathlib import Path
+
+        from . import notify
+
+        cfg = self._mover.settings()
+        data_dir = Path(str(cfg.data_dir))
+        state = notify.NotifyState(data_dir / notify.STATE_FILENAME)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + DEFAULT_PUSH_WAIT
+        while True:
+            try:
+                status = await asyncio.to_thread(self._mover.ledger_status)
+                latest = (status or {}).get("latest_generation") or {}
+                number = int(latest.get("number") or 0)
+                mine = str(latest.get("consumed_by") or "") == str(cfg.shell)
+                if mine and notify.should_push(state, number):
+                    text = notify.compose_arrival_push(
+                        label=_prettify(cfg.shell), generation=number
+                    )
+                    got = await notify.push_arrival(
+                        self.context, data_dir=data_dir, text=text
+                    )
+                    if got.get("state") == "delivered":
+                        state.mark(number, "delivered")
+                        logger.info(
+                            "[Molt] 已主动告诉你：我搬过来了（第 %s 份快照，通过 %s）",
+                            number,
+                            got.get("platform_id"),
+                        )
+                        return
+                    logger.info(
+                        "[Molt] 主动通知还没发出去（%s：%s），继续等平台",
+                        got.get("state"),
+                        got.get("reason"),
+                    )
+                    if got.get("state") == "no-route":
+                        return
+            except Exception as exc:  # noqa: BLE001 - 通知失败不该影响任何别的
+                logger.warning("[Molt] 主动通知这一轮失败：%s", exc)
+            if loop.time() >= deadline:
+                logger.info("[Molt] 主动通知等超时了 —— 不发就是不发，不假装发过")
+                return
+            await asyncio.sleep(POLL_SECONDS)
 
     def _start_observe_task(self) -> None:
         logger.info("[Molt] _start_observe_task 被调用了（loop=%s）", id(asyncio.get_running_loop()))
@@ -826,6 +897,7 @@ class MoltControlPlugin(Star):
         日志里能看到 `hook(on_astrbot_loaded) -> meme_manager ...` 就是它。
         """
         self._start_observe_task()
+        self._start_push_task()
 
     @filter.on_waiting_llm_request()
     async def announce_arrival(self, event: AstrMessageEvent) -> None:

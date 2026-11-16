@@ -4206,3 +4206,31 @@ migrate（内含：目标就绪 → 交出去 → 等 consumed_by）
 判据：`molt/tests/test_autopilot.py`（38）+ `test_auto_migrate.py`（11）+
 `test_plugin_arrival.py` 的回执两条 + `test_server.py` 的 `/arrival` 两条，
 全量 1199 passed。真机整链**未跑**（等主人点头）。
+
+### 14.25 搬完主动说一句：把「得有人先开口」这个前提拿掉（2026-11-17）
+
+落地播报原来挂在 `on_waiting_llm_request` 上 —— 它只会**顺带**说。自动搬完、
+或者主人根本不说话的时候，这条播报永远不会出现，等于用户什么都不知道。
+
+新的 `plugin/notify.py` 走 AstrBot 的公开主动发消息接缝：
+
+```python
+await platform.send_by_session(
+    MessageSession(platform_id, MessageType.FRIEND_MESSAGE, openid),
+    MessageChain([Plain(text)]),
+)
+```
+
+三条边界写在模块 docstring 里，也各有一条测试钉着：
+
+| 边界 | 为什么 |
+| --- | --- |
+| 不发假消息 | 不伪造入站、不往 `conversations` 里写、不触发模型 —— 那会让账本与对话记录同时失真 |
+| 只发给一个人 | 路由从 `data_v4.db` 最近一条 `FriendMessage` 推出来；读不到就返回 `no-route`，**不猜** |
+| 发不出去就说发不出去 | 返回 `no-route` / `no-platform` / `failed` + 原因，绝不"假装发过" |
+
+一代只推一次（`notify_state.json` 的 `pushed_generation`）；等待平台连上最多 90 秒。
+它和落地播报**不冲突**：播报是"你说话时顺带提一句"，推送是"搬完主动说一次"。
+
+判据：9 条 `molt/tests/test_plugin_notify.py` + 真机 `POST /notify-arrival`
+返回 `{"success":true,"state":"delivered"}`（2026-11-17 01:33，主人 QQ 收到）。

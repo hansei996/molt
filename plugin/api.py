@@ -58,6 +58,12 @@ class MoltControlApi:
                 ["POST"],
                 "Molt 控制面：看一眼账本，如果这一代是我落的、还没记过，就把它记成我自己的观察",
             ),
+            (
+                "/notify-arrival",
+                self.notify_arrival,
+                ["POST"],
+                "Molt 控制面：主动发一条「我搬过来了」给主人（仅用于自测与补发）",
+            ),
         ]
         return [(f"{API_PREFIX}{path}", handler, methods, desc) for path, handler, methods, desc in specs]
 
@@ -73,6 +79,24 @@ class MoltControlApi:
             len(specs),
             API_PREFIX,
         )
+
+    async def notify_arrival(self):
+        """主动发一条落地消息 —— 只在自测/补发时手动调用。"""
+        from pathlib import Path
+
+        from . import notify
+
+        cfg = self.plugin._mover.settings()
+        state = notify.NotifyState(Path(cfg.data_dir) / notify.STATE_FILENAME)
+        status = self.plugin._mover.ledger_status() or {}
+        latest = status.get("latest_generation") or {}
+        number = int(latest.get("number") or 0)
+        text = notify.compose_arrival_push(generation=number)
+        got = await notify.push_arrival(self.plugin.context, data_dir=Path(cfg.data_dir), text=text)
+        if got.get("state") == "delivered":
+            state.mark(number, "delivered (manual)")
+            return self._ok(**got)
+        return self._err(got.get("reason") or "没发出去", 502)
 
     # ------------------------------------------------------------------ 响应辅助
 

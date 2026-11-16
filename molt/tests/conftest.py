@@ -177,6 +177,73 @@ def _install_astrbot_stub() -> None:
     web.json_response = _json_response
     web.error_response = _error_response
     api.web = web
+
+    # ---- astrbot.core.* ------------------------------------------------------
+    # `plugin/notify.py` 走的是「主动发消息」那条公开接缝，它要的四个名字都在
+    # `astrbot.core` 下面（`astrbot.api.message_components` 只是把 core 里的
+    # Plain 再导出一次）。上面那些桩只到 `astrbot.api`，所以这几个模块是空的。
+    #
+    # 桩故意保持"哑"：`MessageChain` 只收文本列表，`send_by_session` 是测试
+    # 自己给的假平台。这里不实现任何发送逻辑 —— 要是哪天 notify 悄悄改了发送
+    # 方式，测试会因为它拿不到会话对象而立刻红。
+    core = types.ModuleType("astrbot.core")
+    core.__path__ = []
+    core_message = types.ModuleType("astrbot.core.message")
+    core_message.__path__ = []
+    core_components = types.ModuleType("astrbot.core.message.components")
+
+    class _StubPlain:
+        def __init__(self, text=""):
+            self.text = text
+
+        def __repr__(self):
+            return f"Plain({self.text!r})"
+
+    core_components.Plain = _StubPlain
+
+    core_result = types.ModuleType("astrbot.core.message.message_event_result")
+
+    class _StubMessageChain:
+        def __init__(self, chain=None):
+            self.chain = list(chain or [])
+
+        def __repr__(self):
+            return f"MessageChain({self.chain!r})"
+
+    core_result.MessageChain = _StubMessageChain
+
+    core_platform = types.ModuleType("astrbot.core.platform")
+    core_platform.__path__ = []
+    core_session = types.ModuleType("astrbot.core.platform.message_session")
+
+    class _StubMessageSession:
+        def __init__(self, platform_id="", message_type=None, session_id=""):
+            self.platform_id = platform_id
+            self.message_type = message_type
+            self.session_id = session_id
+
+        def __repr__(self):
+            return f"MessageSession({self.platform_id!r}, {self.session_id!r})"
+
+    core_session.MessageSession = _StubMessageSession
+
+    core_type = types.ModuleType("astrbot.core.platform.message_type")
+
+    class _StubMessageType:
+        FRIEND_MESSAGE = "friend_message"
+        GROUP_MESSAGE = "group_message"
+        OTHER_MESSAGE = "other_message"
+
+    core_type.MessageType = _StubMessageType
+
+    core.message = core_message
+    core_message.components = core_components
+    core_message.message_event_result = core_result
+    core.platform = core_platform
+    core_platform.message_session = core_session
+    core_platform.message_type = core_type
+    astrbot.core = core
+
     sys.modules["astrbot"] = astrbot
     sys.modules["astrbot.api"] = api
     sys.modules["astrbot.api.star"] = star
@@ -185,6 +252,13 @@ def _install_astrbot_stub() -> None:
     sys.modules["astrbot.api.event"] = event
     sys.modules["astrbot.api.event.filter"] = event_filter
     sys.modules["astrbot.api.web"] = web
+    sys.modules["astrbot.core"] = core
+    sys.modules["astrbot.core.message"] = core_message
+    sys.modules["astrbot.core.message.components"] = core_components
+    sys.modules["astrbot.core.message.message_event_result"] = core_result
+    sys.modules["astrbot.core.platform"] = core_platform
+    sys.modules["astrbot.core.platform.message_session"] = core_session
+    sys.modules["astrbot.core.platform.message_type"] = core_type
 
 
 def _install_quart_stub() -> None:
