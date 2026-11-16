@@ -43,6 +43,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -71,6 +72,12 @@ BOOT_COOLDOWN_SECONDS = 180.0
 # 到点搬家之前先发一条提醒，然后留这么长时间让人回话。
 # 60 秒是"够看清一句话"的长度：再短就变成通知，再长会错过这一次窗口。
 AUTOPILOT_NOTICE_SECONDS = 60.0
+
+#: 搬家途中多久补一句「还在路上」。4 分钟的静默是最难受的一段。
+JOURNEY_UPDATE_SECONDS = 90.0
+
+#: 关机前要求键鼠安静这么久。测不到（None）时**不关** —— 关机的代价不对称。
+POWER_MIN_IDLE_SECONDS = 300.0
 # `molt land` 落位到一半时留在目标 data 目录里的标记。名字必须与
 # `molt/transfer.py` 的 `RESTORE_MARKER_NAME` 完全一致 ——
 # `molt/tests/test_hardening_atomicity.py` 里有一条测试钉住这件事。
@@ -512,6 +519,11 @@ class Agent:
     attempt_sender: Optional[Callable[..., bool]] = None
     notice_sender: Optional[Callable[[str], bool]] = None
     notice_seconds: float = AUTOPILOT_NOTICE_SECONDS
+    #: 路上多久补一句；0 = 不补。
+    journey_update_seconds: float = JOURNEY_UPDATE_SECONDS
+    #: 关机前的「有没有人在用」探针：返回键鼠安静了多少秒；None = 测不到。
+    idle_probe: Optional[Callable[[], Optional[float]]] = None
+    power_min_idle_seconds: float = POWER_MIN_IDLE_SECONDS
     #: M2 链式收尾：搬完之后给旧壳放一张关机票（走 /power，不新开旁路）。
     power_requester: Optional[Callable[..., Any]] = None
     #: 等新壳回执落地播报。注入后测试不必真的睡。
@@ -693,6 +705,14 @@ class Agent:
         state["auto_migrate_running"] = True
         self.save_state(state)
         started = time.time()
+
+        # 出发说一声：接下来这 2–4 分钟它是不存在的，人需要知道那是"在路上"不是"死了"。
+        self._send_notice(
+            f"走了 —— 从 **{self.settings.shell}** 去 **{target}**，"
+            "路上大概 2–4 分钟。到了我叫你。"
+        )
+        done = threading.Event()
+        watcher = self._start_journey_watcher(done, target)
         try:
             runner = self.migrate_runner or subprocess.run
             cp = runner(
@@ -713,11 +733,18 @@ class Agent:
             result = "failed"
             reason = f"起不来进程：{exc}"
         finally:
+            done.set()
+            if watcher is not None:
+                watcher.cancel()
             state["auto_migrate_running"] = False
             self.save_state(state)
 
         self._record_attempt(result, reason=reason, policy_id=str(policy.get("id") or ""))
         self.log(f"  {'✓' if result == 'ok' else '✗'} 自动搬家结束（{int(time.time() - started)} 秒）：{reason}")
+
+        if result != "ok":
+            # 失败必须有人说话：否则"今天没搬成"要等到第二天才发现。
+            self._send_notice(self._failure_text(rc=None, reason=reason, target=target))
 
         if result == "ok" and policy.get("power_off_source"):
             self._maybe_power_off_source(policy, reason=reason)
@@ -771,6 +798,25 @@ class Agent:
             self.log(f"  · 不关旧壳：{why}")
             return
 
+        idle = self._idle_seconds()
+        floor = float(getattr(self, "power_min_idle_seconds", 0.0) or 0.0)
+        if idle is None:
+            self._record_attempt(
+                "skipped",
+                reason=f"搬家成功，但读不到键鼠状态 —— 不知道有没有人在用，这次不关（{reason}）",
+                policy_id=str(policy.get("id") or ""),
+            )
+            self.log("  · 不关旧壳：读不到键鼠状态，宁可多烧一晚电")
+            return
+        if idle < floor:
+            self._record_attempt(
+                "skipped",
+                reason=f"搬家成功，但 {int(idle)} 秒前还有人动过键鼠 —— 这次不关（{reason}）",
+                policy_id=str(policy.get("id") or ""),
+            )
+            self.log(f"  · 不关旧壳：{int(idle)} 秒前还有人在这台机器上")
+            return
+
         requester = getattr(self, "power_requester", None)
         if requester is None:
             self.log("  ! 没有关机票的投递通道（power_requester 未注入）—— 不关")
@@ -791,6 +837,62 @@ class Agent:
             reason=f"{reason}；关机票已提交（{action}）",
             policy_id=str(policy.get("id") or ""),
         )
+
+    def _start_journey_watcher(self, done: threading.Event, target: str):
+        """`JOURNEY_UPDATE_SECONDS` 之后补一句「还在路上」；搬完就取消。
+
+        用线程而不是在主循环里等：主循环正阻塞在 `subprocess.run` 上。
+        """
+        seconds = float(getattr(self, "journey_update_seconds", 0.0) or 0.0)
+        if seconds <= 0:
+            return None
+
+        def fire() -> None:
+            if done.is_set():
+                return
+            self._send_notice(
+                f"还在路上（已经 {int(seconds)} 秒了）—— 没卡住，别急。"
+            )
+
+        timer = threading.Timer(seconds, fire)
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    def _failure_text(self, *, rc, reason: str, target: str) -> str:
+        """把退出码翻译成一句人话 —— 人不需要读 `退出码 6`。"""
+        code = None
+        if rc is not None:
+            code = int(rc)
+        else:
+            match = re.search(r"退出码 (\d+)", reason or "")
+            if match:
+                code = int(match.group(1))
+        if code == 5:
+            body = f"**{target}** 没叫醒 —— 一个魔术封包发出去之后它一直没来账本报到。"
+        elif code == 6:
+            body = f"**{target}** 没接走这份快照，我已经把鱼拉回这台机器了。"
+        elif code == 7:
+            body = "交接中间出了岔子，回滚时租约也没抢回来 —— 这次得人看一眼。"
+        else:
+            body = f"搬家没成功（{reason}）。"
+        return f"今天这次没搬成：{body}\n鱼还在原来那台机器上活着，没动。"
+
+    def _idle_seconds(self) -> Optional[float]:
+        """键鼠安静了多久。测不到就返回 None（调用方按"不关"处理）。"""
+        probe = getattr(self, "idle_probe", None)
+        if probe is not None:
+            try:
+                value = probe()
+            except Exception:  # noqa: BLE001 —— 探针坏了不能把循环弄死
+                return None
+            if value is None:
+                return None
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                return None
+        return _last_input_idle_seconds()
 
     def _fresh_status(self) -> dict:
         fetcher = getattr(self, "status_fetcher", None)
@@ -1743,6 +1845,33 @@ def _send_ctrl_c(pid: int, *, timeout: float = 30.0) -> bool:
             return True
         time.sleep(0.5)
     return False
+
+
+def _last_input_idle_seconds() -> Optional[float]:
+    """Windows：键鼠安静了多久（秒）。其他平台 / 读不到 → None。
+
+    为什么用它：它能回答一个**硬事实**（"最近 300 秒有没有人碰过这台机器"），
+    而"主人在不在打游戏"是个判不准的问题 —— 判不准的东西不该进关机判据。
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _LastInput(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+        info = _LastInput()
+        info.cbSize = ctypes.sizeof(_LastInput)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        now = ctypes.windll.kernel32.GetTickCount()
+        # GetTickCount 是 32 位、约 49.7 天回绕一次，减法要按无符号处理。
+        delta = (int(now) - int(info.dwTime)) & 0xFFFFFFFF
+        return delta / 1000.0
+    except Exception:  # noqa: BLE001 —— 探针永远不该把循环弄死
+        return None
 
 
 def _force_kill(pid: int, *, timeout: float = 20.0) -> bool:

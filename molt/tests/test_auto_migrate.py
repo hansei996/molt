@@ -239,6 +239,7 @@ def test_power_ticket_is_filed_only_after_the_arrival_receipt(monkeypatch):
     a.status_fetcher = lambda: after
     a.arrival_waiter = lambda gen, timeout: True
     a.power_requester = lambda shell, action, gen, **kw: calls.append((shell, action, gen, kw))
+    a.idle_probe = lambda: 900.0
     seen = []
     a.attempt_sender = lambda result, **kw: seen.append(result) or True
 
@@ -259,6 +260,7 @@ def test_no_power_ticket_when_the_arrival_never_lands(monkeypatch):
     a.arrival_waiter = lambda gen, timeout: False
     calls = []
     a.power_requester = lambda *a, **k: calls.append((a, k))
+    a.idle_probe = lambda: 900.0
     seen = []
     a.attempt_sender = lambda result, **kw: seen.append(result) or True
 
@@ -277,6 +279,7 @@ def test_no_power_ticket_when_the_migration_failed(monkeypatch):
     a.arrival_waiter = lambda gen, timeout: True
     calls = []
     a.power_requester = lambda *a_, **k: calls.append((a_, k))
+    a.idle_probe = lambda: 900.0
 
     step = a.maybe_auto_migrate({}, status(policy=_power_policy()), None)
 
@@ -341,3 +344,121 @@ def test_turning_it_off_during_the_grace_period_stops_the_move(monkeypatch):
     assert step is not None and not step.ok
     assert runner.calls == [], "主人回话了就不许搬"
     assert seen and seen[-1][0] == "skipped"
+
+
+def test_it_says_it_left_and_then_says_it_is_still_on_the_way(monkeypatch):
+    """出发说一声、路上超过时限再补一句 —— 4 分钟静默是最难受的一段。"""
+    monkeypatch.setattr(time, "time", lambda: _at(23, 35))
+    a = _agent()
+    said = []
+    a.notice_sender = lambda text: said.append(text) or True
+    a.journey_update_seconds = 0.05
+
+    class SlowRunner:
+        calls = []
+
+        def __call__(self, argv, **kwargs):
+            SlowRunner.calls.append(list(argv))
+            time.sleep(0.25)
+            return subprocess.CompletedProcess(argv, 0, "✓ 搬迁完成", "")
+
+    a.migrate_runner = SlowRunner()
+    step = a.maybe_auto_migrate({}, status(), None)
+    time.sleep(0.1)  # 给观察者线程一点时间落地
+
+    assert step is not None and step.ok
+    assert any("走了" in t for t in said), said
+    assert any("还在路上" in t for t in said), said
+
+
+def test_a_quick_move_does_not_get_a_still_on_the_way_notice(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: _at(23, 35))
+    a = _agent()
+    said = []
+    a.notice_sender = lambda text: said.append(text) or True
+    a.journey_update_seconds = 5.0
+    a.migrate_runner = FakeRunner()
+
+    a.maybe_auto_migrate({}, status(), None)
+
+    assert any("走了" in t for t in said), said
+    assert not any("还在路上" in t for t in said), said
+
+
+def test_a_failed_move_says_so_instead_of_staying_silent(monkeypatch):
+    """失败必须有人说话 —— 否则"今天没搬成"要等第二天才发现。"""
+    monkeypatch.setattr(time, "time", lambda: _at(23, 35))
+    a = _agent()
+    said = []
+    a.notice_sender = lambda text: said.append(text) or True
+    a.migrate_runner = FakeRunner(returncode=6, stdout="✗ 目标没有接走")
+
+    step = a.maybe_auto_migrate({}, status(), None)
+
+    assert step is not None and not step.ok
+    assert any("没搬成" in t for t in said), said
+    assert any("鱼还在原来那台机器上" in t for t in said), said
+
+
+def _power_policy():
+    return {
+        "id": "night-home",
+        "enabled": True,
+        "source": ME,
+        "target": TARGET,
+        "schedule": "23:30",
+        "window_minutes": 30,
+        "daily_limit": 2,
+        "expires_at": 0.0,
+        "power_off_source": True,
+        "power_action": "shutdown",
+        "arrival_timeout_seconds": 120.0,
+    }
+
+
+def _arrived_status(generation=7):
+    st = status(policy=_power_policy(), generation=generation)
+    st["latest_generation"]["consumed_by"] = TARGET
+    st["arrivals"] = {str(generation): {"generation": generation, "shell": TARGET, "delivered": True}}
+    return st
+
+
+def test_no_shutdown_while_somebody_is_using_the_machine(monkeypatch):
+    """关机前看键鼠：300 秒内有人动过就不关。"""
+    a = _agent()
+    tickets = []
+    a.power_requester = lambda *args, **kwargs: tickets.append((args, kwargs))
+    a._fresh_status = lambda: _arrived_status()
+    a._wait_arrival = lambda generation, timeout: True
+    a.idle_probe = lambda: 120.0
+
+    a._maybe_power_off_source(_power_policy(), reason="搬迁完成")
+
+    assert tickets == [], "有人在用就不该放关机票"
+
+
+def test_shutdown_is_allowed_after_the_floor(monkeypatch):
+    a = _agent()
+    tickets = []
+    a.power_requester = lambda *args, **kwargs: tickets.append((args, kwargs))
+    a._fresh_status = lambda: _arrived_status()
+    a._wait_arrival = lambda generation, timeout: True
+    a.idle_probe = lambda: 900.0
+
+    a._maybe_power_off_source(_power_policy(), reason="搬迁完成")
+
+    assert tickets, "安静够久才允许放票"
+
+
+def test_an_unreadable_idle_probe_means_do_not_shut_down(monkeypatch):
+    """测不到就不关 —— 关机的代价不对称。"""
+    a = _agent()
+    tickets = []
+    a.power_requester = lambda *args, **kwargs: tickets.append((args, kwargs))
+    a._fresh_status = lambda: _arrived_status()
+    a._wait_arrival = lambda generation, timeout: True
+    a.idle_probe = lambda: None
+
+    a._maybe_power_off_source(_power_policy(), reason="搬迁完成")
+
+    assert tickets == [], "读不到键鼠状态时默认为不关"
