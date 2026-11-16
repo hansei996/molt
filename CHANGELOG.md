@@ -17,6 +17,18 @@
   没装的守护进程直接跳过。
  - 2026-11-15
 
+### M2 链式收尾：搬完再关旧壳（2026-11-17）
+
+`molt policy set … --power-off` 之后，策略会在**确认新壳接走 + 落地播报已送达**
+之后，往账本里给旧壳放一张关机票；旧壳自己的 leave 分支执行关机
+（与 `/molt shutdown` 同一条路）。任何一步不成立都不关，鱼留在新壳上。
+
+```bash
+molt policy set --id morning-home --source desktop-h2kgiao \
+  --target ugreen-776b-8b7896df --at 09:00 --window-minutes 30 \
+  --daily-limit 1 --power-off
+```
+
 ### M2：定时自动搬家（到点自己搬，不需要你确认）
 
 ```bash

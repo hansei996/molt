@@ -268,6 +268,36 @@ class Warden:
         except Exception:  # noqa: BLE001 - 声明失败不该把守护进程弄死
             return False
 
+    def request_power(
+        self, shell_id: str, action: str, generation: int = 0, *, by: str = ""
+    ) -> bool:
+        """给某台壳放一张关机票（`POST /power`）。
+
+        为什么是"放票"而不是"直接关机"：关机这件事的唯一执行者是那台壳自己
+        的 leave 分支（`power_verdict`）。这里只写账本，不动电源。
+        """
+        if not shell_id or not action:
+            return False
+        body = json.dumps(
+            {
+                "shell": shell_id,
+                "action": action,
+                "generation": int(generation or 0),
+                "by": by,
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/power",
+            data=body,
+            headers={"Content-Type": "application/json", "X-Molt-Token": self.token},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return 200 <= resp.status < 300
+        except Exception:  # noqa: BLE001 - 投递失败不该把守护进程弄死
+            return False
+
     def power_ack(self, shell_id: str) -> bool:
         """把票撕掉（我照做了）。失败只返回 False —— 撕不掉最多是下次再问一遍。"""
         if not shell_id:
@@ -476,6 +506,10 @@ class Agent:
     shell_attr_sender: Optional[Callable[..., bool]] = None
     #: 自动搬家（M2）的结果写回账本；None = 不记（测试/离线）。
     attempt_sender: Optional[Callable[..., bool]] = None
+    #: M2 链式收尾：搬完之后给旧壳放一张关机票（走 /power，不新开旁路）。
+    power_requester: Optional[Callable[..., Any]] = None
+    #: 等新壳回执落地播报。注入后测试不必真的睡。
+    arrival_waiter: Optional[Callable[[int, float], bool]] = None
     #: 跑 `molt migrate` 用的执行器（测试注入假 runner；默认 subprocess.run）。
     migrate_runner: Optional[Callable[..., Any]] = None
     #: 已经声明过没有 —— 只声明一次，不是每轮都发。
@@ -663,7 +697,101 @@ class Agent:
 
         self._record_attempt(result, reason=reason, policy_id=str(policy.get("id") or ""))
         self.log(f"  {'✓' if result == 'ok' else '✗'} 自动搬家结束（{int(time.time() - started)} 秒）：{reason}")
+
+        if result == "ok" and policy.get("power_off_source"):
+            self._maybe_power_off_source(policy, reason=reason)
+
         return StepResult("auto_migrate", result == "ok", reason)
+
+    def _maybe_power_off_source(self, policy: dict, *, reason: str) -> None:
+        """搬完之后才轮到"关旧壳" —— 顺序写死在这里。
+
+        先确认两件事，缺一不关：
+        ① 账本说新壳接走了这一代；
+        ② 新壳回执说这一代的落地播报已经送到人眼前。
+        拿到这两条，才往账本里放一张关机票（`POST /power`），
+        由本进程正常的 leave 分支去执行 —— 不新开一条关机旁路。
+        """
+        target = str(policy.get("target") or "")
+        timeout = float(policy.get("arrival_timeout_seconds") or 120.0)
+        action = str(policy.get("power_action") or "shutdown")
+
+        status = self._fresh_status()
+        latest = (status or {}).get("latest_generation") or {}
+        generation = int(latest.get("generation") or 0)
+        consumed_by = str(latest.get("consumed_by") or "")
+
+        delivered = False
+        if generation and consumed_by == target:
+            delivered = self._wait_arrival(generation, timeout)
+
+        arrivals = (status or {}).get("arrivals") or {}
+        # 等到回执之后要重读一次：等待期间账本的 arrivals 才会出现。
+        if delivered:
+            status = self._fresh_status() or status
+            arrivals = (status or {}).get("arrivals") or {}
+            latest = (status or {}).get("latest_generation") or latest
+            generation = int(latest.get("generation") or generation)
+            consumed_by = str(latest.get("consumed_by") or consumed_by)
+
+        should, why = autopilot.power_decision(
+            policy,
+            generation=generation,
+            consumed_by=consumed_by,
+            shell=self.settings.shell,
+            arrival=arrivals.get(str(generation)),
+        )
+        if not should:
+            self._record_attempt(
+                "skipped",
+                reason=f"搬家成功，但{why}（{reason}）",
+                policy_id=str(policy.get("id") or ""),
+            )
+            self.log(f"  · 不关旧壳：{why}")
+            return
+
+        requester = getattr(self, "power_requester", None)
+        if requester is None:
+            self.log("  ! 没有关机票的投递通道（power_requester 未注入）—— 不关")
+            return
+        try:
+            requester(self.settings.shell, action, generation, by="autopilot")
+        except Exception as exc:  # noqa: BLE001 —— 投递失败绝不能把循环弄死
+            self.log(f"  ! 关机票没投进账本：{exc}")
+            self._record_attempt(
+                "skipped",
+                reason=f"搬家成功，但关机票没投进账本：{exc}",
+                policy_id=str(policy.get("id") or ""),
+            )
+            return
+        self.log(f"  ✓ 已给旧壳 {self.settings.shell} 放了一张关机票（{action}）")
+        self._record_attempt(
+            "ok",
+            reason=f"{reason}；关机票已提交（{action}）",
+            policy_id=str(policy.get("id") or ""),
+        )
+
+    def _fresh_status(self) -> dict:
+        fetcher = getattr(self, "status_fetcher", None)
+        if fetcher is None:
+            return {}
+        try:
+            return fetcher() or {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _wait_arrival(self, generation: int, timeout: float) -> bool:
+        waiter = getattr(self, "arrival_waiter", None)
+        if waiter is not None:
+            return bool(waiter(generation, timeout))
+        deadline = time.time() + max(0.0, timeout)
+        while time.time() < deadline:
+            arrivals = (self._fresh_status() or {}).get("arrivals") or {}
+            item = arrivals.get(str(generation)) or {}
+            if item.get("delivered"):
+                return True
+            time.sleep(min(5.0, max(0.2, deadline - time.time())))
+        return False
 
     def _record_attempt(self, result: str, *, reason: str, policy_id: str) -> None:
         sender = getattr(self, "attempt_sender", None)
@@ -1678,6 +1806,7 @@ def main(argv: Optional[list] = None) -> int:
         power_ack_sender=warden.power_ack,
         shell_attr_sender=warden.set_shell,
         attempt_sender=warden.record_attempt,
+        power_requester=warden.request_power,
         port_probe=lambda port: _port_open("127.0.0.1", port),
         spawner=_default_spawn,
         pid_probe=lambda: _listening_pid(settings.port),

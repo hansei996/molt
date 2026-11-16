@@ -500,6 +500,7 @@ class Warden:
             self._shells = {}
             self._alerts = []
             self._attempts = []
+            self._arrivals = {}
             self._loaded = True
             return
 
@@ -531,6 +532,11 @@ class Warden:
         }
         self._alerts = [dict(a) for a in (raw.get("alerts") or []) if isinstance(a, dict)]
         self._attempts = [dict(a) for a in (raw.get("attempts") or []) if isinstance(a, dict)]
+        self._arrivals = {
+            str(k): dict(v)
+            for k, v in (raw.get("arrivals") or {}).items()
+            if isinstance(v, dict)
+        }
         self._loaded = True
 
     def _ensure_loaded(self) -> None:
@@ -551,6 +557,7 @@ class Warden:
             "shells": self._shells,
             "alerts": self._alerts,
             "attempts": self._attempts,
+            "arrivals": self._arrivals,
         }
 
     def save(self) -> None:
@@ -642,6 +649,7 @@ class Warden:
 
     #: 自动搬家尝试最多留多少条（策略本身在 policy.json，不在 state.json）。
     MAX_ATTEMPTS = 20
+    MAX_ARRIVALS = 20
 
     def record_alert(
         self,
@@ -769,6 +777,55 @@ class Warden:
         self._ensure_loaded()
         return [dict(a) for a in self._attempts[-limit:]]
 
+    # ------------------------------------------------ 落地播报回执（关旧壳的前置）
+
+    def record_arrival(
+        self, *, generation: int, shell: str, delivered: bool, detail: str = ""
+    ) -> Dict[str, Any]:
+        """新壳说一句「这一代的落地播报已经送到人眼前了」。
+
+        为什么这条要进账本：**旧壳要关自己之前，必须有一个可验证的凭据**。
+        "对面没报错"不是凭据（它可能压根没发），"我等了 30 秒"也不是。
+        账本里一条 `delivered: true` 才是。
+        """
+        gen = int(generation or 0)
+        name = str(shell or "").strip().lower()
+        if gen <= 0:
+            raise NeedsHuman("记录落地播报要带上快照编号")
+        if not name:
+            raise NeedsHuman("记录落地播报要带上壳名")
+
+        item = {
+            "generation": gen,
+            "shell": name,
+            "delivered": bool(delivered),
+            "detail": str(detail or "")[:200],
+            "at": time.time(),
+            "at_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        with self._lock():
+            self._reload_locked()
+            self._arrivals[str(gen)] = item
+            if len(self._arrivals) > self.MAX_ARRIVALS:
+                for old_key in sorted(self._arrivals, key=lambda k: int(k or 0))[
+                    : len(self._arrivals) - self.MAX_ARRIVALS
+                ]:
+                    self._arrivals.pop(old_key, None)
+            self.save()
+        self.append_log(
+            "INFO" if delivered else "WARN",
+            f"落地播报回执：快照 #{gen} @ {name} {'已送达' if delivered else '未送达'}"
+            + (f"（{item['detail']}）" if item["detail"] else ""),
+        )
+        return dict(item)
+
+    def arrivals_view(self, *, limit: int = 10) -> Dict[str, Dict[str, Any]]:
+        with self._lock():
+            self._reload_locked()
+            keys = sorted(self._arrivals, key=lambda k: int(k or 0))[-limit:]
+            return {k: dict(self._arrivals[k]) for k in keys}
+
+
     def status(self) -> Dict[str, Any]:
         """给 `molt status` 用的人类可读快照。
 
@@ -819,6 +876,7 @@ class Warden:
             "alerts": self.alerts_view(limit=5),
             "policy": self.policy_view(),
             "attempts": self.attempts_view(limit=5),
+            "arrivals": self.arrivals_view(limit=3),
         }
 
     # ---------------------------------------------------------------- 心跳

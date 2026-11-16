@@ -247,3 +247,106 @@ def test_policy_set_prints_what_it_saved_even_from_a_remote_ledger(tmp_path, cap
 
     out = capsys.readouterr().out
     assert "存好了：night-home（a → b）" in out
+
+
+# ---------------------------------------------------------------- 链式收尾：搬完关旧壳
+
+def _power_policy(**kw):
+    base = dict(
+        id="morning-home",
+        enabled=True,
+        source="desk-box",
+        target="nas-box",
+        schedule="09:00",
+        window_minutes=30,
+        daily_limit=1,
+        power_off_source=True,
+        power_action="shutdown",
+        arrival_timeout_seconds=60.0,
+    )
+    base.update(kw)
+    return base
+
+
+def _arrival(gen=7, shell="nas-box", delivered=True):
+    return {"generation": gen, "shell": shell, "delivered": delivered, "at": 1.0}
+
+
+def test_power_decision_needs_the_new_shell_to_have_taken_it():
+    ok, why = autopilot.power_decision(
+        _power_policy(), generation=7, consumed_by="", shell="desk-box", arrival=_arrival()
+    )
+    assert not ok and "还没接走" in why
+
+
+def test_power_decision_needs_the_arrival_receipt():
+    ok, why = autopilot.power_decision(
+        _power_policy(), generation=7, consumed_by="nas-box", shell="desk-box", arrival=None
+    )
+    assert not ok and "播报" in why
+
+
+def test_power_decision_rejects_a_receipt_from_another_generation():
+    ok, why = autopilot.power_decision(
+        _power_policy(),
+        generation=8,
+        consumed_by="nas-box",
+        shell="desk-box",
+        arrival=_arrival(gen=7),
+    )
+    assert not ok and "这一代" in why
+
+
+def test_power_decision_rejects_a_receipt_from_another_shell():
+    ok, why = autopilot.power_decision(
+        _power_policy(),
+        generation=7,
+        consumed_by="nas-box",
+        shell="desk-box",
+        arrival=_arrival(shell="other-box"),
+    )
+    assert not ok and "不是新壳" in why
+
+
+def test_power_decision_rejects_an_undelivered_receipt():
+    ok, why = autopilot.power_decision(
+        _power_policy(),
+        generation=7,
+        consumed_by="nas-box",
+        shell="desk-box",
+        arrival=_arrival(delivered=False),
+    )
+    assert not ok and "没送到" in why
+
+
+def test_power_decision_is_off_when_the_policy_says_so():
+    ok, why = autopilot.power_decision(
+        _power_policy(power_off_source=False),
+        generation=7,
+        consumed_by="nas-box",
+        shell="desk-box",
+        arrival=_arrival(),
+    )
+    assert not ok and "没要求" in why
+
+
+def test_power_decision_allows_the_shutdown_when_everything_holds():
+    ok, why = autopilot.power_decision(
+        _power_policy(), generation=7, consumed_by="nas-box", shell="desk-box", arrival=_arrival()
+    )
+    assert ok and "可以关" in why
+
+
+def test_a_power_action_of_keep_with_power_off_is_a_contradiction():
+    problems = autopilot.policy_problems(_power_policy(power_action="keep"))
+    assert any("自相矛盾" in p for p in problems)
+
+
+def test_an_unknown_power_action_is_refused():
+    problems = autopilot.policy_problems(_power_policy(power_action="explode"))
+    assert any("power_action" in p for p in problems)
+
+
+def test_the_arrival_timeout_is_bounded():
+    problems = autopilot.policy_problems(_power_policy(arrival_timeout_seconds=1.0))
+    assert any("arrival_timeout_seconds" in p for p in problems)

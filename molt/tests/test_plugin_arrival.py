@@ -198,7 +198,15 @@ class _FakeMover:
     def settings(self):
         if self._boom:
             raise RuntimeError("配置文件坏了")
-        return type("S", (), {"shell": self._shell})()
+        return type(
+            "S",
+            (),
+            {
+                "shell": self._shell,
+                "warden_url": "http://ledger:6186",
+                "warden_token": "t0ken",
+            },
+        )()
 
     def ledger_status(self):
         self.ledger_calls += 1
@@ -419,3 +427,61 @@ def test_plugin_appends_the_power_question_after_the_arrival_note(tmp_path):
     assert "我刚从 UGREEN-776B 那边过来" in event.sent[0]
     assert "还开着" in event.sent[0]
     assert "/molt shutdown" in event.sent[0]
+
+# ------------------------------------------------- 落地播报回执（旧壳关自己的凭据）
+
+
+def test_the_plugin_tells_the_ledger_when_the_note_really_landed(tmp_path, monkeypatch):
+    from molt import client as client_mod
+
+    seen = []
+
+    class FakeClient:
+        def __init__(self, base, token):
+            seen.append(("init", base, token))
+
+        def record_arrival(self, **kw):
+            seen.append(("arrival", kw))
+            return {}
+
+    monkeypatch.setattr(client_mod, "WardenClient", FakeClient)
+
+    mover = _FakeMover(_status(beats={}))
+    plugin = _plugin(tmp_path, mover)
+    plugin._arrival_pending = (9, "（我刚搬到这台机器上 —— 中间睡了一觉。）")
+
+    event = _run(plugin)
+
+    assert event.sent, "播报本身要发出去"
+    assert ("init", "http://ledger:6186", "t0ken") in seen
+    arrivals = [kw for kind, *rest in seen if kind == "arrival" for kw in rest]
+    assert arrivals and arrivals[0]["generation"] == 9
+    assert arrivals[0]["delivered"] is True
+    assert arrivals[0]["shell"] == "desktop-h2kgiao"
+
+
+def test_no_receipt_when_the_note_did_not_go_out(tmp_path, monkeypatch):
+    from molt import client as client_mod
+
+    seen = []
+
+    class FakeClient:
+        def __init__(self, *a):
+            pass
+
+        def record_arrival(self, **kw):
+            seen.append(kw)
+
+    monkeypatch.setattr(client_mod, "WardenClient", FakeClient)
+
+    class BadEvent(_Event):
+        async def send(self, payload):
+            raise RuntimeError("平台挡下来了")
+
+    mover = _FakeMover(_status(beats={}))
+    plugin = _plugin(tmp_path, mover)
+    plugin._arrival_pending = (9, "（我刚搬到这台机器上 —— 中间睡了一觉。）")
+
+    _run(plugin, BadEvent())
+
+    assert seen == [], "没送出去就不许回执说我送到了"

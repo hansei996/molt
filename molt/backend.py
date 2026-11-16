@@ -96,6 +96,18 @@ class LocalBackend:
     def record_attempt(self, result: str, **kwargs: Any) -> Dict[str, Any]:
         return {"attempt": self.warden.record_attempt(result=result, **kwargs)}
 
+    def record_arrival(
+        self, *, generation: int, shell: str, delivered: bool, detail: str = ""
+    ) -> Dict[str, Any]:
+        return {
+            "arrival": self.warden.record_arrival(
+                generation=generation, shell=shell, delivered=delivered, detail=detail
+            )
+        }
+
+    def arrivals(self) -> Dict[str, Any]:
+        return self.warden.arrivals_view()
+
     def wake(self, mac: str, *, host: str = "", prefix_len: int = 24) -> Dict[str, Any]:
         """本地后端：就由这个进程发。它跑在宿主上，广播出得去。"""
         from .wake import magic_packet, wake_targets
@@ -348,6 +360,16 @@ class RemoteBackend:
 
     def record_attempt(self, result: str, **kwargs: Any) -> Dict[str, Any]:
         return self.client.record_attempt(result, **kwargs)
+
+    def record_arrival(
+        self, *, generation: int, shell: str, delivered: bool, detail: str = ""
+    ) -> Dict[str, Any]:
+        return self.client.record_arrival(
+            generation=generation, shell=shell, delivered=delivered, detail=detail
+        )
+
+    def arrivals(self) -> Dict[str, Any]:
+        return (self.client.status() or {}).get("arrivals", {}) or {}
 
     def wake(self, mac: str, *, host: str = "", prefix_len: int = 24) -> Dict[str, Any]:
         """远端后端：让账本那台机器发。容器里的广播出不了 docker0。"""

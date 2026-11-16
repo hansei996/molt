@@ -38,12 +38,12 @@ def _at(hour: int, minute: int) -> float:
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hour, minute, 0, 0, 0, -1))
 
 
-def status(*, policy=None, attempts=(), consumed_by=ME, holder=None):
+def status(*, policy=None, attempts=(), consumed_by=ME, holder=None, arrivals=None, generation=7):
     return {
         "current_epoch": 3,
         "lease": {"holder": holder, "state": "held" if holder else "no-lease"},
         "latest_generation": {
-            "generation": 7,
+            "generation": generation,
             "target_shell": ME,
             "consumed_by": consumed_by,
             "pushed_by": "desk-box",
@@ -59,6 +59,7 @@ def status(*, policy=None, attempts=(), consumed_by=ME, holder=None):
             "expires_at": 0.0,
         },
         "attempts": list(attempts),
+        "arrivals": dict(arrivals or {}),
     }
 
 
@@ -193,3 +194,97 @@ def test_homer_uses_the_same_gate(monkeypatch):
     got = h.maybe_auto_migrate({}, status())
     assert got is not None and got["ok"]
     assert runner.calls
+
+# ------------------------------------------------- 搬完之后才轮到"关旧壳"
+
+def _power_policy(**kw):
+    base = {
+        "id": "morning-home",
+        "enabled": True,
+        "source": ME,
+        "target": TARGET,
+        "schedule": "23:30",
+        "window_minutes": 30,
+        "daily_limit": 1,
+        "expires_at": 0.0,
+        "power_off_source": True,
+        "power_action": "shutdown",
+        "arrival_timeout_seconds": 60.0,
+    }
+    base.update(kw)
+    return base
+
+
+def _arrivals(gen=8, shell=TARGET, delivered=True):
+    return {
+        str(gen): {
+            "generation": gen,
+            "shell": shell,
+            "delivered": delivered,
+            "at_readable": "2026-11-17 00:00:00",
+        }
+    }
+
+
+def test_power_ticket_is_filed_only_after_the_arrival_receipt(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: _at(23, 35))
+    a = _agent()
+    a.migrate_runner = FakeRunner()
+    calls = []
+    # 搬完之后账本说：第 8 代被目标接走，且播报回执已送达
+    after = status(policy=_power_policy(), consumed_by=TARGET, generation=8,
+                   arrivals=_arrivals(8))
+    a.status_fetcher = lambda: after
+    a.arrival_waiter = lambda gen, timeout: True
+    a.power_requester = lambda shell, action, gen, **kw: calls.append((shell, action, gen, kw))
+    seen = []
+    a.attempt_sender = lambda result, **kw: seen.append(result) or True
+
+    step = a.maybe_auto_migrate({}, status(policy=_power_policy()), None)
+
+    assert step is not None and step.ok
+    assert calls == [(ME, "shutdown", 8, {"by": "autopilot"})], calls
+    assert seen[-1] == "ok"
+
+
+def test_no_power_ticket_when_the_arrival_never_lands(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: _at(23, 35))
+    a = _agent()
+    a.migrate_runner = FakeRunner()
+    a.status_fetcher = lambda: status(
+        policy=_power_policy(), consumed_by=TARGET, generation=8, arrivals={}
+    )
+    a.arrival_waiter = lambda gen, timeout: False
+    calls = []
+    a.power_requester = lambda *a, **k: calls.append((a, k))
+    seen = []
+    a.attempt_sender = lambda result, **kw: seen.append(result) or True
+
+    step = a.maybe_auto_migrate({}, status(policy=_power_policy()), None)
+
+    assert step is not None and step.ok          # 搬家本身成功
+    assert calls == []                            # 但一张票都没放
+    assert seen[-1] == "skipped"                  # 而且如实记成"没关"
+
+
+def test_no_power_ticket_when_the_migration_failed(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: _at(23, 35))
+    a = _agent()
+    a.migrate_runner = FakeRunner(returncode=6, stdout="鱼回到源壳了")
+    a.status_fetcher = lambda: status(policy=_power_policy())
+    a.arrival_waiter = lambda gen, timeout: True
+    calls = []
+    a.power_requester = lambda *a_, **k: calls.append((a_, k))
+
+    step = a.maybe_auto_migrate({}, status(policy=_power_policy()), None)
+
+    assert step is not None and not step.ok
+    assert calls == []
+
+
+def test_power_off_is_off_by_default_in_the_policy():
+    from molt import autopilot
+
+    policy = autopilot.normalize_policy({"id": "x", "source": "a", "target": "b"})
+    assert policy["power_off_source"] is False
+    assert policy["power_action"] == "shutdown"

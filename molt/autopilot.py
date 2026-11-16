@@ -44,12 +44,33 @@ POLICY_FIELDS = (
     "expires_at",
     "created_at",
     "created_by",
+    # 搬完之后要不要关掉旧壳。**默认不关** —— 因为关机的代价不对称：
+    # 该关没关只是多烧一晚电；不该关却关了，是人正在用的机器黑掉。
+    "power_off_source",
+    # 关的时候用什么动作（走账本里那张关机票，不新开旁路）。
+    "power_action",
+    # 等新壳确认「落地播报已送达」最多等多久。等不到就不关旧壳。
+    "arrival_timeout_seconds",
 )
+
+#: 允许的关机动作。与 `warden.POWER_ACTIONS` 同一套词。
+POWER_ACTIONS = ("shutdown", "sleep", "keep")
+
+#: 等落地播报确认的默认时长（秒）。搬家本身要 1–3 分钟，播报在落位后
+#: 十几秒内发；120 秒足够，再长就成了"为了关机而拖住整个流程"。
+DEFAULT_ARRIVAL_TIMEOUT = 120.0
 
 
 def _as_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return default
 
@@ -68,6 +89,11 @@ def normalize_policy(raw: Any) -> Dict[str, Any]:
         "expires_at": float(data.get("expires_at") or 0.0),
         "created_at": float(data.get("created_at") or 0.0),
         "created_by": str(data.get("created_by") or "").strip(),
+        "power_off_source": bool(data.get("power_off_source", False)),
+        "power_action": str(data.get("power_action") or "shutdown").strip().lower(),
+        "arrival_timeout_seconds": _as_float(
+            data.get("arrival_timeout_seconds"), DEFAULT_ARRIVAL_TIMEOUT
+        ),
     }
 
 
@@ -103,6 +129,15 @@ def policy_problems(raw: Any) -> List[str]:
 
     if policy["expires_at"] and policy["expires_at"] < time.time():
         problems.append("expires_at 已经过去了 —— 这条策略一存就是过期的")
+
+    if policy["power_action"] not in POWER_ACTIONS:
+        problems.append(
+            "power_action 只能是 " + " / ".join(POWER_ACTIONS) + "（走账本里那张关机票）"
+        )
+    if policy["arrival_timeout_seconds"] < 10.0 or policy["arrival_timeout_seconds"] > 1800.0:
+        problems.append("arrival_timeout_seconds 要在 10–1800 之间（秒）")
+    if policy["power_off_source"] and policy["power_action"] == "keep":
+        problems.append("power_off_source 为真时 power_action 不能是 keep —— 那是自相矛盾")
 
     return problems
 
@@ -177,3 +212,40 @@ def due(
             return False, f"上一次自动尝试在 {int(gap)} 秒前，冷却中"
 
     return True, "到点了"
+
+
+def power_decision(
+    policy: Any,
+    *,
+    generation: int,
+    consumed_by: str,
+    shell: str,
+    arrival: Any,
+) -> Tuple[bool, str]:
+    """搬完之后，旧壳到底该不该关。
+
+    这一条是**顺序**的判据，不是"再检查一遍"：
+    只有"新壳已经接走 + 这一代的落地播报已经送到人眼前"同时成立，
+    才允许往账本里放一张关机票。任何一条不成立，返回 False 并说明原因 ——
+    旧壳继续开着，鱼留在新壳上。
+
+    `arrival` 是账本里 `arrivals[<generation>]` 那条回执。
+    """
+    policy = normalize_policy(policy)
+    if not policy["power_off_source"]:
+        return False, "策略没要求关旧壳"
+    if int(generation or 0) <= 0:
+        return False, "不知道这次搬的是哪一份快照 —— 不关"
+    if str(consumed_by or "").strip().lower() != str(policy["target"] or "").strip().lower():
+        return False, "新壳还没接走这一代 —— 不关"
+    if not isinstance(arrival, dict) or not arrival:
+        return False, "新壳还没确认落地播报送到 —— 不关"
+    if int(arrival.get("generation") or 0) != int(generation or 0):
+        return False, "账本里那条回执不是这一代的 —— 不关"
+    if str(arrival.get("shell") or "").strip().lower() != str(policy["target"] or "").strip().lower():
+        return False, "账本里那条回执不是新壳写的 —— 不关"
+    if not arrival.get("delivered"):
+        return False, "新壳说落地播报没送到人眼前 —— 不关"
+    if str(shell or "").strip().lower() == str(policy["target"] or "").strip().lower():
+        return False, "要关的壳就是新壳 —— 不关"
+    return True, f"新壳已接走且落地播报已送达 —— 可以关 {shell}"

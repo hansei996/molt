@@ -2514,6 +2514,14 @@ def _run_policy(be, args: argparse.Namespace, action: str) -> int:
         kv("过期", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires)) if expires else "不过期")
         if policy.get("created_by"):
             kv("谁设的", str(policy["created_by"]))
+        if policy.get("power_off_source"):
+            kv(
+                "搬完关旧壳",
+                f'是（{policy.get("power_action")}；等播报回执 '
+                f'{policy.get("arrival_timeout_seconds")} 秒，等不到就不关）',
+            )
+        else:
+            kv("搬完关旧壳", "不关")
         if attempts:
             head("最近几次自动尝试")
             for item in attempts[-5:]:
@@ -2542,6 +2550,9 @@ def _run_policy(be, args: argparse.Namespace, action: str) -> int:
         "daily_limit": int(args.daily_limit or DEFAULT_DAILY_LIMIT),
         "expires_at": float(args.expires_at or 0.0),
         "created_by": args.by or "",
+        "power_off_source": bool(getattr(args, "power_off", False)),
+        "power_action": str(getattr(args, "power_action", "") or "shutdown"),
+        "arrival_timeout_seconds": float(getattr(args, "arrival_timeout", 0) or 120.0),
     }
     problems = policy_problems(policy)
     if problems:
@@ -3651,6 +3662,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_set.add_argument("--daily-limit", type=int, default=0, help="每天最多自动搬几次（默认 2）")
     p_set.add_argument("--expires-at", type=float, default=0.0, help="到什么时候自动失效（epoch 秒，0 = 不过期）")
     p_set.add_argument("--by", default="", help="谁设的（留个名字）")
+    p_set.add_argument(
+        "--power-off",
+        action="store_true",
+        help="搬完之后关掉旧壳（走账本里那张关机票；没接走或播报没送到就不关）",
+    )
+    p_set.add_argument(
+        "--power-action",
+        default="shutdown",
+        choices=("shutdown", "sleep", "keep"),
+        help="关旧壳时用什么动作（默认 shutdown）",
+    )
+    p_set.add_argument(
+        "--arrival-timeout",
+        type=float,
+        default=120.0,
+        help="等新壳确认落地播报送达最多等多久（秒，默认 120）",
+    )
     p_set.set_defaults(func=cmd_policy)
 
     # timeline

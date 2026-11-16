@@ -1267,6 +1267,21 @@ molt policy off
 「最近一次自动尝试」、`molt status` 的 `自动搬家` 行。
 **判不了就是不许搬** —— 规则写错、账本读不到、机器状态未知，一律当成"不搬"。
 
+### 早上自动回家并把 Windows 关掉（M2 + `--power-off`）
+
+```bash
+molt policy set --id morning-home --source desktop-h2kgiao \
+  --target ugreen-776b-8b7896df --at 09:00 --window-minutes 30 \
+  --daily-limit 1 --power-off
+```
+
+行为：**鱼在 Windows** → 到点搬回 NAS，确认新壳接走、且落地播报真的发到你眼前，
+才给 Windows 放一张关机票（由 Windows 自己关）。**鱼已经在 NAS** → 什么都不做
+（Windows 上没有鱼，也没有在跑的 AstrBot，两条闸都不成立）。
+
+任何一步没成立都不关：叫不醒不搬、没接走回滚、播报没送到就不关 —— 鱼永远在
+一个活着的壳上。想只看不动：`molt policy show` 能看到最近几次尝试。
+
 ## 交出去之后没被接走会怎样（1.3.1 起）
 
 它交出去之后会**等 180 秒**，看账本有没有写下「目标壳接走了」。

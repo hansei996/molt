@@ -469,3 +469,36 @@ def test_timeline_page_renders_the_same_history_as_the_json(srv: WardenServer) -
     page = srv.dispatch("GET", "/timeline", None).html
     assert page and "第 1 次搬家" in page
     assert "<!doctype html>" in page
+
+def test_arrival_receipts_are_recorded_and_visible(tmp_path):
+    """新壳回执「落地播报送到了」—— 旧壳关自己之前唯一认的凭据。"""
+    import json as _json
+
+    from molt import server as srv
+    from molt.warden import Warden
+
+    w = Warden(root=tmp_path)
+    server = srv.WardenServer(root=tmp_path)
+
+    resp = server.dispatch(
+        "POST",
+        "/arrival",
+        {"generation": 8, "shell": "nas-box", "delivered": True, "detail": "sent"},
+    )
+    assert resp.status == 200
+    assert resp.payload["arrival"]["generation"] == 8
+
+    st = w.status()
+    assert st["arrivals"]["8"]["delivered"] is True
+    assert st["arrivals"]["8"]["shell"] == "nas-box"
+
+
+def test_an_arrival_receipt_without_a_shell_is_refused(tmp_path):
+    import json as _json
+
+    from molt import server as srv
+    from molt.warden import Warden
+
+    server = srv.WardenServer(root=tmp_path)
+    resp = server.dispatch("POST", "/arrival", {"generation": 8, "delivered": True})
+    assert resp.status in (400, 422)

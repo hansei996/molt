@@ -873,7 +873,25 @@ esult_decorate.stage:169 打了「Plugins that depend on the
             except Exception as exc:  # pragma: no cover - 防御性
                 logger.warning("[Molt] 播报发出去了，但状态没写进去：%s", exc)
             logger.info("[Molt] 第 %d 代落地播报已送达", number)
+            self._record_arrival(number)
         self._arrival_pending = None
+
+    def _record_arrival(self, number: int) -> None:
+        """把「这一代的播报已送达」写进账本。
+
+        旧壳靠这条回执决定敢不敢关自己 —— "对面没报错"不是凭据，
+        账本里一条 `delivered: true` 才是。失败只记一条日志：
+        发播报本身已经完成了，回执丢了顶多让旧壳不关（那是最安全的方向）。
+        """
+        try:
+            cfg = self._mover.settings()
+            from molt.client import WardenClient  # noqa: PLC0415
+
+            WardenClient(cfg.warden_url, cfg.warden_token).record_arrival(
+                generation=number, shell=cfg.shell, delivered=True, detail="arrival note sent"
+            )
+        except Exception as exc:  # noqa: BLE001 - 回执失败不许影响对话
+            logger.warning("[Molt] 落地播报的回执没写进账本：%s", exc)
 
     @filter.after_message_sent()
     async def on_after_message_sent(self, event: AstrMessageEvent):

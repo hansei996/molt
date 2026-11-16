@@ -292,6 +292,21 @@ class WardenClient:
             },
         )
 
+    def record_arrival(
+        self, *, generation: int, shell: str, delivered: bool, detail: str = ""
+    ) -> Dict[str, Any]:
+        """告诉账本：这一代的落地播报送到人眼前了（或没送到）。"""
+        return self._request(
+            "POST",
+            "/arrival",
+            {
+                "generation": generation,
+                "shell": shell,
+                "delivered": bool(delivered),
+                "detail": detail,
+            },
+        )
+
     def alert(
         self,
         kind: str,

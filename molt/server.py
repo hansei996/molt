@@ -502,6 +502,20 @@ class WardenServer:
                 )
                 return _ok(attempt=attempt)
 
+            if head == "arrival" and parts[1:2] == [] and method == "POST":
+                # 新壳的落地播报送出去之后回执一句；旧壳靠它决定敢不敢关自己。
+                try:
+                    generation = int(body.get("generation") or 0)
+                except (TypeError, ValueError):
+                    generation = 0
+                arrival = self.warden.record_arrival(
+                    generation=generation,
+                    shell=str(body.get("shell") or ""),
+                    delivered=bool(body.get("delivered")),
+                    detail=str(body.get("detail") or ""),
+                )
+                return _ok(arrival=arrival)
+
             # ---- POST /power ----（「走」和「关」是两件事，这是第二件）
             if head == "power" and parts[1:2] == [] and method == "POST":
                 shell_id = str(body.get("shell") or "").strip()

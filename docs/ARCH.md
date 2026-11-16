@@ -4168,3 +4168,41 @@ MAC 是**那台机器**的属性，不是这次迁徙的参数。以前它只活
 - 不自动拉起容器 —— 那是守夜人的告警，不是它的动作（§14.22）。
 
 判据：`molt/tests/test_autopilot.py`（26）+ `test_auto_migrate.py`（7），全量 1179 passed。
+
+### 14.24 「搬完再关旧壳」：一条回执撑起的顺序（2026-11-17）
+
+主人 2026-11-17 追加：早上九点把鱼搬回 NAS，**同时**把 Windows 关掉；
+鱼已经在 NAS 就什么都不做。这不是新机制，是 M2 策略上的三个字段：
+`power_off_source` / `power_action` / `arrival_timeout_seconds`。
+
+#### 为什么"搬完再关"必须由账本里的回执来判
+
+旧壳关自己之前，需要知道两件事：**鱼真的到了**、**人真的看到它到了**。
+第一件 `migrate` 已经等了（`consumed_by`，见 §14.20）；第二件以前没有任何凭据 ——
+"对面没报错"不是凭据（它可能压根没发），"我等了 30 秒"也不是。
+
+所以 plugin 在 `event.send()` **正常返回之后**往账本写一条
+`arrivals[<gen>] = {generation, shell, delivered, at}`；旧壳读这一条，
+核对"是这一代、是新壳写的、delivered 为真"才放关机票。回执丢失的方向是
+安全的：不关，鱼留在新壳上，人第二天看到多烧一晚电。
+
+#### 顺序
+
+```
+migrate（内含：目标就绪 → 交出去 → 等 consumed_by）
+  └─ rc=0 才继续
+       └─ 等 arrivals[gen].delivered（超时就 skips）
+            └─ power_decision() 五条判据全过
+                 └─ POST /power（放票，不改电源）
+                      └─ 旧壳自己的 leave 分支执行（与 /molt shutdown 同一条路）
+```
+
+#### 「鱼已经在 NAS 就不动」是怎么保证的
+
+不是又写了一条 if，而是两个已有的闸同时成立：
+1. 守护进程只在 `latest_generation.consumed_by == 自己的壳` 时才自动搬；
+2. agent 还要 `_probe_port()` 说 AstrBot 在听 —— 鱼在 NAS 时 Windows 上没有它。
+
+判据：`molt/tests/test_autopilot.py`（38）+ `test_auto_migrate.py`（11）+
+`test_plugin_arrival.py` 的回执两条 + `test_server.py` 的 `/arrival` 两条，
+全量 1199 passed。真机整链**未跑**（等主人点头）。

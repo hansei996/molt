@@ -395,5 +395,8 @@ molt policy show
 molt policy off
 ```
 
+加 `--power-off` 就是「搬完再关旧壳」：只有新壳确认接走、且落地播报已送达，
+才会给旧壳放一张关机票（走 `/molt shutdown` 同一条路）。
+
 这是 M2（定时自动，不需要确认）。默认每天最多 2 次、300 秒冷却；
 失败会写进账本 `attempts[]`，`/where` 与 `molt status` 都看得到。
