@@ -444,3 +444,16 @@ M4 不是"触发搬家"，是"搬完之后要不要关旧壳"—— 它已经有
 
 **这一节停在"等你选"。选完（例如回一句「B」或「B + 每天一次」）我再写代码、
 补测试、并在真机上只验"算得对不对"（`--dry-run`），不真搬、不真关机。**
+
+## D14 · 守夜人（已定案，2026-11-16，主人说「那就加一个守夜人在NAS上把」）
+
+| 问题 | 决定 |
+|---|---|
+| 它看什么 | `docker inspect astrbot` 的 State、`/data/notifyshutdownflag` 的 content/mtime、账本 `/status` |
+| 它喊什么 | `fish-down` / `container-died` / `possible-double` / `shutdown-notice` / `ledger-unreachable` |
+| 喊到哪 | `POST /alert` 写进账本 → `/status.alerts`、`/where`、`molt status` |
+| 多久喊一次 | 同类 600 秒冷却；账本连不上 1800 秒 |
+| 会不会自动拉起容器 | **不会。** 只喊人 —— 自动拉起会破坏公理 0 |
+| 状态存哪 | `/mnt/dm-0/astrbot/_molt/nightwatch-state.json`；流水 `nightwatch.log` |
+| 谁把它拉起来 | `tools/molt-supervise.py`（cron `*/2` + `@reboot`） |
+| 降级行为 | 账本连不上时**不抛**，只喊一次然后继续看；状态文件写坏只会让它多喊一次，不会永久闭嘴 |

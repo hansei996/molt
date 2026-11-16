@@ -253,6 +253,25 @@ class WardenClient:
     def shells(self) -> Dict[str, Dict[str, Any]]:
         return self._request("GET", "/shells").get("shells", {})
 
+    def alert(
+        self,
+        kind: str,
+        message: str,
+        *,
+        shell: str = "",
+        detail: Any = None,
+    ) -> Dict[str, Any]:
+        """把一条告警写进账本（给守夜人用）。
+
+        守夜人看得见 docker，账本看不见；账本负责把这件事记下来，
+        好让 `/where` 与 `molt status` 能把它念出来 —— 否则它就只是
+        某台机器上一条没人看的日志。
+        """
+        body: Dict[str, Any] = {"kind": kind, "message": message, "shell": shell}
+        if detail is not None:
+            body["detail"] = detail
+        return self._request("POST", "/alert", body).get("alert", {})
+
     def acquire(self, shell_id: str, ttl_seconds: Optional[int] = None) -> Dict[str, Any]:
         body: Dict[str, Any] = {"shell_id": shell_id}
         if ttl_seconds is not None:

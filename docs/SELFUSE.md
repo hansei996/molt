@@ -1283,3 +1283,22 @@ molt declare --shell desktop-h2kgiao --role desktop --wakeable --wake-mac D8-BB-
 封包由**账本那台机器**发（`POST /wake`），不是由容器发：容器用 bridge 网络，
 往 255.255.255.255 的广播出不了 docker0。2026-11-16 00:11 那次"发了包没叫醒"
 就是这个原因。
+
+## 守夜人：NAS 上的灯什么时候灭（1.3.1 起）
+
+    python3 /mnt/dm-0/astrbot/_molt/pkg/tools/molt-nightwatch.py \
+        --config /mnt/dm-0/astrbot/_molt/pkg/tools/molt-nightwatch.json --once
+
+平时它由 `molt-supervise.py` 每两分钟检查一次、开机自启。它会在这些时候往账本写一条告警：
+
+| kind | 什么时候 |
+|---|---|
+| `fish-down` | 账本说鱼在这台机器上，但 `astrbot` 容器没在跑 |
+| `container-died` | 容器退出码不是 0（例如 137 = 被 SIGKILL） |
+| `possible-double` | 账本说鱼在别处，可这台容器正在跑 |
+| `shutdown-notice` | `/data/notifyshutdownflag` 变了（UGOS 发起过关机） |
+| `ledger-unreachable` | 连不上账本 |
+
+看告警：`molt status`、`http://<NAS>:6186/where?token=…`、或 `/status` 的 `alerts` 字段。
+
+**它不会自己把容器拉起来。** 万一鱼正在另一台机器上说话，自动拉起就是两只。

@@ -469,6 +469,10 @@ class Warden:
         # 和心跳分开存：心跳回答"现在谁还在"，属性回答"那台机器能干什么"。
         # 一台关机一周的机器，属性照样该在 —— 它不会因为没人上报就变成未知。
         self._shells: Dict[str, Dict[str, Any]] = {}
+        # 告警：守夜人发现"鱼应该在这台机器上，但容器没在跑"之类的事件。
+        # 账本自己不知道 docker 的事，所以这些结论是**外面**送进来的；
+        # 只留最近若干条（2026-11-16 那次容器被停掉，正是没人能把这件事说出来）。
+        self._alerts: List[Dict[str, Any]] = []
         self._loaded = False
 
     def _lock(self, timeout: float = 30.0) -> "_InterProcessLock":
@@ -494,6 +498,7 @@ class Warden:
             self._generations = []
             self._heartbeats = {}
             self._shells = {}
+            self._alerts = []
             self._loaded = True
             return
 
@@ -523,6 +528,7 @@ class Warden:
         self._shells = {
             str(k): dict(v) for k, v in (raw.get("shells") or {}).items()
         }
+        self._alerts = [dict(a) for a in (raw.get("alerts") or []) if isinstance(a, dict)]
         self._loaded = True
 
     def _ensure_loaded(self) -> None:
@@ -541,6 +547,7 @@ class Warden:
             "generations": [g.to_dict() for g in self._generations],
             "heartbeats": self._heartbeats,
             "shells": self._shells,
+            "alerts": self._alerts,
         }
 
     def save(self) -> None:
@@ -618,6 +625,55 @@ class Warden:
         _atomic_write_json(self.power_path(), current)
         return True
 
+    # ---------------------------------------------------------------- 告警
+    #
+    # 谁来写：NAS 上的守夜人（`molt/daemon/nightwatch.py`）。它看得到 docker，
+    # 账本看不到。所以这里只做一件很窄的事：**把外面观察到的异常记下来**，
+    # 让 `/where` 页面和 `molt status` 能把它念出来。
+    #
+    # 为什么要在账本里存而不是只写日志文件：日志没人看。
+    # 2026-11-16 18:45 容器被停掉，一直到 22:46 主人才发现 —— 中间四个小时，
+    # `homer.log` 里写着 idle，`warden.log` 里写着"已监听"，一片祥和。
+
+    MAX_ALERTS = 50
+
+    def record_alert(
+        self,
+        kind: str,
+        message: str,
+        *,
+        shell: str = "",
+        detail: Any = None,
+    ) -> Dict[str, Any]:
+        """记一条告警。kind 是机器可判读的类别，message 是给人看的一句话。"""
+        kind = str(kind or "").strip()
+        message = str(message or "").strip()
+        if not kind or not message:
+            raise NeedsHuman("告警必须有 kind 和 message")
+        now = time.time()
+        alert = {
+            "kind": kind,
+            "message": message,
+            "shell": str(shell or ""),
+            "detail": detail if detail is not None else {},
+            "at": now,
+            "at_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+        }
+        with self._lock():
+            self._reload_locked()
+            self._alerts.append(alert)
+            # 只留最近的若干条：告警是"最近发生了什么"，不是账本历史。
+            if len(self._alerts) > self.MAX_ALERTS:
+                self._alerts = self._alerts[-self.MAX_ALERTS :]
+            self.save()
+        self.append_log("WARN", f"告警[{kind}]：{message}")
+        return alert
+
+    def alerts_view(self, *, limit: int = 10) -> List[Dict[str, Any]]:
+        """最近几条告警，新的在后。"""
+        self._ensure_loaded()
+        return [dict(a) for a in self._alerts[-limit:]]
+
     def status(self) -> Dict[str, Any]:
         """给 `molt status` 用的人类可读快照。
 
@@ -665,6 +721,7 @@ class Warden:
             "heartbeats": self._heartbeat_view(now),
             "shells": self.shells_view(),
             "power": self.power_view(),
+            "alerts": self.alerts_view(limit=5),
         }
 
     # ---------------------------------------------------------------- 心跳

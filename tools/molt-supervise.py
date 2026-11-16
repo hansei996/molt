@@ -97,6 +97,17 @@ def specs():
             "molt-bounce.py",
             PKG,
         ),
+        # 守夜人：看着容器与 UGOS 的关机通知，出事就往账本写一条告警。
+        # 它只喊人，不自动拉起容器 —— 自动拉起会破坏公理 0。
+        Spec(
+            "nightwatch",
+            MOLT / "nightwatch.pid",
+            MOLT / "nightwatch.log",
+            [PY, "-u", str(PKG / "tools" / "molt-nightwatch.py"),
+             "--config", str(PKG / "tools" / "molt-nightwatch.json"), "--quiet"],
+            "molt-nightwatch.py",
+            PKG,
+        ),
     ]
 
 
@@ -135,8 +146,26 @@ def running(spec: Spec) -> int:
 
 
 def files_ready() -> bool:
-    """`/mnt/dm-0` 挂上了没有。磁盘没挂时，下面所有路径都不存在。"""
-    return (PKG / "tools" / "molt-bounce.py").is_file()
+    """`/mnt/dm-0` 挂上了没有。磁盘没挂时，下面所有路径都不存在。
+
+    判据必须挂在**稳定的东西**上。原来这里看的是 `molt-bounce.py` —— 2026-11-15
+    把 bounce 改名禁用之后，这个函数就永远返回 False，于是整套看护静默失效：
+    进程死了也不会被拉起，cron 每两分钟跑一次、每次都安静地什么都不做。
+    """
+    return (PKG / "molt" / "cli.py").is_file()
+
+
+def spec_enabled(spec) -> bool:
+    """这个守护进程在这台机器上装了没有。
+
+    bounce 被改名成 `.disabled` 之后仍然留在 `specs()` 里；如果不去掉，
+    每一轮都会尝试启动一个不存在的文件、然后记一条失败。
+    """
+    for arg in spec.argv:
+        text = str(arg)
+        if text.endswith(".py"):
+            return Path(text).is_file()
+    return True
 
 
 def network_ready() -> bool:
@@ -249,6 +278,10 @@ def main(argv) -> int:
     out = []
     failed = 0
     for spec in specs():
+        if not spec_enabled(spec):
+            if status_only:
+                out.append(f"{spec.name}: 没装（跳过）")
+            continue
         pid = running(spec)
         if pid:
             if status_only:

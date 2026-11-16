@@ -4103,3 +4103,42 @@ MAC 是**那台机器**的属性，不是这次迁徙的参数。以前它只活
 - `molt/tests/test_wake_remote.py`（3 条）：远端后端必须走 `client.wake`；本地后端的
   `sendto` 收到的是 102 字节封包；容器里（`kind == "remote"`）不许自己发。
 - 全量 **1112 passed**。
+
+### 14.22 守夜人：账本记的是「谁取走快照」，不是「谁还活着」（2026-11-16）
+
+2026-11-16 18:44，NAS 收到一次系统级关机通知（`/data/notifyshutdownflag` 写着
+`shutdown`）。docker 被停、`astrbot` 容器被 SIGKILL（exit 137）；机器没断电，
+18:45:10 一整组服务又被拉回来，但容器因为被"显式停止"过，`unless-stopped`
+不会自动起。鱼从 18:45 消失到 22:46 —— 四小时。
+
+这段时间里三条日志都是真的，合起来却在说谎：
+
+| 日志 | 它当时写着 | 它没说的事 |
+|---|---|---|
+| `homer.log` | `[idle] 快照 #36 我已经落过了` | 它不知道容器已经不在 |
+| `warden.log` | `✓ 已监听 http://0.0.0.0:6186` | 账本活着，被看的人死了 |
+| `molt status` | 「鱼在 ugreen-776b-8b7896df 上」 | 账本记的是"谁取走了快照" |
+
+**根因不是某个 bug，是分工**：账本要能在裸 python 上跑，所以它不碰 docker
+（docker socket 是 root 权限）；而唯一能看见容器的人，是容器自己。
+
+所以新增 `molt/daemon/nightwatch.py`（NAS 上常驻）：
+
+1. 每 10 秒 `docker inspect astrbot`，把状态写进 `nightwatch-state.json`；
+2. 盯 `/data/notifyshutdownflag` 的 content/mtime 变化；
+3. 以下三种情况各喊一次（600 秒冷却）：
+   * `fish-down`：账本说鱼在这台机器上，但容器没在跑；
+   * `container-died`：退出码非 0（含 OOM 标记）；
+   * `possible-double`：账本说鱼在别处，可这台容器正在跑；
+   * `shutdown-notice`：关机通知文件变了；
+   * `ledger-unreachable`：连不上账本（1800 秒冷却）。
+
+告警走 `POST /alert` 写进账本 → `GET /status` 的 `alerts`、`/where` 页面、
+`molt status` 都能念出来。**它只喊人，绝不自动拉起容器** —— 万一鱼已经在
+另一台上活着（公理 0），自动拉起就是两只鱼同时在线。
+
+顺带修掉一个更早的隐患：`tools/molt-supervise.py` 的 `files_ready()` 原来拿
+`molt-bounce.py` 是否存在当"磁盘挂上了"的判据；bounce 被改名禁用后，这个函数
+永远返回 False，**整套看护静默失效**，cron 每两分钟跑一次、每次都安静地什么都
+不做。现在判据改成 `pkg/molt/cli.py`，并且没装的守护进程（`spec_enabled()`）
+直接跳过、不再记失败。

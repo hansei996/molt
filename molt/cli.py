@@ -3547,7 +3547,8 @@ def build_parser() -> argparse.ArgumentParser:
 #: 的子解析器**不接管未知开关** —— `molt agent --config x` 会被顶层 parser
 #: 判成 `unrecognized arguments: --config`。与其和 argparse 较劲，不如在入口
 #: 认这两个词：它们本来就是进程入口，不是子命令。
-_DAEMON_COMMANDS = ("agent", "homer")
+# nightwatch 也在这里：它不是"操作账本的命令"，而是和 agent/homer 一样的常驻进程。
+_DAEMON_COMMANDS = ("agent", "homer", "nightwatch")
 
 
 def main(argv: Optional[List[str]] = None) -> int:

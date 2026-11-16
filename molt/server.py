@@ -160,6 +160,19 @@ def _where_html(status: Dict[str, Any]) -> str:
         if lease.get("state") == "active"
         else "没有租约 —— 没有任何壳在搬家"
     )
+    alerts = status.get("alerts") or []
+    alert_block = ""
+    if alerts:
+        rows_a = "".join(
+            f"<li><b>{esc(a.get('kind'))}</b>：{esc(a.get('message'))} "
+            f"<span style=\"color:#98a2b3\">（{esc(a.get('at_readable'))}）</span></li>"
+            for a in alerts[-3:]
+        )
+        # 红条：这是"账本和外面对不上"的地方，比任何统计都重要
+        alert_block = (
+            '<div class="alert"><b>守夜人看到的事</b><ul>' + rows_a + "</ul></div>"
+        )
+
     gen_text = (
         f"第 <b>{esc(latest.get('generation'))}</b> 次搬家 · 目标壳 "
         f"<b>{esc(latest.get('target_shell') or '?')}</b> · 取走的是 "
@@ -185,10 +198,14 @@ def _where_html(status: Dict[str, Any]) -> str:
  td{{border-bottom:1px solid #f2f4f7;padding:10px 6px}}
  .meta{{font-size:14px;line-height:1.9;color:#344054;margin-top:16px}}
  .meta b{{color:#101828}}
+ .alert{{border:1px solid #fda29b;background:#fef3f2;color:#b42318;
+         border-radius:10px;padding:12px 16px;margin:0 0 16px;font-size:14px}}
+ .alert ul{{margin:6px 0 0;padding-left:18px}}
 </style></head><body>
 <div class="card">
   <h1>鱼现在在哪</h1>
   <p class="sub">数据来自各个壳自己上报的心跳。心跳超过 10 分钟没更新就算「哑了」。</p>
+  {alert_block}
   <table>
     <thead><tr><th>壳</th><th>状态</th><th>是什么</th><th>最后心跳</th><th>快照</th><th>说明</th></tr></thead>
     <tbody>{''.join(rows)}</tbody>
@@ -412,6 +429,24 @@ class WardenServer:
                 if not sent:
                     return _err(500, "一个封包都没发出去：" + "; ".join(failures), "wake_failed")
                 return _ok(sent=sent, failed=failures)
+
+            # ---- POST /alert ----（守夜人把"外面看到的事"写进账本）
+            #
+            # 为什么不是"网关照进来查 docker"：账本要能在裸 python 上跑，
+            # 而且 docker socket 是 root 权限 —— 让账本去碰它是把攻击面放大。
+            # 反过来由守夜人主动报，账本只负责记下来并念给人听。
+            if head == "alert" and parts[1:2] == [] and method == "POST":
+                kind = str(body.get("kind") or "").strip()
+                message = str(body.get("message") or "").strip()
+                if not kind or not message:
+                    return _err(400, "告警要有 kind 和 message", "bad_request")
+                alert = self.warden.record_alert(
+                    kind,
+                    message,
+                    shell=str(body.get("shell") or ""),
+                    detail=body.get("detail"),
+                )
+                return _ok(alert=alert)
 
             # ---- POST /power ----（「走」和「关」是两件事，这是第二件）
             if head == "power" and parts[1:2] == [] and method == "POST":
