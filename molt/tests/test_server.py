@@ -502,3 +502,26 @@ def test_an_arrival_receipt_without_a_shell_is_refused(tmp_path):
     server = srv.WardenServer(root=tmp_path)
     resp = server.dispatch("POST", "/arrival", {"generation": 8, "delivered": True})
     assert resp.status in (400, 422)
+
+def test_posting_a_policy_with_a_signature_does_not_look_like_a_bad_key(tmp_path):
+    """`by` 是传输层的署名，不该被当成策略里"不认识的键"（真机踩过）。"""
+    server = WardenServer(root=tmp_path)
+
+    resp = server.dispatch(
+        "POST",
+        "/policy",
+        {
+            "id": "morning-home",
+            "enabled": True,
+            "source": "desk-box",
+            "target": "nas-box",
+            "schedule": "09:00",
+            "window_minutes": 30,
+            "daily_limit": 1,
+            "by": "lead",
+        },
+    )
+
+    assert resp.status == 200, resp.payload
+    assert resp.payload["policy"]["id"] == "morning-home"
+    assert "by" not in resp.payload["policy"]

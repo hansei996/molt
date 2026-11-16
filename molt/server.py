@@ -480,9 +480,11 @@ class WardenServer:
                 )
 
             if head == "policy" and parts[1:2] == [] and method == "POST":
-                policy = self.warden.set_policy(
-                    body, by=str(body.get("by") or "")
-                )
+                # by 是传输层的署名，不属于策略本身 —— 一起塞进去会被
+                # policy_problems() 当成"不认识的键"拒收（真机踩过）。
+                raw = dict(body or {})
+                by = str(raw.pop("by", "") or "")
+                policy = self.warden.set_policy(raw, by=by)
                 return _ok(policy=policy)
 
             if head == "policy" and parts[1:2] == ["off"] and method == "POST":
