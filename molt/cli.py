@@ -26,7 +26,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
+import shutil
 import socket
 import sys
 import tempfile
@@ -1494,6 +1496,34 @@ def _do_checkout(
     return 0, gen, dest_dir, archive_info
 
 
+def _work_root(data_dir: Path) -> Path:
+    """临时工作目录放在"数据那台磁盘"上，而不是 /tmp。
+
+    2026-11-16 在 NAS 上炸过一次：这台机器的 /tmp 是 3.8 GB 的 tmpfs，
+    `cmd_backup` 用 mkdtemp 把数据目录复制进去、又从来没删过，
+    结果 72 个 `molt-backup-*` 目录占掉 2.6 GB、66 个 tar.gz 占掉 665 MB，
+    /tmp 直接 100% 满 —— 之后 `docker exec` 报 `no space left on device`，
+    SQLite 报 `database or disk is full`，整台机器的服务开始写不进临时文件。
+
+    所以临时目录必须跟数据在同一块盘上（`<data 的父目录>/.molt-work`），
+    并且**用完就删**。`MOLT_WORK_DIR` 可以覆盖。
+    """
+    override = os.environ.get("MOLT_WORK_DIR", "").strip()
+    if override:
+        base = Path(override)
+    else:
+        try:
+            base = Path(data_dir).resolve().parent / ".molt-work"
+        except OSError:
+            base = Path(tempfile.gettempdir()) / "molt-work"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        base = Path(tempfile.gettempdir()) / "molt-work"
+        base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
 def cmd_backup(args: argparse.Namespace) -> int:
     """把当前状态热备一份、推给 Warden 的 `backups/`。
 
@@ -1532,7 +1562,21 @@ def cmd_backup(args: argparse.Namespace) -> int:
     except (TypeError, ValueError):
         latest = 0
 
-    gen_dir = Path(tempfile.mkdtemp(prefix="molt-backup-"))
+    gen_dir = Path(tempfile.mkdtemp(prefix="molt-backup-", dir=_work_root(Path(data_dir))))
+    try:
+        return _run_backup(args, be, data_dir, shell, latest, gen_dir)
+    finally:
+        shutil.rmtree(gen_dir, ignore_errors=True)
+
+
+def _run_backup(
+    args: argparse.Namespace,
+    be: Any,
+    data_dir: str,
+    shell: str,
+    latest: int,
+    gen_dir: Path,
+) -> int:
     rc, _artifacts, manifest = _snapshot_payload(
         src=data_dir,
         dest_dir=gen_dir,
@@ -1544,7 +1588,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
     if rc != 0 or manifest is None:
         return rc or 4
 
-    archive_path = gen_dir.parent / f"backup-{int(time.time())}.tar.gz"
+    archive_path = _work_root(Path(data_dir)) / f"backup-{int(time.time())}.tar.gz"
     info("打包 …")
     archive = make_archive(gen_dir, archive_path)
     print(
@@ -1572,6 +1616,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
         return 4
 
     ok(f"已收进 backups/：{meta.get('name', '?')}")
+    archive_path.unlink(missing_ok=True)
     kv("字节", meta.get("bytes", 0))
     kv("第几次搬家之后", f"{move_count_after(latest)}（这一份是它之后的全部增量）")
     dim("  它不会出现在 molt status 的迁徙历史里 —— 备份不是交接。")
