@@ -130,3 +130,22 @@ def test_one_generation_is_pushed_once(tmp_path):
     again = notify.NotifyState(tmp_path / notify.STATE_FILENAME)
     assert json.loads((tmp_path / notify.STATE_FILENAME).read_text("utf-8"))["pushed_generation"] == 37
     assert notify.should_push(again, 37) is False
+
+
+def test_the_notify_route_imports_the_request_proxy():
+    """`plugin/api.py` 的 `/notify` 要读请求体 —— 少了这个 import 就是 500。
+
+    这条是真机上抓到的：`NameError: name 'request' is not defined`，
+    而 AstrBot 只把它变成一个没有内容的 "Internal server error"。
+    """
+    import importlib.util
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    name = "molt_api_notify_probe"
+    spec = importlib.util.spec_from_file_location(name, root / "plugin" / "api.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+
+    assert hasattr(module, "request"), "api.py 必须从 astrbot.api.web 导入 request"

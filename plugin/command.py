@@ -188,6 +188,9 @@ POWER_WORDS = {
 }
 HELP_WORDS = {"help", "?", "帮助", "怎么用"}
 
+#: 到点前那条提醒里写着「回 /molt stop-auto」—— 这条命令必须短到能在那 60 秒里敲完。
+STOP_AUTO_WORDS = {"stop-auto", "停自动", "别自动", "取消自动"}
+
 
 def normalize_args(raw: str) -> str:
     """把用户敲的参数折成四种意图之一，认不出来就返回 `""`。
@@ -214,6 +217,8 @@ def normalize_args(raw: str) -> str:
         return "help"
     if first in POWER_WORDS:
         return POWER_WORDS[first]
+    if first in STOP_AUTO_WORDS:
+        return "stop-auto"
     return ""
 
 
@@ -544,7 +549,20 @@ class MoltMover:
             return self._cancel()
         if want in POWER_WORDS:
             return self.request_power(cfg, POWER_WORDS[want])
+        if want == "stop-auto":
+            return self.stop_auto()
         return Reply(self._help_text(cfg))
+
+    def stop_auto(self) -> Reply:
+        """立刻关掉自动搬家 —— 提醒里那 60 秒就是给人敲这条的。"""
+        backend = getattr(self, "_backend", None)
+        if backend is None:
+            return Reply("我这里没有账本的连接，关不掉自动搬家。请用 `molt policy off`。")
+        try:
+            backend.clear_policy()
+        except MoltError as exc:
+            return Reply(f"关不掉：{exc}")
+        return Reply("好，自动搬家关掉了。这一轮我不动，你想搬的时候再说。")
 
     def request_power(self, cfg: Settings, action: str) -> Reply:
         """我走了以后，那台机器关不关 —— 第二张票，和「走不走」分开。

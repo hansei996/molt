@@ -4234,3 +4234,31 @@ await platform.send_by_session(
 
 判据：9 条 `molt/tests/test_plugin_notify.py` + 真机 `POST /notify-arrival`
 返回 `{"success":true,"state":"delivered"}`（2026-11-17 01:33，主人 QQ 收到）。
+
+### 14.26 到点之前先问一句：提醒是体验，不是前置条件（2026-11-17）
+
+主人：「改吧，一切以体验优先」。M2 到点就搬，问题不在搬，而在**它一句话都不说就动手**。
+
+三条边界：
+
+| 场景 | 行为 |
+|---|---|
+| 发了提醒，主人回 `/molt stop-auto` | 这一轮不动，账本记 `skipped`，鱼留在原地 |
+| 发了提醒，主人没回 | 等满 60 秒照原计划搬 |
+| 提醒根本发不出去 | 照搬。**提醒是体验，不是前置条件** —— 因为它发不出去的原因通常正是"鱼在搬家的路上" |
+
+实现：`AUTOPILOT_NOTICE_SECONDS = 60.0`；`agent.maybe_auto_migrate` 在 `migrate_argv` 之前 `_send_notice`，
+随后 `_wait_grace(policy)` 每 5 秒重读账本的 `policy`，看到"被关掉"就放弃这一轮。
+发送走 `molt.control.push_text` → 插件 `POST /notify` → `notify.push_arrival`（和落地播报同一条通道）。
+
+两个真 bug（都是真机抓的，不是推演出来的）：
+
+1. `plugin/api.py` 的 `/notify` 少了 `from astrbot.api.web import request` —— 真机表现是
+   **`{"status":"error","message":"Internal server error"}`**，没有原因、没有行号。补 import 并通过
+   `test_the_notify_route_imports_the_request_proxy` 钉住。
+2. `_record_attempt(...)` 被传了它不接受的 `generation=` —— 这条只在"提醒之后主人回话"的分支里走到，
+   而那条分支在修之前没有测试覆盖。补 `test_turning_it_off_during_the_grace_period_stops_the_move`。
+
+判据：`test_auto_migrate.py` 14 条（含"提醒失败不拦路"与"宽限期被关掉就不搬"）、
+全量 **1215 passed**、真机 `push_text -> True`（主人 QQ 收到自测消息）。
+

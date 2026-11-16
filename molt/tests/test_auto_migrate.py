@@ -105,6 +105,8 @@ def due_now(monkeypatch):
 def _agent(**kw):
     a = agent.Agent(settings=_settings(**kw), state_path=Path("/tmp/m2-agent-state.json"))
     a.port_probe = lambda **_: True
+    # 单元测试不等真实的 60 秒宽限期；要测宽限期的用例自己调小 notice_seconds。
+    a.notice_seconds = 0.0
     return a
 
 
@@ -288,3 +290,54 @@ def test_power_off_is_off_by_default_in_the_policy():
     policy = autopilot.normalize_policy({"id": "x", "source": "a", "target": "b"})
     assert policy["power_off_source"] is False
     assert policy["power_action"] == "shutdown"
+
+
+def test_it_says_something_before_it_leaves(monkeypatch):
+    """到点先发一句提醒 —— 主人 2026-11-17 的"体验优先"。"""
+    monkeypatch.setattr(time, "time", lambda: _at(23, 35))
+    a = _agent()
+    runner = FakeRunner()
+    a.migrate_runner = runner
+    said = []
+    a.notice_sender = lambda text: said.append(text) or True
+    a.notice_seconds = 0  # 单测不要真等 60 秒
+
+    step = a.maybe_auto_migrate({}, status(), None)
+
+    assert said and "我准备搬去" in said[0]
+    assert TARGET in said[0] and "/molt stop-auto" in said[0]
+    assert step is not None and step.ok
+    assert runner.calls, "提醒之后仍然要真的搬"
+
+
+def test_a_failed_notice_does_not_block_the_move(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: _at(23, 35))
+    a = _agent()
+    runner = FakeRunner()
+    a.migrate_runner = runner
+    a.notice_sender = lambda text: False
+    a.notice_seconds = 0
+
+    step = a.maybe_auto_migrate({}, status(), None)
+
+    assert step is not None and step.ok
+    assert runner.calls, "提醒是体验，不是前置条件"
+
+
+def test_turning_it_off_during_the_grace_period_stops_the_move(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: _at(23, 35))
+    a = _agent()
+    runner = FakeRunner()
+    a.migrate_runner = runner
+    a.notice_sender = lambda text: True
+    a.notice_seconds = 0.01
+    # 宽限期里再看一眼账本：主人已经把策略关了
+    monkeypatch.setattr(a, "_fresh_status", lambda: {"policy": {"id": "night-home", "enabled": False}})
+    seen = []
+    a.attempt_sender = lambda result, **kw: seen.append((result, kw)) or True
+
+    step = a.maybe_auto_migrate({}, status(), None)
+
+    assert step is not None and not step.ok
+    assert runner.calls == [], "主人回话了就不许搬"
+    assert seen and seen[-1][0] == "skipped"

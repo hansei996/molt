@@ -67,6 +67,10 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 # 拉起来之后多久之内不再拉第二次。AstrBot 冷启动到 6199 在听实测 20–30 秒，
 # 这里给到 180 秒：宁可多等一轮，也不要一个壳里冒出两只鱼。
 BOOT_COOLDOWN_SECONDS = 180.0
+
+# 到点搬家之前先发一条提醒，然后留这么长时间让人回话。
+# 60 秒是"够看清一句话"的长度：再短就变成通知，再长会错过这一次窗口。
+AUTOPILOT_NOTICE_SECONDS = 60.0
 # `molt land` 落位到一半时留在目标 data 目录里的标记。名字必须与
 # `molt/transfer.py` 的 `RESTORE_MARKER_NAME` 完全一致 ——
 # `molt/tests/test_hardening_atomicity.py` 里有一条测试钉住这件事。
@@ -506,6 +510,8 @@ class Agent:
     shell_attr_sender: Optional[Callable[..., bool]] = None
     #: 自动搬家（M2）的结果写回账本；None = 不记（测试/离线）。
     attempt_sender: Optional[Callable[..., bool]] = None
+    notice_sender: Optional[Callable[[str], bool]] = None
+    notice_seconds: float = AUTOPILOT_NOTICE_SECONDS
     #: M2 链式收尾：搬完之后给旧壳放一张关机票（走 /power，不新开旁路）。
     power_requester: Optional[Callable[..., Any]] = None
     #: 等新壳回执落地播报。注入后测试不必真的睡。
@@ -667,6 +673,21 @@ class Agent:
             # AstrBot 没在跑就别搬：没有可停的东西，快照也是空的。
             return None
 
+        notice = (
+            f"我准备搬去 **{target}** 了 —— {why}。\n"
+            f"到了之后会把 **{self.settings.shell}** 关掉。\n"
+            f"不想让我走就回 `/molt stop-auto`，{int(self.notice_seconds)} 秒内说还来得及。"
+        )
+        self._send_notice(notice)
+        if self.notice_seconds > 0 and not self._wait_grace(policy):
+            self._record_attempt(
+                "skipped",
+                reason="提醒之后主人把自动搬家关掉了 —— 这一轮不动",
+                policy_id=str(policy.get("id") or ""),
+            )
+            self.log("· 主人关了自动搬家，这一轮不搬")
+            return StepResult("auto-migrate", False, "提醒之后策略被关掉")
+
         argv = self.migrate_argv(target)
         self.log(f">>> 自动搬家（{policy.get('id')}）：{self.settings.shell} -> {target}，因为{why}")
         state["auto_migrate_running"] = True
@@ -792,6 +813,38 @@ class Agent:
                 return True
             time.sleep(min(5.0, max(0.2, deadline - time.time())))
         return False
+
+    def _send_notice(self, text: str) -> bool:
+        """把"我准备走了"发出去。发不出去不拦路 —— 但会写在日志里。"""
+        if self.notice_sender is None:
+            self.log("! 没有发提醒的通道（notice_sender 没注入）—— 这一轮会悄悄搬")
+            return False
+        try:
+            ok = bool(self.notice_sender(text))
+        except Exception as exc:  # pragma: no cover - 防御性
+            self.log(f"! 提醒没发出去：{exc}")
+            return False
+        self.log("· 已经先跟主人说了一声，等回话" if ok else "! 提醒没发出去（通道说失败）")
+        return ok
+
+    def _wait_grace(self, policy: dict) -> bool:
+        """宽限期里每 5 秒看一眼策略还在不在。
+
+        返回 False 表示"主人关掉了"。看不到账本时按"还在"处理 ——
+        一次网络抖动不该让计划好的搬家黄掉，而真正的关闭会被下一轮读到。
+        """
+        deadline = time.time() + max(0.0, float(self.notice_seconds))
+        policy_id = str(policy.get("id") or "")
+        while time.time() < deadline:
+            time.sleep(min(5.0, max(0.0, deadline - time.time())))
+            try:
+                status = self._fresh_status()
+            except Exception:  # pragma: no cover - 防御性
+                continue
+            current = (status or {}).get("policy") or {}
+            if not current or not current.get("enabled") or str(current.get("id") or "") != policy_id:
+                return False
+        return True
 
     def _record_attempt(self, result: str, *, reason: str, policy_id: str) -> None:
         sender = getattr(self, "attempt_sender", None)
@@ -1771,6 +1824,24 @@ def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+def _notice_sender(settings):
+    """把"我准备走了"这条提醒送出去的闭包。
+
+    走的是 dashboard 的 HTTP 接缝（`molt.control.push_text`），因为它跑在
+    AstrBot 进程**外面** —— 这里没有任何平台对象可用。
+    """
+
+    def send(text: str) -> bool:
+        from ..control import push_text
+
+        cfg = Path(str(settings.data_dir)) / "cmd_config.json"
+        return push_text(
+            cfg, text, base=f"http://127.0.0.1:{int(settings.port)}"
+        )
+
+    return send
+
+
 def main(argv: Optional[list] = None) -> int:
     _setup_console()
     parser = argparse.ArgumentParser(
@@ -1806,6 +1877,7 @@ def main(argv: Optional[list] = None) -> int:
         power_ack_sender=warden.power_ack,
         shell_attr_sender=warden.set_shell,
         attempt_sender=warden.record_attempt,
+        notice_sender=_notice_sender(settings),
         power_requester=warden.request_power,
         port_probe=lambda port: _port_open("127.0.0.1", port),
         spawner=_default_spawn,

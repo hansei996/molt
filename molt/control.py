@@ -129,6 +129,38 @@ def read_dashboard_credentials(config_path) -> tuple[str, str]:
 # ---------------------------------------------------------------------- 客户端
 
 
+def push_text(
+    config_path,
+    text: str,
+    *,
+    base: str = "http://127.0.0.1:6199",
+    timeout: float = 20.0,
+) -> bool:
+    """用 dashboard 的 JWT 打插件的 `/notify`，把一句话送到主人私聊里。
+
+    返回 False 只表示"这次没送出去"（没配 secret、连不上、插件没升级）。
+    调用方（守护进程）**不该因此放弃搬家** —— 提醒是体验，不是前置条件。
+    """
+    secret, user = read_dashboard_credentials(config_path)
+    if not secret:
+        return False
+    body = json.dumps({"text": str(text)}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        f"{str(base).rstrip('/')}/api/plug/astrbot_plugin_molt/notify",
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {sign_dashboard_jwt(secret, user)}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= int(getattr(resp, "status", 200)) < 300
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
 class AstrBotControl:
     """对一个 AstrBot 实例的控制面。"""
 

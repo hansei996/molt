@@ -24,6 +24,16 @@
 只发给最近一次私聊的那个人、读不到路由就不发、发不出去如实报错，一代只发一次。
 真机 `POST /notify-arrival` 返回 `state=delivered`。
 
+### 到点之前先问一句（2026-11-17）
+
+自动搬家（M2）在动手前会先在 QQ 里说一句「我准备搬去 X 了」，并留 60 秒给人回
+`/molt stop-auto`。提醒发不出去也照搬 —— 提醒是体验，不是前置条件。
+
+- `molt/daemon/agent.py`：`AUTOPILOT_NOTICE_SECONDS`、`_send_notice`、`_wait_grace`
+- `molt/control.py`：`push_text()`（自签 JWT 打插件 `/notify`）
+- `plugin/api.py`：`POST /notify`（并补上漏掉的 `request` import —— 真机表现是空白的 500）
+- `plugin/command.py`：`/molt stop-auto`（`stop-auto` / `停自动` / `别自动` / `取消自动`）
+
 ### M2 链式收尾：搬完再关旧壳（2026-11-17）
 
 `molt policy set … --power-off` 之后，策略会在**确认新壳接走 + 落地播报已送达**

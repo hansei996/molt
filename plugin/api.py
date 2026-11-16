@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from astrbot.api.web import request
 from quart import jsonify
 
 logger = logging.getLogger("Molt.ControlApi")
@@ -52,6 +53,12 @@ class MoltControlApi:
             ("/drain", self.drain, ["POST"], "Molt 控制面：断开所有平台适配器（幂等）"),
             ("/resume", self.resume, ["POST"], "Molt 控制面：重新连上 drain 过的平台"),
             ("/checkpoint", self.checkpoint, ["POST"], "Molt 控制面：把 WAL 合并进主库"),
+            (
+                "/notify",
+                self.notify_text,
+                ["POST"],
+                "Molt 控制面：代别人说一句话（自动搬家前的提醒用）",
+            ),
             (
                 "/observe",
                 self.observe,
@@ -79,6 +86,30 @@ class MoltControlApi:
             len(specs),
             API_PREFIX,
         )
+
+    async def notify_text(self):
+        """把一段文本发到主人最近那个私聊里 —— 只用于自动搬家前的提醒。"""
+        from pathlib import Path
+
+        from . import notify
+
+        try:
+            payload = await request.json(default={}) or {}
+        except Exception as exc:  # noqa: BLE001 —— 解析失败要说清是什么
+            return self._err(f"请求体读不出来：{type(exc).__name__}: {exc}", 400)
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return self._err("没有可发的内容", 400)
+        try:
+            cfg = self.plugin._mover.settings()
+            got = await notify.push_arrival(
+                self.plugin.context, data_dir=Path(cfg.data_dir), text=text
+            )
+        except Exception as exc:  # noqa: BLE001 —— 别把原因吞成 500
+            return self._err(f"{type(exc).__name__}: {exc}", 500)
+        if got.get("state") == "delivered":
+            return self._ok(**got)
+        return self._err(got.get("reason") or "没发出去", 502)
 
     async def notify_arrival(self):
         """主动发一条落地消息 —— 只在自测/补发时手动调用。"""
