@@ -91,7 +91,9 @@ class MoltControlApi:
         status = self.plugin._mover.ledger_status() or {}
         latest = status.get("latest_generation") or {}
         number = int(latest.get("number") or 0)
-        text = notify.compose_arrival_push(generation=number)
+        from .main import _prettify
+
+        text = notify.compose_arrival_push(label=_prettify(cfg.shell), generation=number)
         got = await notify.push_arrival(self.plugin.context, data_dir=Path(cfg.data_dir), text=text)
         if got.get("state") == "delivered":
             state.mark(number, "delivered (manual)")
