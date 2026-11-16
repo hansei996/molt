@@ -215,6 +215,22 @@ def decide(
                 )
             )
 
+    prev_container = previous.get("container") or {}
+    if running is True and prev_container.get("running") is False:
+        # 从"停着"变回"在跑"：要把这件事说出来。
+        # 否则那条 fish-down 会一直挂在 `/where` 上，下一次真出事时
+        # 人已经学会忽略这个红条了。
+        alerts.append(
+            Alert(
+                "fish-back",
+                "容器又跑起来了（上一轮它还是停着的）。",
+                {
+                    "started_at": container.get("started_at"),
+                    "previous_finished_at": prev_container.get("finished_at"),
+                },
+            )
+        )
+
     if running is True and who and who != shell:
         alerts.append(
             Alert(

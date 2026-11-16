@@ -365,3 +365,25 @@ def test_the_server_refuses_an_empty_alert(tmp_path):
     srv = WardenServer(root=tmp_path / "root", token="t")
     r = srv.dispatch("POST", "/alert", {"kind": "fish-down"})
     assert r.status == 400
+
+
+def test_coming_back_is_reported_so_the_red_banner_does_not_rot():
+    got = nw.decide(
+        container=_container(running=True, status="running"),
+        ledger=_ledger("desk-box"),
+        flag={"exists": False},
+        previous={"container": {"running": False, "finished_at": "2026-11-16T15:29:07Z"}},
+        shell="nas-box",
+    )
+    assert "fish-back" in [a.kind for a in got]
+
+
+def test_a_container_that_was_already_running_is_not_a_recovery():
+    got = nw.decide(
+        container=_container(running=True, status="running"),
+        ledger=_ledger("nas-box"),
+        flag={"exists": False},
+        previous={"container": {"running": True}},
+        shell="nas-box",
+    )
+    assert got == []
