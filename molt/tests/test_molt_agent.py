@@ -343,7 +343,10 @@ def test_land_failure_does_not_advance_state(tmp_path):
     assert land.ok is False
     assert "退出码 4" in land.detail
     assert spawned == []
-    assert a.load_state() == {}
+    # 落位失败不能推进任何**有意义**的进度。`last_tick_at` 不算进度：
+    # 它是"这一轮我还活着"的戳（agent-guard 靠它区分"闲着"和"卡死"），
+    # 每轮都会写一次，任何分支都一样。
+    assert a.load_state().keys() - {"last_tick_at"} == set()
 
 
 def test_switch_failure_does_not_boot(tmp_path):

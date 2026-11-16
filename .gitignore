@@ -43,3 +43,6 @@ tools/molt-agent.json
 tools/molt-homer.json
 tools/molt-agent-state.json
 tools/molt-homer-state.json
+
+# 运行期状态（守护进程自己写的，不该进仓库）
+tools/molt-agent-guard-state.json

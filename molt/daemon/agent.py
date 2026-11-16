@@ -1438,6 +1438,13 @@ class Agent:
     # -- 一轮 ------------------------------------------------------
     def run_once(self) -> Tuple[Decision, list]:
         state = self.load_state()
+        # 每一轮都摸一下状态文件（`last_tick_at` + mtime），哪怕这一轮什么都不做。
+        # 理由：`tools/agent-guard.ps1` 的判据是「进程在，但落盘停了 = 它不再干活」。
+        # 如果只有"有事发生"时才写盘，一个**健康但闲着**的 agent 和一个**卡死**的
+        # agent 在磁盘上长得一模一样（2026-11-17 03:02 实测：心跳 9 秒前，
+        # 状态文件 473 秒没动 —— 差点把活的判成死的）。
+        state["last_tick_at"] = time.time()
+        self.save_state(state)
         if self.status_fetcher is None:
             return Decision("error", "没有 status_fetcher"), []
         try:

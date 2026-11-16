@@ -4289,3 +4289,75 @@ await platform.send_by_session(
 判据：`test_auto_migrate.py` 20 条（出发/途中/快速搬家不补发/失败必说话/有人在用不关/
 安静够久才关/读不到不关），全量 **1221 passed**。**真机链路未验** —— 这一节写的是代码与判据。
 
+### 14.28 它死了，而没有任何东西会响（2026-11-17）
+
+Windows 上的 `molt-agent` 一晚上死了两次：01:19 死掉 25 分钟，02:06 前又死一次。
+它死的时候：
+
+* `agent.log` 停在一行普通的 `[idle] 快照 #37 我已经落过了`；
+* `agent.log.err` 末尾是一个 `^C`；
+* 账本那边什么都不缺，只是心跳慢慢变旧；
+* 而它**是早上 9 点那条自动搬家策略能不能触发的唯一前提**。
+
+三层东西各说各的真话，合起来在说谎：会话记录说"它刚刚还在"，日志说"没报错"，
+账本说"鱼在 desktop-h2kgiao 上"。**没有一层在回答"那个进程现在还在干活吗"。**
+
+#### 判据（`molt/agentwatch.py`）
+
+| 看到的事实 | 判决 | 为什么 |
+|---|---|---|
+| 进程不在 | `dead` | 不用看时间戳 |
+| 进程在，但状态文件 180 秒没更新 | **仍然 `dead`** | 卡死的进程在任务管理器里和正常进程长得一样，而它同样完成不了 09:00 那次搬家 |
+| 进程在、落盘在动、心跳停了 | `silent` | 主循环活着，多半是跟账本之间断了 |
+| 三样都读不到 | `unknown` | 宁可漏报也不误报 |
+
+**这一条判据逼出了一个被藏起来的缺陷**：agent 原来只在"有事发生"时才写盘，所以一个
+健康但闲着的 agent 和一个卡死的 agent 在磁盘上完全一样。2026-11-17 03:02 实测：
+心跳 9 秒前、状态文件 473 秒没动 —— 差一点把活的判成死的。现在 `run_once` 每轮写
+`last_tick_at` 并落盘：**"我还活着"必须留下痕迹，否则"它没在干活"这句话就无法被证明。**
+
+#### 上报（`tools/agent-guard.ps1`）
+
+读三件事（进程 / 状态文件 mtime / 账本心跳）→ 交给 `judge` → 非 `alive` 时 `POST /alert`。
+同类 1800 秒去重；恢复时补一条 `agent-back`，否则那条红条会永远挂在 `/where` 上，
+而人一旦学会忽略它，下一次真出事就没人在看。**它绝不重启进程** —— 那是要人拍板的事。
+
+三个实现坑，都是"脚本自己把结论弄脏了"：
+
+1. 判决**不能走 stdout**：`& python ... | Out-String` 会用控制台代码页（这台机器上是 GBK）
+   解码子进程输出，中文在拿到手之前已经变成 `??????`；
+2. alert body 必须自己 `[Text.Encoding]::UTF8.GetBytes` 后发，否则账本里存的是问号；
+3. `$PSScriptRoot` 在 `param` 默认值里是空的，只能进了函数体再算路径。
+
+#### 它怎么被拉起来
+
+`Startup\molt-guard.vbs` → `G:\molt-fish\molt-guard.cmd` → `tools/agent-guard-loop.py`（300 秒一轮）。
+本机 `Register-ScheduledTask` 连"当前用户"都报 `0x80070005`，所以先用登录循环兜住；
+`tools/install-agent-guard.ps1` 留着，有管理员权限时跑一次就升级成机器级任务。
+
+#### 真机验证
+
+三次 kill → restart：每次 `agent-dead` 都写进账本（`2026-11-17 03:08:44`，message 是正确中文），
+重启后补 `agent-back`（`03:09:04`）。判据：`molt/tests/test_agentwatch.py` 9 条 + `test_molt_agent.py` 79 条。
+
+#### 没做的那一半
+
+**自动拉起**。理由和守夜人不拉容器一样：一个会自己拉起 agent 的东西，也能在"它其实只是
+被主人关了 10 分钟"时把人吵醒、把两台机器都拉起来。这一半等主人点头（D15/E4）。
+
+### 14.29 E5 的接缝探到了（未实现，2026-11-17）
+
+要让"它知道自己刚搬过家"，需要的不是记忆，而是**一条只活在这一轮请求内存里的环境事实**。
+AstrBot 有这个接缝：
+
+* `@filter.on_llm_request()` → `call_event_hook(event, EventType.OnLLMRequestEvent, req)`
+  （`astrbot/core/pipeline/process_stage/method/agent_sub_stages/internal.py:307`）；
+* `ProviderRequest.extra_user_content_parts`（`astrbot/core/provider/entities.py:203`）的 docstring
+  就是为这个准备的：「用于在用户消息后添加额外的内容块（如系统提醒、指令等）」；
+* 它不写 `conversations`、不进 `memories` —— 与定案 A（接受为档案、不抬档位）不冲突。
+
+**卡点不在技术**：`astrbot_plugin_private_companion` 也挂了同一个钩子
+（`main.py:1369`、`:1705`、`:1714`），并直接改同一个 `extra_user_content_parts`
+（`astrbot_host/core_reply_perception.py:445-449`）。两个插件写同一个列表，
+接入前必须确认顺序与去重 —— 这不是"能不能做"，是"改了之后谁的标注还在"。
+
