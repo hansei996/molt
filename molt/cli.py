@@ -2548,7 +2548,10 @@ def _run_policy(be, args: argparse.Namespace, action: str) -> int:
         bad("这条策略还不能存：" + "；".join(problems))
         return 2
     got = be.set_policy(policy, by=args.by or "")
-    ok(f"存好了：{got.get('id')}（{got.get('source')} → {got.get('target')}）")
+    # 本地后端直接回策略本身，远端后端回 {"ok":…, "policy": {…}} —— 两种形状
+    saved = got.get("policy") if isinstance(got, dict) and "policy" in got else got
+    saved = saved or {}
+    ok(f"存好了：{saved.get('id')}（{saved.get('source')} → {saved.get('target')}）")
     dim("  它只在源壳上生效，而且到点之后还要过：鱼在这台机器上 / 没有租约 / 今天没超次数 / 不在冷却里。")
     dim("  撤销：molt policy off")
     return 0

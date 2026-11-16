@@ -209,3 +209,41 @@ def test_policy_commands_can_point_at_a_remote_ledger(tmp_path, capsys):
     assert rc == 2
     out = capsys.readouterr().out
     assert "127.0.0.1:1" in out
+
+def test_policy_set_prints_what_it_saved_even_from_a_remote_ledger(tmp_path, capsys):
+    """远端后端回 {"policy": {…}}，本地后端回策略本身 —— 两种都要念对。"""
+    import argparse
+
+    from molt.cli import cmd_policy
+
+    class FakeBackend:
+        kind = "remote"
+
+        def set_policy(self, policy, *, by=""):
+            return {"ok": True, "policy": dict(policy, created_by=by)}
+
+    import molt.cli as cli_mod
+
+    real = cli_mod._backend
+    cli_mod._backend = lambda args: FakeBackend()
+    try:
+        ns = argparse.Namespace(
+            policy_action="set",
+            root=None,
+            warden_url="http://x:1",
+            warden_token="t",
+            id="night-home",
+            source="a",
+            target="b",
+            at="23:30",
+            window_minutes=30,
+            daily_limit=2,
+            expires_at=0.0,
+            by="lead",
+        )
+        assert cmd_policy(ns) == 0
+    finally:
+        cli_mod._backend = real
+
+    out = capsys.readouterr().out
+    assert "存好了：night-home（a → b）" in out
