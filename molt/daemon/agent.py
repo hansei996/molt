@@ -50,6 +50,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
+try:  # 正常情况：作为 `molt.daemon.agent` 被 import
+    from .. import autopilot
+except ImportError:  # 被 `tools/molt-agent.py` 当脚本加载时
+    from molt import autopilot  # type: ignore[no-redef]
+
 ENCODING = "utf-8-sig"
 CONFIG_FILENAME = "molt-agent.json"
 STATE_FILENAME = "molt-agent-state.json"
@@ -57,6 +62,8 @@ SLEEP_TASK_NAME = "Molt-Sleep"
 DEFAULT_INTERVAL = 10.0
 DEFAULT_TIMEOUT = 15.0
 DEFAULT_PORT = 6199
+#: Windows 上起子进程时不弹黑框。0 在别的平台等价于不传。
+_CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 # 拉起来之后多久之内不再拉第二次。AstrBot 冷启动到 6199 在听实测 20–30 秒，
 # 这里给到 180 秒：宁可多等一轮，也不要一个壳里冒出两只鱼。
 BOOT_COOLDOWN_SECONDS = 180.0
@@ -207,6 +214,37 @@ class Warden:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return 200 <= resp.status < 300
         except Exception:  # noqa: BLE001 - 心跳永远不该把守护进程弄死
+            return False
+
+    def record_attempt(
+        self,
+        result: str,
+        *,
+        reason: str = "",
+        policy_id: str = "",
+        generation: int = 0,
+        by: str = "",
+    ) -> bool:
+        """把一次自动搬家的结果写进账本。失败只返回 False —— 不许把循环弄死。"""
+        body = json.dumps(
+            {
+                "result": result,
+                "reason": reason,
+                "policy_id": policy_id,
+                "generation": generation,
+                "by": by,
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self.base_url + "/policy/attempt",
+            data=body,
+            method="POST",
+            headers={"X-Molt-Token": self.token, "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return 200 <= resp.status < 300
+        except (urllib.error.URLError, OSError, ValueError):
             return False
 
     def set_shell(self, shell_id: str, attrs: dict, *, by: str = "") -> bool:
@@ -436,6 +474,10 @@ class Agent:
     power_ack_sender: Optional[Callable[[str], bool]] = None
     #: 启动时声明「这台机器是什么」。不注入就不声明（测试与 dry-run 用）。
     shell_attr_sender: Optional[Callable[..., bool]] = None
+    #: 自动搬家（M2）的结果写回账本；None = 不记（测试/离线）。
+    attempt_sender: Optional[Callable[..., bool]] = None
+    #: 跑 `molt migrate` 用的执行器（测试注入假 runner；默认 subprocess.run）。
+    migrate_runner: Optional[Callable[..., Any]] = None
     #: 已经声明过没有 —— 只声明一次，不是每轮都发。
     _shell_declared: bool = False
     port_probe: Optional[Callable[..., bool]] = None
@@ -533,6 +575,104 @@ class Agent:
         ) + (
             sum((["--keep-provider-source", str(x)] for x in (s.keep_provider_sources or [])), [])
         )
+
+    def migrate_argv(self, target: str) -> list:
+        """自动搬家（M2）用的 argv：**和手动那条命令是同一个子命令**。
+
+        唯一多出来的是 `--control-url/--control-config`：自动搬家没有人
+        在旁边看着，所以它必须自己先把这台壳的嘴按住（drain），
+        否则快照会拍到一半还在说的话。
+        """
+        s = self.settings
+        argv = [
+            s.python, "-m", "molt.cli", "migrate",
+            "--data", s.data_dir,
+            "--shell", s.shell,
+            "--target", target,
+            "--warden-url", s.warden_url,
+            "--warden-token", s.warden_token,
+            "--no-color",
+        ]
+        control_config = os.path.join(s.data_dir, "cmd_config.json")
+        if s.port and os.path.isfile(control_config):
+            argv += [
+                "--control-url", f"http://127.0.0.1:{int(s.port)}",
+                "--control-config", control_config,
+            ]
+        return argv
+
+    def maybe_auto_migrate(self, state: dict, status: dict, decision: Decision):
+        """M2：到点就搬 —— 但每一条边界都要成立。
+
+        返回 None 表示"这一轮什么都不做"；返回 StepResult 表示试过一次。
+        判据全在 `autopilot.due()` 里，这里只负责"真的鱼在我这儿"和"跑命令"。
+        """
+        if not self.settings.execute:
+            return None
+        if state.get("auto_migrate_running"):
+            return None
+        gen = status.get("latest_generation") or {}
+        if str(gen.get("consumed_by") or "") != self.settings.shell:
+            return None
+        lease = status.get("lease") or {}
+        if (lease or {}).get("holder"):
+            return None
+
+        policy = status.get("policy") or {}
+        attempts = status.get("attempts") or []
+        ok, why = autopilot.due(
+            policy, now=time.time(), shell=self.settings.shell, attempts=attempts
+        )
+        if not ok:
+            return None
+
+        target = str(policy.get("target") or "")
+        if not target or target == self.settings.shell:
+            return None
+        if not self._probe_port():
+            # AstrBot 没在跑就别搬：没有可停的东西，快照也是空的。
+            return None
+
+        argv = self.migrate_argv(target)
+        self.log(f">>> 自动搬家（{policy.get('id')}）：{self.settings.shell} -> {target}，因为{why}")
+        state["auto_migrate_running"] = True
+        self.save_state(state)
+        started = time.time()
+        try:
+            runner = self.migrate_runner or subprocess.run
+            cp = runner(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=900,
+                creationflags=_CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            out = ((cp.stdout or "") + (cp.stderr or "")).strip()
+            rc = int(cp.returncode)
+            result = "ok" if rc == 0 else "failed"
+            reason = f"退出码 {rc}：{out.splitlines()[-1][:200]}" if out else f"退出码 {rc}"
+        except subprocess.TimeoutExpired:
+            result = "failed"
+            reason = "自动搬家超过 900 秒还没结束，已放弃"
+        except OSError as exc:
+            result = "failed"
+            reason = f"起不来进程：{exc}"
+        finally:
+            state["auto_migrate_running"] = False
+            self.save_state(state)
+
+        self._record_attempt(result, reason=reason, policy_id=str(policy.get("id") or ""))
+        self.log(f"  {'✓' if result == 'ok' else '✗'} 自动搬家结束（{int(time.time() - started)} 秒）：{reason}")
+        return StepResult("auto_migrate", result == "ok", reason)
+
+    def _record_attempt(self, result: str, *, reason: str, policy_id: str) -> None:
+        sender = getattr(self, "attempt_sender", None)
+        if sender is None:
+            return
+        try:
+            sender(result, reason=reason, policy_id=policy_id, by="agent")
+        except Exception as exc:  # noqa: BLE001 —— 记账失败不能把循环弄死
+            self.log(f"! 自动搬家的结果没记进账本：{exc}")
 
     def switch_argv(self) -> list:
         s = self.settings
@@ -1030,6 +1170,13 @@ class Agent:
         # 端口漂了，壳起来之后每一条命令都会失败（连 3080 会被拒），而那个
         # 症状看起来像"服务没启动"。放最前面是因为它最便宜、也最容易被忽略。
         self.maybe_fix_dsh_port(state)
+
+        # M2：到点了就自己搬。放在最前面 —— 它成立的前提是"鱼就在这台机器上"，
+        # 而下面那些分支处理的都是"鱼已经走了"。
+        auto = self.maybe_auto_migrate(state, status, decision)
+        if auto is not None:
+            steps.append(auto)
+            return decision, steps
 
         # 鱼搬走了就关机 —— 这一代的目标不是我，而且没有租约在飞。
         # decide() 对"这一代不是给我的"返回 idle（也有可能是 wait），两种都算鱼走了；
@@ -1530,6 +1677,7 @@ def main(argv: Optional[list] = None) -> int:
         heartbeat_sender=warden.heartbeat,
         power_ack_sender=warden.power_ack,
         shell_attr_sender=warden.set_shell,
+        attempt_sender=warden.record_attempt,
         port_probe=lambda port: _port_open("127.0.0.1", port),
         spawner=_default_spawn,
         pid_probe=lambda: _listening_pid(settings.port),

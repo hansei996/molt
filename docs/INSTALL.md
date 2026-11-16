@@ -386,3 +386,14 @@ molt sync-plugins --data ./astrbot-data --shell nas-box --from my-laptop --apply
 
 不带 `--apply` 时一个字都不写。旧配置留成 `*.molt-before-sync-<时间戳>`，不会丢。
 只在一边装了的插件不会被安装、也不会有配置被写过去。
+
+## 6.8 让它到点自己搬（可选）
+
+```bash
+molt policy set --id night-home --source <来源壳> --target <目标壳> --at 23:30
+molt policy show
+molt policy off
+```
+
+这是 M2（定时自动，不需要确认）。默认每天最多 2 次、300 秒冷却；
+失败会写进账本 `attempts[]`，`/where` 与 `molt status` 都看得到。

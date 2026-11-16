@@ -499,6 +499,7 @@ class Warden:
             self._heartbeats = {}
             self._shells = {}
             self._alerts = []
+            self._attempts = []
             self._loaded = True
             return
 
@@ -529,6 +530,7 @@ class Warden:
             str(k): dict(v) for k, v in (raw.get("shells") or {}).items()
         }
         self._alerts = [dict(a) for a in (raw.get("alerts") or []) if isinstance(a, dict)]
+        self._attempts = [dict(a) for a in (raw.get("attempts") or []) if isinstance(a, dict)]
         self._loaded = True
 
     def _ensure_loaded(self) -> None:
@@ -548,6 +550,7 @@ class Warden:
             "heartbeats": self._heartbeats,
             "shells": self._shells,
             "alerts": self._alerts,
+            "attempts": self._attempts,
         }
 
     def save(self) -> None:
@@ -637,6 +640,9 @@ class Warden:
 
     MAX_ALERTS = 50
 
+    #: 自动搬家尝试最多留多少条（策略本身在 policy.json，不在 state.json）。
+    MAX_ATTEMPTS = 20
+
     def record_alert(
         self,
         kind: str,
@@ -673,6 +679,95 @@ class Warden:
         """最近几条告警，新的在后。"""
         self._ensure_loaded()
         return [dict(a) for a in self._alerts[-limit:]]
+
+    # ------------------------------------------------------- 自动搬家策略（M2）
+
+    def policy_path(self) -> Path:
+        """策略放哪。**不进 `state.json`**：策略是"当前允许什么"，
+        和关机票同一类；账本记的是已经发生过的事。"""
+        return self.root / "policy.json"
+
+    def policy_view(self) -> Dict[str, Any]:
+        """读策略。**读不到或读坏了都返回空字典** ——
+        一条读不出来的策略绝不能变成"允许自动搬家"。"""
+        from .autopilot import normalize_policy
+
+        try:
+            raw = json.loads(self.policy_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return normalize_policy(raw) if isinstance(raw, dict) else {}
+
+    def set_policy(self, policy: Dict[str, Any], *, by: str = "") -> Dict[str, Any]:
+        """写入（或覆盖）一条自动搬家策略。校验不过抛 `NeedsHuman`。"""
+        from .autopilot import normalize_policy, policy_problems
+
+        problems = policy_problems(policy)
+        if problems:
+            raise NeedsHuman("这条自动搬家策略还不能存：" + "；".join(problems))
+
+        data = normalize_policy(policy)
+        data["created_at"] = data["created_at"] or time.time()
+        data["created_by"] = data["created_by"] or by
+        _atomic_write_json(self.policy_path(), data)
+        self.append_log(
+            "INFO",
+            f"自动搬家策略：{data['id']}（{data['source']} -> {data['target']}，"
+            f"每天最多 {data['daily_limit']} 次，由 {data['created_by'] or '未署名'} 设定）",
+        )
+        return data
+
+    def clear_policy(self) -> bool:
+        """撤掉策略。**删文件**而不是写 `enabled: false`：
+        撤权要能一眼看出来，留一个"关着的策略"会让下一个人以为还有授权。"""
+        path = self.policy_path()
+        if not path.exists():
+            return False
+        try:
+            path.unlink()
+        except OSError:
+            return False
+        self.append_log("INFO", "自动搬家策略已撤销")
+        return True
+
+    def record_attempt(
+        self,
+        *,
+        result: str,
+        reason: str = "",
+        generation: int = 0,
+        policy_id: str = "",
+        by: str = "",
+    ) -> Dict[str, Any]:
+        """记一次**自动**尝试。`result` 取 `ok` / `failed` / `skipped`。"""
+        result = str(result or "").strip().lower()
+        if result not in ("ok", "failed", "skipped"):
+            raise NeedsHuman(f"不认识的结果：{result}（要 ok / failed / skipped）")
+
+        item = {
+            "at": time.time(),
+            "at_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "result": result,
+            "reason": str(reason or "")[:400],
+            "generation": int(generation or 0),
+            "policy_id": str(policy_id or ""),
+            "by": str(by or ""),
+        }
+        with self._lock():
+            self._reload_locked()
+            self._attempts.append(item)
+            self._attempts = self._attempts[-self.MAX_ATTEMPTS :]
+            self.save()
+        self.append_log(
+            "WARN" if result == "failed" else "INFO",
+            f"自动搬家尝试：{result}（{item['reason'] or '没有细节'}）",
+        )
+        return item
+
+    def attempts_view(self, *, limit: int = 20) -> List[Dict[str, Any]]:
+        """最近的自动尝试，新的在后。"""
+        self._ensure_loaded()
+        return [dict(a) for a in self._attempts[-limit:]]
 
     def status(self) -> Dict[str, Any]:
         """给 `molt status` 用的人类可读快照。
@@ -722,6 +817,8 @@ class Warden:
             "shells": self.shells_view(),
             "power": self.power_view(),
             "alerts": self.alerts_view(limit=5),
+            "policy": self.policy_view(),
+            "attempts": self.attempts_view(limit=5),
         }
 
     # ---------------------------------------------------------------- 心跳

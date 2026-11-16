@@ -181,6 +181,25 @@ def _where_html(status: Dict[str, Any]) -> str:
         else "账本里还没有任何一次搬家"
     )
 
+    policy = status.get("policy") or {}
+    attempts = status.get("attempts") or []
+    if policy:
+        auto_text = (
+            f'自动搬家：<b>{esc(policy.get("id"))}</b>（'
+            f'{esc(policy.get("source"))} → {esc(policy.get("target"))}，'
+            f'每天最多 {esc(policy.get("daily_limit"))} 次）'
+        )
+    else:
+        auto_text = "自动搬家：<span style=\"color:#98a2b3\">没有策略 —— 它不会自己搬</span>"
+    if attempts:
+        last = attempts[-1]
+        mark = {"ok": "✓", "failed": "✗", "skipped": "·"}.get(str(last.get("result")), "?")
+        color = "#b42318" if last.get("result") == "failed" else "#98a2b3"
+        auto_text += (
+            f'<br>最近一次自动尝试：<span style="color:{color}">{mark} '
+            f'{esc(last.get("at_readable"))} {esc(str(last.get("reason") or "")[:80])}</span>'
+        )
+
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -215,6 +234,7 @@ def _where_html(status: Dict[str, Any]) -> str:
     <div>租约：{lease_text}</div>
     <div>当前 epoch：<b>{esc(status.get('current_epoch'))}</b> ·
          已登记 <b>{esc(status.get('generation_count'))}</b> 份快照</div>
+    <div>{auto_text}</div>
   </div>
 </div>
 </body></html>"""
@@ -447,6 +467,40 @@ class WardenServer:
                     detail=body.get("detail"),
                 )
                 return _ok(alert=alert)
+
+            # ---- 自动搬家策略（M2）----
+            #
+            # 策略存在 policy.json（当前允许什么），尝试记录存在 state.json
+            # （已经发生过什么）。两者都不经过模型：自动模式不允许"它自己
+            # 决定改策略" —— 改授权是人的动作，被审计的也是人。
+            if head == "policy" and parts[1:2] == [] and method == "GET":
+                return _ok(
+                    policy=self.warden.policy_view(),
+                    attempts=self.warden.attempts_view(limit=10),
+                )
+
+            if head == "policy" and parts[1:2] == [] and method == "POST":
+                policy = self.warden.set_policy(
+                    body, by=str(body.get("by") or "")
+                )
+                return _ok(policy=policy)
+
+            if head == "policy" and parts[1:2] == ["off"] and method == "POST":
+                return _ok(cleared=self.warden.clear_policy())
+
+            if head == "policy" and parts[1:2] == ["attempt"] and method == "POST":
+                try:
+                    generation = int(body.get("generation") or 0)
+                except (TypeError, ValueError):
+                    generation = 0
+                attempt = self.warden.record_attempt(
+                    result=str(body.get("result") or ""),
+                    reason=str(body.get("reason") or ""),
+                    generation=generation,
+                    policy_id=str(body.get("policy_id") or ""),
+                    by=str(body.get("by") or ""),
+                )
+                return _ok(attempt=attempt)
 
             # ---- POST /power ----（「走」和「关」是两件事，这是第二件）
             if head == "power" and parts[1:2] == [] and method == "POST":

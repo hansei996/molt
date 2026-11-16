@@ -79,6 +79,23 @@ class LocalBackend:
     def set_shell(self, shell_id: str, **attrs: Any) -> Dict[str, Any]:
         return self.warden.set_shell(shell_id, **attrs)
 
+    # -- 自动搬家策略（M2）---------------------------------------------
+
+    def policy(self) -> Dict[str, Any]:
+        return {
+            "policy": self.warden.policy_view(),
+            "attempts": self.warden.attempts_view(limit=10),
+        }
+
+    def set_policy(self, policy: Dict[str, Any], *, by: str = "") -> Dict[str, Any]:
+        return self.warden.set_policy(policy, by=by)
+
+    def clear_policy(self) -> Dict[str, Any]:
+        return {"cleared": self.warden.clear_policy()}
+
+    def record_attempt(self, result: str, **kwargs: Any) -> Dict[str, Any]:
+        return {"attempt": self.warden.record_attempt(result=result, **kwargs)}
+
     def wake(self, mac: str, *, host: str = "", prefix_len: int = 24) -> Dict[str, Any]:
         """本地后端：就由这个进程发。它跑在宿主上，广播出得去。"""
         from .wake import magic_packet, wake_targets
@@ -317,6 +334,20 @@ class RemoteBackend:
 
     def history(self) -> Dict[str, Any]:
         return self.client.history()
+
+    # -- 自动搬家策略（M2）---------------------------------------------
+
+    def policy(self) -> Dict[str, Any]:
+        return self.client.policy()
+
+    def set_policy(self, policy: Dict[str, Any], *, by: str = "") -> Dict[str, Any]:
+        return self.client.set_policy(policy, by=by)
+
+    def clear_policy(self) -> Dict[str, Any]:
+        return self.client.clear_policy()
+
+    def record_attempt(self, result: str, **kwargs: Any) -> Dict[str, Any]:
+        return self.client.record_attempt(result, **kwargs)
 
     def wake(self, mac: str, *, host: str = "", prefix_len: int = 24) -> Dict[str, Any]:
         """远端后端：让账本那台机器发。容器里的广播出不了 docker0。"""

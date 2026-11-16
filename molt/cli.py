@@ -2472,6 +2472,76 @@ def cmd_shells(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy(args: argparse.Namespace) -> int:
+    """自动搬家策略（M2）：看、设、撤。
+
+    为什么策略要存在**账本**里、而不是守护进程的配置文件里：
+    ① 撤销要能立刻生效 —— 改本地文件得等那台机器下一轮读到；
+    ② 谁授权的要留得下来 —— 配置文件是"这台机器的脾气"，
+       策略是"人允许它做什么"；
+    ③ 自动搬家跑的那条命令本来就要读账本，多读一个字段不多一步。
+    """
+    be = _backend(args)
+    action = getattr(args, "policy_action", "") or "show"
+
+    if action == "show":
+        got = be.policy()
+        policy = got.get("policy") or {}
+        attempts = got.get("attempts") or []
+        if not policy:
+            warn("现在没有自动搬家策略 —— 只有你 /molt confirm 它才会动。")
+            dim("  设一条：molt policy set --id night-home --source <壳> --target <壳> --at 23:30")
+            return 0
+        head("自动搬家策略")
+        kv("id", policy.get("id", ""))
+        kv("开关", "开着" if policy.get("enabled") else "关着")
+        kv("从哪到哪", f"{policy.get('source')} → {policy.get('target')}")
+        kv("什么时候", json.dumps(policy.get("schedule"), ensure_ascii=False))
+        kv("每天最多", f"{policy.get('daily_limit')} 次")
+        expires = float(policy.get("expires_at") or 0)
+        kv("过期", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires)) if expires else "不过期")
+        if policy.get("created_by"):
+            kv("谁设的", str(policy["created_by"]))
+        if attempts:
+            head("最近几次自动尝试")
+            for item in attempts[-5:]:
+                mark = {"ok": "✓", "failed": "✗", "skipped": "·"}.get(item.get("result"), "?")
+                print(f"  {mark} {item.get('at_readable', '')}  {item.get('reason', '')[:80]}")
+        return 0
+
+    if action == "off":
+        got = be.clear_policy()
+        if got.get("cleared"):
+            ok("撤销了 —— 从现在起它不会自己搬任何东西。")
+        else:
+            info("本来就没有自动搬家策略。")
+        return 0
+
+    # set
+    from .autopilot import DEFAULT_DAILY_LIMIT, policy_problems
+
+    policy = {
+        "id": args.id,
+        "enabled": True,
+        "source": args.source,
+        "target": args.target,
+        "schedule": args.at,
+        "window_minutes": int(args.window_minutes or 0),
+        "daily_limit": int(args.daily_limit or DEFAULT_DAILY_LIMIT),
+        "expires_at": float(args.expires_at or 0.0),
+        "created_by": args.by or "",
+    }
+    problems = policy_problems(policy)
+    if problems:
+        bad("这条策略还不能存：" + "；".join(problems))
+        return 2
+    got = be.set_policy(policy, by=args.by or "")
+    ok(f"存好了：{got.get('id')}（{got.get('source')} → {got.get('target')}）")
+    dim("  它只在源壳上生效，而且到点之后还要过：鱼在这台机器上 / 没有租约 / 今天没超次数 / 不在冷却里。")
+    dim("  撤销：molt policy off")
+    return 0
+
+
 def cmd_declare(args: argparse.Namespace) -> int:
     """登记「这台机器是什么」。
 
@@ -3532,6 +3602,27 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--label", help="给人看的名字（不填就用壳名）")
     s.add_argument("--by", help="署名（写进账本的日志，方便事后追）")
     s.set_defaults(func=cmd_declare)
+
+    s = add("policy", "自动搬家策略（M2）：看、设、撤")
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    psub = s.add_subparsers(dest="policy_action", required=True)
+    p_show = psub.add_parser("show", help="看现在的策略与最近几次尝试")
+    p_show.add_argument("--root", help=argparse.SUPPRESS)
+    p_show.set_defaults(func=cmd_policy)
+    p_off = psub.add_parser("off", help="撤销策略（立刻生效）")
+    p_off.add_argument("--root", help=argparse.SUPPRESS)
+    p_off.set_defaults(func=cmd_policy)
+    p_set = psub.add_parser("set", help="设一条定时自动搬家策略")
+    p_set.add_argument("--root", help=argparse.SUPPRESS)
+    p_set.add_argument("--id", required=True, help="给它起个名字，比如 night-home")
+    p_set.add_argument("--source", required=True, help="在哪台壳上执行（通常是鱼现在所在的那台）")
+    p_set.add_argument("--target", required=True, help="自动搬去哪台壳")
+    p_set.add_argument("--at", required=True, help='时刻，比如 "23:30" 或 {"at": "23:30", "window_minutes": 45}')
+    p_set.add_argument("--window-minutes", type=int, default=0, help="窗口多长（默认用定时规则里的）")
+    p_set.add_argument("--daily-limit", type=int, default=0, help="每天最多自动搬几次（默认 2）")
+    p_set.add_argument("--expires-at", type=float, default=0.0, help="到什么时候自动失效（epoch 秒，0 = 不过期）")
+    p_set.add_argument("--by", default="", help="谁设的（留个名字）")
+    p_set.set_defaults(func=cmd_policy)
 
     # timeline
     s = add(

@@ -48,6 +48,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+try:  # 正常情况：作为 `molt.daemon.homer` 被 import
+    from .. import autopilot
+except ImportError:  # 被 `tools/molt-homer.py` 当脚本加载时
+    from molt import autopilot  # type: ignore[no-redef]
+
 ENCODING = "utf-8-sig"
 CONFIG_FILENAME = "molt-homer.json"
 STATE_FILENAME = "molt-homer-state.json"
@@ -245,6 +250,37 @@ class Warden:
         except Exception:  # noqa: BLE001 - 声明失败不该把守护进程弄死
             return False
 
+    def record_attempt(
+        self,
+        result: str,
+        *,
+        reason: str = "",
+        policy_id: str = "",
+        generation: int = 0,
+        by: str = "",
+    ) -> bool:
+        """记一次自动搬家的结果。失败只返回 False。"""
+        body = json.dumps(
+            {
+                "result": result,
+                "reason": reason,
+                "policy_id": policy_id,
+                "generation": generation,
+                "by": by,
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self.base_url + "/policy/attempt",
+            data=body,
+            method="POST",
+            headers={"X-Molt-Token": self.token, "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return 200 <= resp.status < 300
+        except (urllib.error.URLError, OSError, ValueError):
+            return False
+
     def power_ack(self, shell_id: str) -> bool:
         """销掉一张关机票。失败只返回 False —— 心跳与销票都不该弄死守护进程。"""
         payload = json.dumps({"shell": str(shell_id or "")}).encode("utf-8")
@@ -434,6 +470,10 @@ class Homer:
     status_fetcher: Optional[Callable[[], Dict[str, Any]]] = None
     log: Callable[[str], None] = _log_line
     power_ack_sender: Optional[Callable[[str], bool]] = None
+    #: 自动搬家（M2）的结果写回账本；None = 不记。
+    attempt_sender: Optional[Callable[..., bool]] = None
+    #: 跑 `molt migrate` 用的执行器（测试注入假 runner；默认 subprocess.run）。
+    migrate_runner: Optional[Callable[..., Any]] = None
     #: 启动时声明「这台机器是什么」。不注入就不声明（测试与 dry-run 用）。
     shell_attr_sender: Optional[Callable[..., bool]] = None
     _shell_declared: bool = False
@@ -776,6 +816,88 @@ class Homer:
             state["last_backup_at"] = now
             self.save_state(state)
 
+    def migrate_argv(self, target: str) -> List[str]:
+        """自动搬家（M2）的 argv —— 与手动那条命令同一个子命令。"""
+        s = self.settings
+        argv = [
+            s.python, "-m", "molt.cli", "migrate",
+            "--data", s.data_dir,
+            "--shell", s.shell,
+            "--target", target,
+            "--warden-url", s.warden_url,
+            "--warden-token", s.warden_token,
+            "--no-color",
+        ]
+        control_config = os.path.join(s.data_dir, "cmd_config.json")
+        port = int(s.dashboard_port or 0)
+        if port and os.path.isfile(control_config):
+            argv += [
+                "--control-url", f"http://127.0.0.1:{port}",
+                "--control-config", control_config,
+            ]
+        return argv
+
+    def maybe_auto_migrate(self, state: Dict[str, Any], status: Dict[str, Any]):
+        """M2：到点就搬。判据在 `autopilot.due()`，这里只核对"鱼真的在我这儿"。"""
+        if not self.settings.execute:
+            return None
+        if state.get("auto_migrate_running"):
+            return None
+        gen = status.get("latest_generation") or {}
+        if str(gen.get("consumed_by") or "") != self.settings.shell:
+            return None
+        lease = status.get("lease") or {}
+        if (lease or {}).get("holder"):
+            return None
+        if not self.container_running():
+            return None
+
+        policy = status.get("policy") or {}
+        attempts = status.get("attempts") or []
+        ok, why = autopilot.due(
+            policy, now=time.time(), shell=self.settings.shell, attempts=attempts
+        )
+        if not ok:
+            return None
+
+        target = str(policy.get("target") or "")
+        if not target or target == self.settings.shell:
+            return None
+
+        argv = self.migrate_argv(target)
+        self.log(f">>> 自动搬家（{policy.get('id')}）：{self.settings.shell} -> {target}，因为{why}")
+        state["auto_migrate_running"] = True
+        self.save_state(state)
+        started = time.time()
+        try:
+            runner = self.migrate_runner or subprocess.run
+            cp = runner(argv, capture_output=True, text=True, timeout=900)
+            out = ((cp.stdout or "") + (cp.stderr or "")).strip()
+            rc = int(cp.returncode)
+            result = "ok" if rc == 0 else "failed"
+            reason = f"退出码 {rc}：{out.splitlines()[-1][:200]}" if out else f"退出码 {rc}"
+        except subprocess.TimeoutExpired:
+            result = "failed"
+            reason = "自动搬家超过 900 秒还没结束，已放弃"
+        except OSError as exc:
+            result = "failed"
+            reason = f"起不来进程：{exc}"
+        finally:
+            state["auto_migrate_running"] = False
+            self.save_state(state)
+
+        self._record_attempt(result, reason=reason, policy_id=str(policy.get("id") or ""))
+        self.log(f"  {'✓' if result == 'ok' else '✗'} 自动搬家结束（{int(time.time() - started)} 秒）：{reason}")
+        return {"ok": result == "ok", "reason": reason, "kind": "auto_migrate"}
+
+    def _record_attempt(self, result: str, *, reason: str, policy_id: str) -> None:
+        if self.attempt_sender is None:
+            return
+        try:
+            self.attempt_sender(result, reason=reason, policy_id=policy_id, by="homer")
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"! 自动搬家的结果没记进账本：{exc}")
+
     def run_once(self) -> Dict[str, Any]:
         state = self.load_state()
         try:
@@ -794,6 +916,9 @@ class Homer:
             self.log(f"  ! {decision.reason}")
             return {"ok": False, "reason": decision.reason, "kind": "error"}
         if decision.kind == "idle":
+            auto = self.maybe_auto_migrate(state, status)
+            if auto is not None:
+                return auto
             self.log(f"  [{decision.kind}] {decision.reason}")
             # 「走」和「关」是两件事。这一代归对面了，那**这台机器关不关**
             # 由账本里的一张票回答。homer 永远不执行关机（它是账本宿主），
@@ -964,6 +1089,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         settings=settings,
         state_path=state_path,
         power_ack_sender=Warden(settings.warden_url, settings.warden_token).power_ack,
+        attempt_sender=Warden(settings.warden_url, settings.warden_token).record_attempt,
         shell_attr_sender=Warden(settings.warden_url, settings.warden_token).set_shell,
     )
     homer.run_forever(once=args.once)

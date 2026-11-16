@@ -1251,7 +1251,23 @@ netstat -ano | findstr :17863
 molt declare --shell desktop-h2kgiao --role desktop --wakeable --wake-mac D8-BB-C1-11-C3-D2
 ```
 
-### 交出去之后没被接走会怎样（1.3.1 起）
+### 让它到点自己搬（M2，1.3.1 起）
+
+```bash
+molt policy set --id night-home --source ugreen-776b-8b7896df --target desktop-h2kgiao \
+  --at 23:30 --window-minutes 30 --daily-limit 2 --expires-at 2026-12-31
+molt policy show
+molt policy off
+```
+
+生效条件（缺一不可）：目标壳已 `molt declare --wakeable --wake-mac <MAC>`、目标壳守护进程在跑、
+账本里没有租约、这台壳确实拿着最近一次快照。
+
+看不到它动，先看这三处：`molt policy show`（最近五次尝试）、`/where` 页面的
+「最近一次自动尝试」、`molt status` 的 `自动搬家` 行。
+**判不了就是不许搬** —— 规则写错、账本读不到、机器状态未知，一律当成"不搬"。
+
+## 交出去之后没被接走会怎样（1.3.1 起）
 
 它交出去之后会**等 180 秒**，看账本有没有写下「目标壳接走了」。
 

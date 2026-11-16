@@ -17,6 +17,20 @@
   没装的守护进程直接跳过。
  - 2026-11-15
 
+### M2：定时自动搬家（到点自己搬，不需要你确认）
+
+```bash
+molt policy set --id night-home --source ugreen-776b-8b7896df --target desktop-h2kgiao \
+  --at 23:30 --window-minutes 30 --daily-limit 2 --expires-at 2026-12-31
+molt policy show     # 现在允许什么 + 最近五次尝试
+molt policy off      # 立刻失效（删文件，不是改开关）
+```
+
+三道保险：①**判不了就是不许搬**（规则读不懂 / 账本读不到 / 机器状态未知 → 不搬）
+②**每天有上限 + 300 秒冷却**（默认每天 2 次）③**失败不吞**（账本 `attempts[]` 记账、
+`/where` 红字、下一次对话第一句交代）。前提：目标壳已 `molt declare --wakeable --wake-mac`，
+守护进程在跑，账本里没有租约。
+
 ### 两次确认：先问「要不要开机」，再问「要不要搬」
 
 - `/molt go` 先报目标壳是**开着还是关着**（看账本心跳，25 秒 + 观察窗口里
