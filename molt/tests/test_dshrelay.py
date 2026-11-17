@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
@@ -241,3 +243,49 @@ def test_the_cli_turns_a_relay_error_into_one_line_and_exit_two(tmp_path: Path) 
     assert main(["--no-color", "declare", "--shell", "box", "--role", "desktop", "--root", str(tmp_path)]) == 0
     rc = main(["--no-color", "dsh", "sessions", "--shell", "box", "--root", str(tmp_path)])
     assert rc == 2
+
+
+def test_the_cli_fails_loudly_in_a_fresh_process(tmp_path: Path) -> None:
+    """端到端：起一个**全新的 python 进程**跑 CLI，不替换任何模块。
+
+    2026-11-18 那次真机联调的教训：`LocalBackend` 上没有 `dsh` 时，CLI 抛出
+    `AttributeError` 却**返回退出码 0** —— 脚本那头只看见"成功"。单测如果靠
+    monkeypatch 把 `be.dsh` 换掉，就永远碰不到这条路径。
+
+    所以这条测试刻意做到两件事：
+      * 真的起子进程（不是调函数），环境与用户敲命令时一致
+      * 断言三件：退出码非 0 / 输出里有一句人话 / 输出里没有 Traceback
+    """
+
+    import subprocess
+
+    from molt.cli import main
+
+    assert main(["--no-color", "declare", "--shell", "box", "--role", "desktop", "--root", str(tmp_path)]) == 0
+
+    repo = Path(__file__).resolve().parents[2]
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "molt.cli",
+            "--no-color",
+            "dsh",
+            "sessions",
+            "--shell",
+            "box",
+            "--root",
+            str(tmp_path),
+        ],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    output = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode != 0, f"退出码居然是 0：\n{output}"
+    assert "molt declare --shell box --address" in output
+    assert "Traceback" not in output, output
+    assert "AttributeError" not in output, output
