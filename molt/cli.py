@@ -2723,6 +2723,9 @@ def cmd_dsh(args: argparse.Namespace) -> int:
         if failed:
             bad(failed[0])
             return 2
+        if getattr(args, "json", False):
+            print(json.dumps(value, ensure_ascii=False, indent=2))
+            return 0
         items = value.get("items") or []
         head(f"{shell} 上的会话")
         if not items:
@@ -2796,6 +2799,9 @@ def cmd_dsh(args: argparse.Namespace) -> int:
         if failed:
             bad(failed[0])
             return 2
+        if getattr(args, "json", False):
+            print(json.dumps(value, ensure_ascii=False, indent=2))
+            return 0
         ok(f"发出去了（{mode}）：{str(value)[:120]}")
         return 0
 
@@ -4077,6 +4083,7 @@ def build_parser() -> argparse.ArgumentParser:
     _warden_opts(d_sessions)
     d_sessions.add_argument("--shell", required=True, help="哪台机器（molt machine list 里看）")
     d_sessions.add_argument("--limit", type=int, default=10, help="最多列几个（默认 10）")
+    d_sessions.add_argument("--json", action="store_true", help="直接打原始 JSON（给脚本用）")
     d_sessions.set_defaults(func=cmd_dsh)
     d_history = dsub.add_parser("history", help="读某个会话的最近消息")
     _warden_opts(d_history)
@@ -4091,6 +4098,7 @@ def build_parser() -> argparse.ArgumentParser:
     d_send.add_argument("--session", required=True)
     d_send.add_argument("--steer", action="store_true", help="插进去改方向（默认排队，不打断）")
     d_send.add_argument("--dry-run", action="store_true", help="只打印要发什么，不发")
+    d_send.add_argument("--json", action="store_true", help="直接打对端返回的原始 JSON")
     d_send.add_argument("text", nargs="+", help="要说的话")
     d_send.set_defaults(func=cmd_dsh)
     d_call = dsub.add_parser("call", help="通用逃生口（方法仍在白名单内）")

@@ -860,41 +860,89 @@ molt dsh call     --shell desktop-h2kgiao --method session/list --args '{"_reque
 选 B 的话我会在文档里明确写清：**这条策略的语义是"到点就关，不看你正在干什么"**，
 并且把 `/molt keep` 这条出口的存在写进播报之外的地方（否则你只有 120 秒窗口能救）。
 
-## D20 · 把 DSH 的 3082 从局域网上收回去（**需要管理员权限，未执行** · 2026-11-18）
+## D20 · 把 DSH 的 3082 从局域网上收回去（**需要管理员权限，一条都没执行** · 2026-11-18）
 
-**现状（刚核过）**：`Get-NetTCPConnection -State Listen` 里
+### 现状（刚核过，可复跑）
+
+```powershell
+Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in 3082,6191,6199 } |
+  ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)  pid=$($_.OwningProcess)" }
+```
 
 ```
-0.0.0.0:3082  pid=21640   ← DSH 的 host 服务，局域网任何人都能直连
-0.0.0.0:6191  pid=21912   ← molt 的代转小口，有 token 但没有 IP 限制
+0.0.0.0:3082  pid=21640   ← DSH host 服务：无鉴权，局域网谁都能连
+0.0.0.0:6191  pid=21912   ← molt 代转小口：有 token，但没有 IP 限制
 127.0.0.1:6199 pid=10088  ← AstrBot dashboard（这个本来就是对的）
 ```
 
-**为什么必须收**：3082 上的 RPC 没有鉴权（我这一整条代转链就是靠"它只认回环"来兜底）。
-代转只是**绕开**它，没有**关掉**它 —— 同一个局域网里的人不需要任何 token 就能
-`session/list`、`session/prompt`。这跟「鱼常驻 NAS」没有关系，是这台 Windows 的暴露面。
+`is_admin=False`（`Register-ScheduledTask` 也报 `0x80070005`），所以下面三条**一条都没执行**。
 
-**收口方案（三选一，都需要管理员）**
+### A · 防火墙阻止 3082 的入站（推荐）
 
-| 方案 | 做法 | 效果 | 代价 |
-|---|---|---|---|
-| **A（推荐）** | 防火墙**阻止** 3082 的入站（所有 profile），只保留回环可用 | DSH 只有本机能连；代转小口仍打 `127.0.0.1:3082`，**链路不受影响** | Windows 防火墙通常不过滤回环流量，所以要实测一次"本机还能连、NAS 直连被拒" |
-| B | 防火墙**只允许** NAS 的 `192.168.50.50` 访问 3082 | 比现在窄，但 NAS 仍能直连（少一层中转） | 需要给 NAS 固定 IP（已有 DHCP 保留）；将来换机器要改规则 |
-| C | 改 DSH 的监听地址为 `127.0.0.1` | 最干净 | **目前找不到开关**：`app.asar`、`Preferences`、`cordis.yml`、命令行里都没有 bind 配置（2026-11-15 查过），所以 C 现在做不到 |
-
-**A 的具体命令**（有管理员权限时执行一次；两条我一律不代跑）：
+**前置**：管理员 PowerShell。**为什么推荐**：Windows 防火墙不过滤回环流量，所以
+`127.0.0.1:3082` 照旧可用 —— 代转链路（6191 → 回环 3082）不受影响，而局域网被切断。
 
 ```powershell
+# 执行（只有这一条）
 New-NetFirewallRule -DisplayName "molt: block DSH 3082 from LAN" `
   -Direction Inbound -Protocol TCP -LocalPort 3082 -Action Block -Profile Any
-# 回滚：Remove-NetFirewallRule -DisplayName "molt: block DSH 3082 from LAN"
 ```
 
-**验完怎么算成功**：从 NAS 上 `curl --max-time 4 http://192.168.50.63:3082/api/session/list -d '{}'`
-应该**失败**；同时本机 `curl http://127.0.0.1:3082/api/session/list` 仍 200，
-并且 `molt dsh sessions --shell desktop-h2kgiao` 仍然正常（走 6191 → 回环）。
+| 判据 | 怎么验 | 通过时应该看到 |
+|---|---|---|
+| 成功①局域网被切 | 在 **NAS** 上：`curl --max-time 4 -sS http://192.168.50.63:3082/api/session/list -d '{}'` | **超时 / 连接被拒**（不是 200） |
+| 成功②本机照旧 | 在 **Windows** 上：`curl -s http://127.0.0.1:3082/api/session/list -d '{}'` | **200**，能返 JSON |
+| 成功③代转照旧 | 在 **NAS** 上：`molt dsh sessions --shell desktop-h2kgiao` | 正常列出 184 个会话 |
+| 失败①（规则没生效） | 同成功① | 仍返回 200 → 规则没匹配上（检查 profile 是否 Any、端口是否 3082） |
+| 失败②（回环被误伤） | 同成功② | 本机也连不上 → 说明拦到了回环（少见，但要立刻回滚） |
 
-**顺带（同一个动作里可做）**：把 6191 也收窄到只允许 NAS 的 IP：
+**回滚**（一条）：
+
+```powershell
+Remove-NetFirewallRule -DisplayName "molt: block DSH 3082 from LAN"
+```
+
+验证回滚：NAS 上那条 `curl` 又能 200（说明回到现状）。
+
+**副作用 / 限制**：只挡入站 TCP；不影响本机任何进程。若将来 DSH 换了端口，这条规则失效但也不会有害。
+
+### B · 只允许 NAS（`192.168.50.50`）访问 3082
+
+**前置**：管理员；NAS 已有 DHCP 保留（`192.168.50.50`）。
+
+```powershell
+New-NetFirewallRule -DisplayName "molt: allow DSH 3082 from NAS only" `
+  -Direction Inbound -Protocol TCP -LocalPort 3082 -RemoteAddress 192.168.50.50 -Action Allow -Profile Any
+New-NetFirewallRule -DisplayName "molt: block DSH 3082 from others" `
+  -Direction Inbound -Protocol TCP -LocalPort 3082 -Action Block -Profile Any
+```
+
+| 判据 | 怎么验 | 通过时应该看到 |
+|---|---|---|
+| 成功①NAS 仍能直连 | NAS 上 `curl http://192.168.50.63:3082/api/session/list -d '{}'` | **200**（这是 B 与 A 的关键区别） |
+| 成功②别的机器被挡 | 任意第三台设备（手机/笔记本）打同一地址 | 超时 / 拒绝 |
+| 成功③本机照旧 | Windows `127.0.0.1:3082` | 200 |
+| 失败①NAS 也被挡 | 第一条规则 | NAS 超时 → 多半是 `RemoteAddress` 写错或 DHCP 换了 IP |
+| 失败②顺序写反 | 先 Block 后 Allow（Windows 防火墙 Block 优先） | NAS 也被挡 → 两条规则**顺序无所谓**，但 Allow 必须先存在；确认 `Get-NetFirewallRule` 里两条都在 |
+
+**回滚**：
+
+```powershell
+Remove-NetFirewallRule -DisplayName "molt: allow DSH 3082 from NAS only"
+Remove-NetFirewallRule -DisplayName "molt: block DSH 3082 from others"
+```
+
+**副作用**：NAS 仍然直连 3082（少一层代转，但暴露面比现状小）；换机器/改 IP 时要同步改。
+
+### C · 把 DSH 改绑 `127.0.0.1`
+
+**结论：目前做不到。** 2026-11-15 查过：`F:\DSH\resources\app.asar` 里没有 bind 配置字面量，
+`Preferences` 没有，`~/.dsh/profiles/desktop/cordis*.yml` 没有，命令行也没有 `--host/--bind`。
+
+**如果将来它提供开关**，判据应是：`Get-NetTCPConnection -State Listen | ? LocalPort -eq 3082`
+只出现 `127.0.0.1`；NAS 直连失败；`molt dsh sessions` 仍成功。回滚 = 去掉那个开关。
+
+### 顺带（同一批动作里可做，同样未执行）
 
 ```powershell
 New-NetFirewallRule -DisplayName "molt: allow peer 6191 from NAS only" `
@@ -903,5 +951,10 @@ New-NetFirewallRule -DisplayName "molt: block peer 6191 from others" `
   -Direction Inbound -Protocol TCP -LocalPort 6191 -Action Block -Profile Any
 ```
 
-**当前账户不是管理员**（`is_admin=False`，`Register-ScheduledTask` 也报 0x80070005），
-所以这一条只写方案、没执行。要不要做、做 A 还是 B，等你拍。
+判据：NAS 上 `curl -s -m 4 http://192.168.50.63:6191/health` 应 **200**；第三台设备应超时；
+且 `molt dsh sessions` 仍正常（它就是走 6191）。回滚同上。
+
+### 一句话总结
+
+A 是"关掉整扇门、只留回环"，B 是"门留着，只给 NAS 一把钥匙"，C 现在没有门轴可拆。
+三条都写了"怎么验成功 / 怎么验失败 / 怎么回滚"，但**一条都没执行** —— 等你拍 A 还是 B。
