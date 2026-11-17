@@ -743,6 +743,11 @@ class Agent:
                 argv,
                 capture_output=True,
                 text=True,
+                # Windows 上子进程的输出不一定是 GBK：`molt` 自己打的是 UTF-8，
+                # 而 subprocess 默认按 locale 解码 → UnicodeDecodeError 直接
+                # 掀掉读取线程，守护进程跟着死。2026-11-18 00:29 真机撞过。
+                encoding="utf-8",
+                errors="replace",
                 timeout=900,
                 creationflags=_CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
@@ -1296,7 +1301,10 @@ class Agent:
         argv = ["shutdown", "/s", "/t", str(delay),
                 "/c", "molt: 鱼已经搬走了，这台机器休息"]
         try:
-            proc = self.runner(argv, capture_output=True, text=True, timeout=20)
+            proc = self.runner(
+                argv, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20
+            )
         except (OSError, subprocess.SubprocessError) as exc:
             return StepResult("shutdown", False, f"起不来：{exc}")
         code = getattr(proc, "returncode", 0)
@@ -1918,7 +1926,7 @@ def _force_kill(pid: int, *, timeout: float = 20.0) -> bool:
     try:
         subprocess.run(
             ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return False
