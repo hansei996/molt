@@ -60,6 +60,30 @@ from .soul import sha256_of
 from .warden import Warden, default_root
 
 
+def _local_peer_token(warden: Any) -> str:
+    """本地模式下打对方小口要用的 token。
+
+    它和「跑着的 warden 用的那个」必须是同一个 —— 但本地后端是**另一个进程**，
+    拿不到 warden 内存里的值。所以按约定找两处：环境变量 `MOLT_TOKEN`，
+    以及账本根目录下的 `warden.token`（`start-warden.py` 会把生成的那个写在这里）。
+    都没有就返回空串：对面会 401，而 401 的文案本身已经说清「token 不对」。
+    """
+
+    token = str(os.environ.get("MOLT_TOKEN") or "").strip()
+    if token:
+        return token
+    root = getattr(warden, "root", None)
+    if root is not None:
+        for name in ("warden.token", "token"):
+            path = Path(root) / name
+            try:
+                if path.is_file():
+                    return path.read_text(encoding="utf-8-sig").strip()
+            except OSError:
+                continue
+    return ""
+
+
 class LocalBackend:
     """壳和 Warden 在同一台机器上。"""
 
@@ -120,6 +144,37 @@ class LocalBackend:
         return self.warden.request_power(
             shell, action, generation=generation, by=by, ttl_seconds=ttl_seconds
         )
+
+    def dsh(self, shell: str, method: str, args: Any = None) -> Dict[str, Any]:
+        """本地后端：自己代转。
+
+        三种情况按同一顺序判：
+          1. 这个壳登记了 `dsh_relay` → 走它本机的小口（DSH 只认回环）
+          2. 没登记 → 直接打它的 3082
+          3. 连地址都没有 → `resolve_base` 报错，提示先 `molt declare --address`
+
+        没有这一层的时候，`--root` 模式（账本就在本机）会在 CLI 里炸
+        `AttributeError: 'LocalBackend' object has no attribute 'dsh'`
+        —— 远端路径一直被真机用着，本地路径没人走过，就漏了。
+        """
+
+        from . import dshrelay
+
+        status = self.warden.status()
+        shells = status.get("shells") or {}
+        attrs = shells.get(shell) or {}
+        relay = str(attrs.get("dsh_relay") or "")
+        if relay:
+            address = str(attrs.get("address") or "")
+            if not address:
+                raise dshrelay.DshRelayError(
+                    f"{shell} 登记了代转口 {relay}，但没有局域网地址 —— "
+                    f"先跑：molt declare --shell {shell} --address <它的 IP>"
+                )
+            value = dshrelay.peer_call(address, int(relay), method, args or {}, token=_local_peer_token(self.warden))
+        else:
+            value = dshrelay.call(dshrelay.resolve_base(status, shell), method, args or {})
+        return {"dsh": value}
 
     def wake(self, mac: str, *, host: str = "", prefix_len: int = 24) -> Dict[str, Any]:
         """本地后端：就由这个进程发。它跑在宿主上，广播出得去。"""

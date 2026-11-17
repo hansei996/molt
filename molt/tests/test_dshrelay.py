@@ -179,3 +179,65 @@ def test_summarize_events_keeps_text_and_drops_tool_calls():
 def test_summarize_events_tolerates_a_broken_page():
     assert dshrelay.summarize_events({}) == []
     assert dshrelay.summarize_events({"records": "nope"}) == []
+
+
+# -- 本地后端（账本就在这台机器上）---------------------------------------
+#
+# 2026-11-18 真机联调时发现：`dsh` 只加在 RemoteBackend 上，`--root` 模式
+# 直接炸 `AttributeError: 'LocalBackend' object has no attribute 'dsh'`。
+# 远端路径天天被用，本地路径没人走 —— 于是那半天就成了"单测全绿、功能不在"。
+
+
+def test_local_backend_without_an_address_says_how_to_declare_one(tmp_path: Path) -> None:
+    from molt.backend import LocalBackend
+
+    be = LocalBackend(root=tmp_path)
+    be.set_shell("box", role="desktop")
+    with pytest.raises(dshrelay.DshRelayError) as err:
+        be.dsh("box", "session/list", {"_request": {}})
+    assert "molt declare --shell box --address" in str(err.value)
+
+
+def test_local_backend_uses_the_peer_port_when_the_shell_has_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from molt.backend import LocalBackend
+
+    be = LocalBackend(root=tmp_path)
+    be.set_shell("box", role="desktop", address="10.0.0.9", dsh_relay="6191")
+    seen: List[Any] = []
+
+    def fake_peer(address: str, port: int, method: str, args: Any, *, token: str = "", **kw: Any) -> Dict[str, Any]:
+        seen.append((address, port, method, token))
+        return {"items": []}
+
+    monkeypatch.setattr(dshrelay, "peer_call", fake_peer)
+    out = be.dsh("box", "session/list", {"_request": {}})
+    assert out == {"dsh": {"items": []}}
+    assert seen[0][:3] == ("10.0.0.9", 6191, "session/list")
+
+
+def test_local_backend_falls_back_to_3082_when_no_peer_is_declared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from molt.backend import LocalBackend
+
+    be = LocalBackend(root=tmp_path)
+    be.set_shell("box", role="desktop", address="10.0.0.9")
+    seen: List[Any] = []
+
+    def fake_call(base: str, method: str, args: Any, **kw: Any) -> Dict[str, Any]:
+        seen.append((base, method))
+        return {"items": []}
+
+    monkeypatch.setattr(dshrelay, "call", fake_call)
+    assert be.dsh("box", "session/list", {}) == {"dsh": {"items": []}}
+    assert seen == [("http://10.0.0.9:3082", "session/list")]
+
+
+def test_the_cli_turns_a_relay_error_into_one_line_and_exit_two(tmp_path: Path) -> None:
+    from molt.cli import main
+
+    assert main(["--no-color", "declare", "--shell", "box", "--role", "desktop", "--root", str(tmp_path)]) == 0
+    rc = main(["--no-color", "dsh", "sessions", "--shell", "box", "--root", str(tmp_path)])
+    assert rc == 2

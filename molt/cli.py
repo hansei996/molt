@@ -2707,11 +2707,22 @@ def cmd_dsh(args: argparse.Namespace) -> int:
         bad("要指定是哪台机器：--shell <壳名>（先跑的 molt machine list 看看）")
         return 2
 
+    failed: List[str] = []
+
     def call(method: str, payload: Any) -> Any:
-        return (be.dsh(shell, method, payload) or {}).get("dsh") or {}
+        # 代转层的三种失败（白名单外 / 没地址 / 对面不通）都是**能用一句话说清**的，
+        # 不该以 traceback 的形状丢给用户：那会让人以为是 molt 自己坏了。
+        try:
+            return (be.dsh(shell, method, payload) or {}).get("dsh") or {}
+        except dshrelay.DshRelayError as e:
+            failed.append(str(e))
+            return {}
 
     if action == "sessions":
         value = call("session/list", {"_request": {}})
+        if failed:
+            bad(failed[0])
+            return 2
         items = value.get("items") or []
         head(f"{shell} 上的会话")
         if not items:
@@ -2741,6 +2752,9 @@ def cmd_dsh(args: argparse.Namespace) -> int:
             }
         }
         value = call("session/events", payload)
+        if failed:
+            bad(failed[0])
+            return 2
         if getattr(args, "json", False):
             print(json.dumps(value, ensure_ascii=False, indent=2))
             return 0
@@ -2779,6 +2793,9 @@ def cmd_dsh(args: argparse.Namespace) -> int:
                 }
             },
         )
+        if failed:
+            bad(failed[0])
+            return 2
         ok(f"发出去了（{mode}）：{str(value)[:120]}")
         return 0
 
@@ -2797,6 +2814,9 @@ def cmd_dsh(args: argparse.Namespace) -> int:
         bad(f"--args 不是合法 JSON：{e}")
         return 2
     value = call(method, payload)
+    if failed:
+        bad(failed[0])
+        return 2
     print(json.dumps(value, ensure_ascii=False, indent=2))
     return 0
 

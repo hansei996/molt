@@ -780,11 +780,26 @@ molt dsh call     --shell desktop-h2kgiao --method session/list --args '{"_reque
 | `session/events` | `ok=True`，`records=14`、`hasMore=true` |
 | `molt dsh sessions / history / send --dry-run` | 三条命令都在真机上跑通（`send` 空转时打印目标、模式、内容，不发出） |
 
+**2026-11-18 03:00 补验的三条**（原先写着"还只是单测"，现在都真机走过了）：
+
+| 项 | 怎么造的 | 结果 |
+|---|---|---|
+| agent 被杀之后小口会不会回来 | `taskkill /PID 24500 /F`（agent）→ 6191 立刻 `http_code=000`（连不上）→ `wscript.exe …molt-agent.vbs` 拉起 → **3 秒后 `/health` 回来**（200，三个方法齐全） | **会跟着恢复**，日志里那一行「· 代转小口在听：0.0.0.0:6191」就是它 |
+| `peer_call` 的真超时 | 在 `127.0.0.1:6300` 起一个**只 accept、永不回话**的黑洞；把账本里 `desktop-h2kgiao` 的 `dsh_relay` 临时改成 `6300`，从 NAS 打 `molt dsh sessions` | 库层：`连不上小口 http://127.0.0.1:6300/dsh：timed out`（2.04 秒 / timeout=2.0）。端到端：**32024 ms** 后 `✗ Fatal: 连不上 Warden（…/dsh），试了 3 次。最后一处错误：timed out`，**退出码 2** |
+| `resolve_base()` 缺 address | 临时账本 `molt declare --shell box --role desktop --root <tmp>`（不声明地址），再 `molt dsh sessions --shell box --root <tmp>` | **退出码 2**，一句话：`✗ 账本里没有 box 的地址。先声明一次：molt declare --shell box --address <IP>` |
+
+**这三条里顺手挖出一个真 bug**：`dsh` 只加在 `RemoteBackend` 上，`--root` 本地模式直接
+`AttributeError: 'LocalBackend' object has no attribute 'dsh'`（traceback 还给退出码 0）。
+远端路径天天在真机上跑、本地路径只有单测碰过 —— 于是"全绿但功能不在"。已补
+`LocalBackend.dsh`（有 `dsh_relay` 走小口、否则直连 3082、没地址报那一句）、
+`_local_peer_token()`（本地后端是另一个进程，token 从 `MOLT_TOKEN` 或 `<root>/warden.token`
+找），并让 CLI 把三类失败收成一行 + 退出码 2（原来会抛 `SystemExit`、测试里表现为"崩了"）。
+回归测试 4 条进 `molt/tests/test_dshrelay.py`，全量 **1317 passed**。
+
 **还只是单测的**（这条链上「已验」与「大概对」必须分开写）：
 
-- `peer_call` 的**超时**分支（`READ_TIMEOUT=30` / `SEND_TIMEOUT=60`）——真机没制造过超时。
-- Windows agent 被杀掉再被拉起之后，peer 小口**会不会**跟着恢复 —— 只验过"起来之后它在听"。
-- `resolve_base()` 在「壳没登记 address」时的报错文案 —— 单测覆盖，真机没走到。
+- `SEND_TIMEOUT=60` 这一档本身 —— 真机造的是读超时（30 秒那档），发消息那档没制造过。
+- 黑洞恢复之后代理口的**状态是否干净**（比如半开连接会不会堆积）—— 只看了单次结果。
 - ~~`session/prompt` 的**落地**~~ —— **已验**（2026-11-18 02:39）：`accepted: True` 之后，
   那句话真的作为一条用户消息出现在 `session-b0639458-…` 里，内容与发出的一字不差
   （`【molt 代转链路测试】…不用做任何事，也不用回复。`）。排队是排队，落地是落地 ——
