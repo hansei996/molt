@@ -785,7 +785,10 @@ molt dsh call     --shell desktop-h2kgiao --method session/list --args '{"_reque
 - `peer_call` 的**超时**分支（`READ_TIMEOUT=30` / `SEND_TIMEOUT=60`）——真机没制造过超时。
 - Windows agent 被杀掉再被拉起之后，peer 小口**会不会**跟着恢复 —— 只验过"起来之后它在听"。
 - `resolve_base()` 在「壳没登记 address」时的报错文案 —— 单测覆盖，真机没走到。
-- `session/prompt` 的**落地**：`accepted: True` 是排队被接受，真正的用户消息要等那一轮结束才出现。这是 queue 语义，不是链路问题 —— 但"到了它会真的开始跑"这一句，等下一次真机观察再标已验。
+- ~~`session/prompt` 的**落地**~~ —— **已验**（2026-11-18 02:39）：`accepted: True` 之后，
+  那句话真的作为一条用户消息出现在 `session-b0639458-…` 里，内容与发出的一字不差
+  （`【molt 代转链路测试】…不用做任何事，也不用回复。`）。排队是排队，落地是落地 ——
+  两件事现在都有证据。
 
 ---
 
