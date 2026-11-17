@@ -2434,6 +2434,131 @@ def _human_size(n: int) -> str:
     return f"{size:.1f} GB"
 
 
+def cmd_machine(args: argparse.Namespace) -> int:
+    """看 / 叫醒 / 关掉账本里的任意一台壳 —— 从**鱼待着的那台机器**发出去。
+
+    这是「鱼常驻 NAS，Windows 只是工具」这条产品设定的操作面：
+    NAS 上的鱼不需要把自己搬过去，就能知道那台机器在不在、能不能叫醒、
+    要不要关掉。三件事本来就在（心跳、`/wake`、关机票），缺的是把它们
+    放在一条命令里，并且**说清楚每一下的代价**。
+    """
+    be = _backend(args)
+    action = str(getattr(args, "machine_action", "") or "list").strip().lower()
+    shell = str(getattr(args, "shell", "") or "").strip()
+    shells = be.shells()
+    status = be.status()
+    latest = status.get("latest_generation") or {}
+    here = str(latest.get("consumed_by") or "").strip()
+    beats = status.get("heartbeats") or {}
+    tickets = status.get("power") or {}
+
+    def age_of(shell_id: str) -> Optional[float]:
+        beat = beats.get(shell_id) or {}
+        try:
+            value = beat.get("age_seconds")
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def dsh_of(attrs: Dict[str, object]) -> str:
+        """那台机器上的 DeepSeek Harness 还通不通。
+
+        只探 TCP 3082，不判"是不是 DSH" —— 这一步的目的是回答
+        「那台机器醒着吗、它的工具还连着吗」，而不是鉴权。
+        0.4 秒就放弃：这条命令是给人看的，不能让人等。
+        """
+        address = str(attrs.get("address") or "").strip()
+        if not address:
+            return ""
+        try:
+            with socket.create_connection((address, 3082), timeout=0.4):
+                return "通"
+        except OSError:
+            return "不通"
+
+    if action == "list":
+        if not shells:
+            warn("账本里还没有任何壳的属性。")
+            dim("  先让守护进程声明自己：molt declare --shell <壳名> --role nas")
+            return 0
+        head("账本里的机器")
+        for shell_id, attrs in sorted(shells.items()):
+            age = age_of(shell_id)
+            bits = [f"{C.CYA}{shell_id}{C.R}", str(attrs.get("role") or "（没登记）")]
+            if shell_id == here:
+                bits.append(f"{C.GRN}鱼在这里{C.R}")
+            if age is None:
+                bits.append(f"{C.YEL}没上报心跳{C.R}")
+            elif age <= 25:
+                bits.append(f"{C.GRN}在跑（{age:.0f} 秒前）{C.R}")
+            else:
+                bits.append(f"{C.YEL}{age / 60:.0f} 分钟没心跳{C.R}")
+            if attrs.get("address"):
+                status_text = dsh_of(attrs)
+                bits.append(f"地址 {attrs['address']}" + (f"（DSH {status_text}）" if status_text else ""))
+            if attrs.get("wakeable") is True:
+                bits.append("可唤醒" + (f"（{attrs['wake_mac']}）" if attrs.get("wake_mac") else "（没登记 MAC）"))
+            elif attrs.get("wakeable") is False:
+                bits.append("叫不醒")
+            if shell_id in tickets:
+                bits.append(f"{C.YEL}有一张关机票{C.R}")
+            print("  " + " · ".join(bits))
+        if here:
+            print()
+            kv("鱼现在在", here)
+        return 0
+
+    if not shell:
+        bad("要指明哪台机器：molt machine on <壳名> / molt machine off <壳名>")
+        return 2
+    if shell not in shells:
+        bad(f"账本里没有这台壳：{shell}")
+        dim("  先 molt shells 看一遍（壳名和 target_shell 是同一个东西）")
+        return 4
+
+    attrs = shells.get(shell) or {}
+
+    if action == "on":
+        mac = str(attrs.get("wake_mac") or "").strip()
+        if not mac:
+            bad(f"{shell} 没有登记 MAC —— 叫不醒它。")
+            dim(f"  先：molt declare --shell {shell} --wake-mac AA-BB-CC-DD-EE-FF")
+            return 4
+        try:
+            got = be.wake(mac)
+        except NeedsHuman as exc:
+            bad(str(exc))
+            return 4
+        sent = got.get("sent") or []
+        head("已发魔术封包")
+        kv("目标", shell)
+        kv("MAC", mac)
+        kv("发往", "、".join(str(x) for x in sent) or "（没有）")
+        dim("  封包只负责「按下电源键」，能不能起来要看它自己；起来之后 agent 会自己上报心跳。")
+        return 0 if sent else 4
+
+    if action == "off":
+        if shell == here:
+            bad(f"鱼就在 {shell} 上 —— 关掉它等于把鱼一起关掉。")
+            dim("  先把鱼搬走（/molt go）或者换一台机器。")
+            return 4
+        try:
+            ticket = be.request_power(shell, "shutdown", by="molt machine")
+        except NeedsHuman as exc:
+            bad(str(exc))
+            return 4
+        head("已投一张关机票")
+        kv("目标", shell)
+        kv("动作", "shutdown")
+        kv("有效期到", str(ticket.get("expires_at_readable") or "？"))
+        dim(f"  {shell} 的 agent 下一轮心跳就会看到它；它在跑才会执行。")
+        dim("  反悔：molt machine off 之前先投一张 keep —— 或者等它自己过期。")
+        return 0
+
+    bad(f"machine 只认 list / on / off，收到 {action!r}")
+    return 2
+
+
 def cmd_shells(args: argparse.Namespace) -> int:
     """账本里登记的「每台壳是什么」。
 
@@ -2686,6 +2811,8 @@ def cmd_declare(args: argparse.Namespace) -> int:
         attrs["label"] = args.label
     if getattr(args, "wake_mac", None) is not None:
         attrs["wake_mac"] = args.wake_mac
+    if getattr(args, "address", None) is not None:
+        attrs["address"] = args.address
     if not attrs:
         bad("什么都没给 —— 至少要 --role / --gpu / --wakeable / --cost-per-hour / --wake-mac 之一")
         return 2
@@ -2699,7 +2826,7 @@ def cmd_declare(args: argparse.Namespace) -> int:
 
     head("已登记")
     kv("壳", got.get("shell", shell_id) or shell_id)
-    for key in ("role", "gpu", "wakeable", "cost_per_hour", "label", "wake_mac"):
+    for key in ("role", "gpu", "wakeable", "cost_per_hour", "label", "wake_mac", "address"):
         if key in attrs:
             kv(key, got.get(key))
     dim("  这是**声明**，不是探测：账本只记你说它是什么。")
@@ -3683,6 +3810,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_shells)
 
     # declare
+    s = add("machine", "看 / 叫醒 / 关掉账本里的任意一台机器（鱼不用搬过去）")
+    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    s.add_argument("--json", action="store_true", help="机器可读输出（暂只用于 list）")
+    ms = s.add_subparsers(dest="machine_action", required=True)
+    ml = ms.add_parser("list", help="列出所有机器：心跳、地址、能不能叫醒")
+    ml.add_argument("--root", help="Warden 根目录（本地模式）")
+    ml.add_argument("--json", action="store_true")
+    mo = ms.add_parser("on", help="发魔术封包叫醒一台机器")
+    mo.add_argument("shell")
+    mo.add_argument("--root")
+    mf = ms.add_parser("off", help="给一台机器投一张关机票（会过期）")
+    mf.add_argument("shell")
+    mf.add_argument("--root")
+
+    s.set_defaults(func=cmd_machine)
+
     s = add("declare", "登记「这台机器是什么」：role / gpu / 能不能被叫醒 / 每小时多少钱")
     s.add_argument("--root", help="Warden 根目录（本地模式）")
     s.add_argument("--shell", required=True, help="哪台壳（与账本里的 target_shell 一致）")
@@ -3698,6 +3841,10 @@ def build_parser() -> argparse.ArgumentParser:
         const=True,
         default=None,
         help="这台机器能被魔术封包叫醒（发 WOL 之前要知道这件事）",
+    )
+    s.add_argument(
+        "--address",
+        help="这台机器的局域网地址（比如 192.168.50.63）—— 看它的 DSH 通不通要用",
     )
     s.add_argument(
         "--no-wakeable",

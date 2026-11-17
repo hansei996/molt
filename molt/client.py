@@ -211,6 +211,7 @@ class WardenClient:
         cost_per_hour: Optional[float] = None,
         label: Optional[str] = None,
         wake_mac: Optional[str] = None,
+        address: Optional[str] = None,
         by: str = "",
     ) -> Dict[str, Any]:
         """登记"这台机器是什么"。**只传你想声明的字段** —— 没传的保持原样。
@@ -227,6 +228,7 @@ class WardenClient:
             ("cost_per_hour", cost_per_hour),
             ("label", label),
             ("wake_mac", wake_mac),
+            ("address", address),
         ):
             if value is not None:
                 body[key] = value
@@ -265,6 +267,26 @@ class WardenClient:
         if by:
             body["by"] = by
         return self._request("POST", "/policy", body)
+
+    def request_power(
+        self,
+        shell: str,
+        action: str,
+        *,
+        generation: int = 0,
+        by: str = "",
+        ttl_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """投一张关机票。**票会过期** —— 见 warden.DEFAULT_POWER_TTL_SECONDS。"""
+        body: Dict[str, Any] = {
+            "shell": shell,
+            "action": action,
+            "generation": int(generation or 0),
+            "by": by,
+        }
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = float(ttl_seconds)
+        return self._request("POST", "/power", body).get("power") or {}
 
     def clear_policy(self) -> Dict[str, Any]:
         """撤销策略（删文件，不是设成关着）。"""

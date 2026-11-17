@@ -108,6 +108,19 @@ class LocalBackend:
     def arrivals(self) -> Dict[str, Any]:
         return self.warden.arrivals_view()
 
+    def request_power(
+        self,
+        shell: str,
+        action: str,
+        *,
+        generation: int = 0,
+        by: str = "",
+        ttl_seconds: Any = None,
+    ) -> Dict[str, Any]:
+        return self.warden.request_power(
+            shell, action, generation=generation, by=by, ttl_seconds=ttl_seconds
+        )
+
     def wake(self, mac: str, *, host: str = "", prefix_len: int = 24) -> Dict[str, Any]:
         """本地后端：就由这个进程发。它跑在宿主上，广播出得去。"""
         from .wake import magic_packet, wake_targets

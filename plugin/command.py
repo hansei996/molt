@@ -199,6 +199,10 @@ HELP_WORDS = {"help", "?", "帮助", "怎么用"}
 #: 到点前那条提醒里写着「回 /molt stop-auto」—— 这条命令必须短到能在那 60 秒里敲完。
 STOP_AUTO_WORDS = {"stop-auto", "停自动", "别自动", "取消自动"}
 
+#: 「鱼常驻 NAS，Windows 只是工具」这条设定的操作面：
+#: 不用把自己搬过去，就能看那台机器在不在、叫醒它、关掉它。
+MACHINE_WORDS = {"machine", "machines", "机器", "电脑"}
+
 
 def normalize_args(raw: str) -> str:
     """把用户敲的参数折成四种意图之一，认不出来就返回 `""`。
@@ -227,6 +231,8 @@ def normalize_args(raw: str) -> str:
         return POWER_WORDS[first]
     if first in STOP_AUTO_WORDS:
         return "stop-auto"
+    if first in MACHINE_WORDS:
+        return "machine"
     return ""
 
 
@@ -559,6 +565,8 @@ class MoltMover:
             return self.request_power(cfg, POWER_WORDS[want])
         if want == "stop-auto":
             return self.stop_auto()
+        if want == "machine":
+            return self.machine(cfg, text)
         return Reply(self._help_text(cfg))
 
     def stop_auto(self) -> Reply:
@@ -571,6 +579,97 @@ class MoltMover:
         except MoltError as exc:
             return Reply(f"关不掉：{exc}")
         return Reply("好，自动搬家关掉了。这一轮我不动，你想搬的时候再说。")
+
+    def machine(self, cfg: Settings, text: str) -> Reply:
+        """看 / 叫醒 / 关掉**另一台**机器 —— 鱼不用搬过去。
+
+        三件事本来就有（心跳、`/wake`、关机票），这条命令只是把它们
+        放到一个不用记参数的地方。每一个动作的代价都写在回复里：
+        叫醒只是"按下电源键"，关机是一张会过期的票。
+        """
+        words = (text or "").split()
+        action = words[1].lower() if len(words) > 1 else "list"
+        shell = words[2] if len(words) > 2 else ""
+        st = self.ledger_status()
+        if not isinstance(st, dict):
+            return Reply("账本问不到 —— 我不知道现在有哪几台机器。")
+        shells = st.get("shells") or {}
+        beats = st.get("heartbeats") or {}
+        latest = st.get("latest_generation") or {}
+        here = str(latest.get("consumed_by") or "").strip()
+
+        def alive_of(name: str) -> str:
+            beat = beats.get(name) or {}
+            age = beat.get("age_seconds")
+            try:
+                seconds = float(age)
+            except (TypeError, ValueError):
+                return "没上报心跳"
+            if seconds <= 25:
+                return f"在跑（{seconds:.0f} 秒前）"
+            return f"{seconds / 60:.0f} 分钟没心跳"
+
+        if action in ("list", "") or not shell and action not in ("on", "off"):
+            if not shells:
+                return Reply("账本里还没有任何机器。先让守护进程声明自己（molt declare）。")
+            lines = ["账本里的机器："]
+            for name in sorted(shells):
+                bits = [name, str(shells[name].get("role") or "（没登记）")]
+                if name == here:
+                    bits.append("鱼在这里")
+                bits.append(alive_of(name))
+                if shells[name].get("wakeable") is True:
+                    bits.append("可唤醒" if shells[name].get("wake_mac") else "可唤醒（没登记 MAC）")
+                if shells[name].get("address"):
+                    bits.append(f"地址 {shells[name]['address']}")
+                lines.append("· " + " · ".join(bits))
+            lines.append("")
+            lines.append("叫醒：`/molt machine on <名字>`　关掉：`/molt machine off <名字>`")
+            return Reply("\n".join(lines))
+
+        if not shell:
+            return Reply("要指明哪台机器：`/molt machine on <名字>` 或 `/molt machine off <名字>`。")
+        if shell not in shells:
+            return Reply(f"账本里没有「{shell}」这台机器。发 `/molt machine` 看一遍。")
+
+        if action == "on":
+            mac = str(shells[shell].get("wake_mac") or "").strip()
+            if not mac:
+                return Reply(f"{shell} 没有登记 MAC —— 叫不醒它。")
+            if not self._post_wake(cfg, shell=shell):
+                return Reply(f"封包没发出去（账本地址 {cfg.warden_url or '未配置'}）。")
+            return Reply(
+                f"发了一个魔术封包给 {shell}。\n"
+                "它只会「按一下电源键」—— 能不能起来要看它自己。"
+                "起来之后 agent 会自己上报心跳，那时 `/molt machine` 里就能看到。"
+            )
+
+        if action == "off":
+            if shell == here:
+                return Reply(f"鱼就在 {shell} 上 —— 关掉它等于把鱼一起关掉。先把鱼搬走。")
+            if not self._post_power(cfg, shell=shell, action="shutdown", generation=0):
+                return Reply(f"票没送到账本（{cfg.warden_url or '未配置'}）。")
+            return Reply(
+                f"好，给 {shell} 留了一张关机票。\n"
+                "它的 agent 下一轮心跳会看到；票 15 分钟内有效，过期就作废 —— "
+                "所以这张票不会在某个三天后的早上突然生效。"
+            )
+
+        return Reply("`/molt machine` 只认 list / on / off。")
+
+    def _post_wake(self, cfg: Settings, *, shell: str) -> bool:
+        body = json.dumps({"shell": shell}).encode("utf-8")
+        req = urllib.request.Request(
+            cfg.warden_url.rstrip("/") + "/wake",
+            data=body,
+            headers={"Content-Type": "application/json", "X-Molt-Token": cfg.warden_token or ""},
+            method="POST",
+        )
+        try:
+            with self._opener(req, timeout=15.0) as resp:
+                return 200 <= getattr(resp, "status", 200) < 300
+        except (urllib.error.URLError, OSError, ValueError):
+            return False
 
     def request_power(self, cfg: Settings, action: str) -> Reply:
         """我走了以后，那台机器关不关 —— 第二张票，和「走不走」分开。
@@ -630,7 +729,8 @@ class MoltMover:
             "· `/molt confirm` —— 真的搬（会先把我的嘴闭上，再说再见）\n"
             "· `/molt cancel` —— 取消还没确认的提议\n"
             "· `/molt shutdown` —— 我走了以后，把那台机器关掉（另一张票，和「走」分开）\n"
-            "· `/molt keep` —— 我走了以后，那台机器留着别关"
+            "· `/molt keep` —— 我走了以后，那台机器留着别关\n"
+            "· `/molt machine` —— 看 / 叫醒 / 关掉另一台机器（我不用搬过去）"
         )
 
     def _propose(self, cfg: Settings, *, sender: str) -> Reply:

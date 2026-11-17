@@ -400,6 +400,7 @@ class WardenServer:
                     cost_per_hour=body.get("cost_per_hour"),
                     label=body.get("label"),
                     wake_mac=body.get("wake_mac"),
+                    address=body.get("address"),
                     by=str(body.get("by") or ""),
                 )
                 return _ok(shell=attrs)
@@ -419,8 +420,21 @@ class WardenServer:
             # 它不是"再包一层"，它是把这件事放回唯一能做成它的地方。
             if head == "wake" and parts[1:2] == [] and method == "POST":
                 mac = str(body.get("mac") or "").strip()
+                shell = str(body.get("shell") or "").strip()
+                if not mac and shell:
+                    # 叫醒别人需要 MAC，而 MAC 存在账本里（配置只在本机）。
+                    # 允许只给 shell，是因为"我要叫醒哪台机器"才是人的语言，
+                    # 让他每次去翻 MAC 是把自己的记账工作推回给人。
+                    attrs = self.warden.shells_view().get(shell) or {}
+                    mac = str(attrs.get("wake_mac") or "").strip()
+                    if not mac:
+                        return _err(
+                            400,
+                            f"账本里没有 {shell} 的 MAC —— 先 molt declare --wake-mac …",
+                            "bad_request",
+                        )
                 if not mac:
-                    return _err(400, "缺少 mac", "bad_request")
+                    return _err(400, "缺少 mac 或 shell", "bad_request")
                 # 没给地址时，用**本机的**地址算定向广播（x.y.z.255）。
                 # 只发 255.255.255.255 是不够的：不少交换机会丢掉 limited
                 # broadcast，而 2026-11-14 12:40 那次真正叫醒它的是定向广播那一路。
@@ -532,6 +546,9 @@ class WardenServer:
                     str(body.get("action") or ""),
                     generation=generation,
                     by=str(body.get("by") or ""),
+                    # 票的有效期是**账本**的属性，不是调用方的礼貌：
+                    # 任何一条路径（QQ、CLI、自动搬家）投的票都该会过期。
+                    ttl_seconds=body.get("ttl_seconds"),
                 )
                 return _ok(power=ticket)
 

@@ -1333,3 +1333,20 @@ molt policy set --id morning-home --source desktop-h2kgiao \
 看告警：`molt status`、`http://<NAS>:6186/where?token=…`、或 `/status` 的 `alerts` 字段。
 
 **它不会自己把容器拉起来。** 万一鱼正在另一台机器上说话，自动拉起就是两只。
+
+
+## 遥控另一台机器（鱼不用搬过去）
+
+鱼常驻 NAS，Windows 只在需要它的显卡/游戏时才去。平时要碰那台机器：
+
+```
+/molt machine                 # 每台机器：角色、心跳、地址、DSH 通不通
+/molt machine on  win-box     # 发魔术封包（MAC 从账本查，不用你记）
+/molt machine off win-box     # 留一张 15 分钟的关机票
+```
+
+三条边界：
+
+- **关不掉自己站着的那台** —— `/molt machine off <鱼所在壳>` 会被拒绝；
+- **票会过期** —— 15 分钟内那台机器没响应就作废，不会留到以后；
+- **叫醒只是按下电源键** —— 起不起来看它自己；起来后 agent 会自己上报心跳。

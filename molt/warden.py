@@ -60,7 +60,15 @@ HEARTBEAT_STALE_SECONDS = 600
 SHELL_ROLES = ("nas", "desktop", "cloud", "unknown")
 
 #: 账本给每个壳记的字段（`label` 在这里是"声明"，心跳里的那份是"自报"）。
-SHELL_ATTR_FIELDS = ("role", "gpu", "wakeable", "cost_per_hour", "label", "wake_mac")
+SHELL_ATTR_FIELDS = (
+    "role",
+    "gpu",
+    "wakeable",
+    "cost_per_hour",
+    "label",
+    "wake_mac",
+    "address",
+)
 
 
 from .epoch import (
@@ -106,6 +114,16 @@ DEFAULT_BACKUP_KEEP = 12
 
 #: 「走」和「关」是两件事 —— 关机许可只认这三种动作。
 POWER_ACTIONS = ("shutdown", "sleep", "keep")
+
+#: 一张关机票多久之后自动作废。
+#:
+#: 没有 TTL 的票是本项目里最好笑也最危险的形态：主人今晚说「关了吧」，
+#: 那台机器当时没在跑 agent，票一直留着；三天后它开机、agent 起来，
+#: 第一件事就是把自己关掉 —— 而这时候再没有任何人在等这件事发生。
+#:
+#: 900 秒 ≈ 15 分钟，比"人说完话到那台机器响应"的最坏情况宽得多
+#: （心跳间隔 10 秒、agent 一轮最多几十秒），又短到不会跨越一次睡觉。
+DEFAULT_POWER_TTL_SECONDS = 900.0
 
 
 def _slugify(text: str) -> str:
@@ -600,10 +618,39 @@ class Warden:
             raw = json.loads(self.power_path().read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
-        return raw if isinstance(raw, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+        # 过期的票在读的时候就剪掉。放在这里而不是"执行的那一刻再判"，
+        # 是因为**读的人不止一个**：守护进程、`molt status`、`/where` 页面
+        # 都会读它。让他们各自判一次，迟早有一个忘了判。
+        now = time.time()
+        fresh: Dict[str, Dict[str, Any]] = {}
+        for shell, ticket in raw.items():
+            if not isinstance(ticket, dict):
+                continue
+            expires = ticket.get("expires_at")
+            if expires is not None:
+                try:
+                    if float(expires) <= now:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            fresh[str(shell)] = ticket
+        if len(fresh) != len(raw):
+            try:
+                _atomic_write_json(self.power_path(), fresh)
+            except OSError:
+                pass
+        return fresh
 
     def request_power(
-        self, shell: str, action: str, *, generation: int = 0, by: str = ""
+        self,
+        shell: str,
+        action: str,
+        *,
+        generation: int = 0,
+        by: str = "",
+        ttl_seconds: Any = None,
     ) -> Dict[str, Any]:
         """写一张「允许关掉 shell」的票（或一张「留着」的票）。"""
         shell = str(shell or "").strip()
@@ -613,12 +660,20 @@ class Warden:
         if action not in POWER_ACTIONS:
             raise NeedsHuman(f"power 只认 {'/'.join(POWER_ACTIONS)}，收到 {action!r}")
         current = self.power_view()
+        ttl = DEFAULT_POWER_TTL_SECONDS if ttl_seconds is None else float(ttl_seconds)
+        if ttl <= 0:
+            raise NeedsHuman(f"关机票的有效期必须大于 0 秒，收到 {ttl_seconds!r}")
+        decided = time.time()
         ticket = {
             "action": action,
             "generation": int(generation or 0),
             "by": str(by or ""),
-            "decided_at": time.time(),
-            "decided_at_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "decided_at": decided,
+            "decided_at_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(decided)),
+            "expires_at": decided + ttl,
+            "expires_at_readable": time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(decided + ttl)
+            ),
         }
         current[shell] = ticket
         _atomic_write_json(self.power_path(), current)
@@ -995,6 +1050,19 @@ class Warden:
             if cost < 0 or cost > 10000:
                 raise NeedsHuman(f"cost_per_hour 不像一笔钱：{value!r}")
             return round(cost, 4)
+        if key == "address":
+            # 局域网地址。空字符串合法（= 没登记），和"登记了一个错的"要分开：
+            # 前者只是查不到，后者会让 monkey 去连一台不存在的机器。
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            try:
+                import ipaddress
+
+                ipaddress.IPv4Address(text)
+            except (ValueError, ImportError):
+                raise NeedsHuman(f"address 要一个 IPv4 地址，收到 {value!r}")
+            return text
         if key == "wake_mac":
             # MAC 存在账本里，理由只有一条：**叫醒别人的那台机器需要它**。
             # 它不属于"那台机器是什么"（所以放在属性里有点别扭），但它必须
@@ -1025,6 +1093,7 @@ class Warden:
         cost_per_hour: Any = None,
         label: Any = None,
         wake_mac: Any = None,
+        address: Any = None,
         by: str = "",
     ) -> Dict[str, Any]:
         """登记/更新一个壳的属性。**局部更新**：只改传进来的字段。
@@ -1045,6 +1114,7 @@ class Warden:
             ("cost_per_hour", cost_per_hour),
             ("label", label),
             ("wake_mac", wake_mac),
+            ("address", address),
         ):
             if value is None:
                 continue

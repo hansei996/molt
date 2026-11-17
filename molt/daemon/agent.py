@@ -484,7 +484,28 @@ def _log_line(msg: str) -> None:
         pass
 
 
-def power_verdict(*, requires_permission: bool, tickets: Any, shell: str) -> str:
+def _ticket_alive(ticket: Any, *, now: float) -> bool:
+    """这张票还作数吗。
+
+    过期 = 作废，**而且方向是安全的**：过期的票被当成"没票"，
+    结果是那台机器留着不关，而不是被一张旧票关掉。
+    """
+    if not isinstance(ticket, dict):
+        return False
+    expires = ticket.get("expires_at")
+    if expires is None:
+        # 没有 expires_at 的是老账本写的票；账本在读取时已经剪过一轮，
+        # 走到这里说明是构造出来的数据，按"有效"处理以免改变老行为。
+        return True
+    try:
+        return float(expires) > now
+    except (TypeError, ValueError):
+        return False
+
+
+def power_verdict(
+    *, requires_permission: bool, tickets: Any, shell: str, now: float = 0.0
+) -> str:
     """这台机器现在该不该关。四个返回值，语义互斥：
 
     - `"shutdown"` —— 账本里有一张「关掉我」的票
@@ -495,6 +516,9 @@ def power_verdict(*, requires_permission: bool, tickets: Any, shell: str) -> str
     if not requires_permission:
         return "auto"
     ticket = tickets.get(shell) if isinstance(tickets, dict) else None
+    # 过期的票在这里变成"没票"。方向是安全的：结果是不关，不是关掉。
+    if ticket is not None and not _ticket_alive(ticket, now=now or time.time()):
+        ticket = None
     action = str((ticket or {}).get("action") or "").strip().lower()
     if action in ("shutdown", "sleep"):
         return "shutdown"
@@ -1492,6 +1516,7 @@ class Agent:
                     requires_permission=self.settings.power_requires_permission,
                     tickets=status.get("power"),
                     shell=self.settings.shell,
+                    now=time.time(),
                 )
                 if verdict == "ask":
                     self.log("· 这一代已经交接出去了；你没说要不要关这台机器 —— 留着")
