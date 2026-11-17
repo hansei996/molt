@@ -62,12 +62,20 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+#: 同 `main.py` 的理由：`command.py` 会被单独加载（测试，以及插件里的
+#: `from .command import MoltMover`），所以它不能假设调用方已经替它把
+#: `_vendor` 放进 import 路径。**必须放在所有 import 之后** —— 它自己要用 `Path`。
+_VENDOR_DIR = Path(__file__).resolve().parent / "_vendor"
+if _VENDOR_DIR.is_dir() and str(_VENDOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_VENDOR_DIR))
 
 #: 指令配置所在的文件名。和 `host_label.txt` 一样放在插件目录里：
 #: `data/plugins/**` 不在 `soul.py` 的 `COPY_ARTIFACTS` 里，所以它是**机器绑定**的。

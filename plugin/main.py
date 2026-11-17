@@ -49,9 +49,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
+
+#: 插件自带的 `molt` 包（`_vendor/molt/`）。**必须在任何 `molt.*` import 之前
+#: 把它放进 `sys.path`** —— 插件装在宿主机的 AstrBot 里，而宿主机不一定
+#: `pip install molt-handoff`。
+#:
+#: 2026-11-17 09:01 的现场：缺这几行 → `from .command import MoltMover` 抛
+#: `ModuleNotFoundError: No module named 'molt'` → `_mover = None` → 所有
+#: `/molt` 指令退化成「迁徙指令层没装成功，看日志」，连落地播报的回执都写不进账本。
+_VENDOR_DIR = Path(__file__).resolve().parent / "_vendor"
+if _VENDOR_DIR.is_dir() and str(_VENDOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_VENDOR_DIR))
 
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.event.filter import PermissionType, permission_type
