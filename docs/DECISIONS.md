@@ -753,6 +753,40 @@ molt dsh call     --shell desktop-h2kgiao --method session/list --args '{"_reque
 - `session/create`、`session/cancel`、`session/fork` 这些方法**没有**放进来。
   需要的时候再加，加之前先想清楚"这条路径谁能触发"。
 
+### 真机联调（2026-11-18 02:35，Windows 本机一侧 + NAS 一侧）
+
+**这台机器上真验的**（Windows 本机，`127.0.0.1:6191`）：
+
+| 项 | 结果 |
+|---|---|
+| `GET /health` | 200，`{"ok": true, "service": "molt-dshpeer", "methods": [session/list, session/events, session/prompt]}` |
+| `POST /dsh` → `session/list` | 200，**184** 个会话；第一条 `running=true` |
+| `POST /dsh` → `session/events` | 200，`records=14`、`hasMore=true`（`seq` 到 50795） |
+| `POST /dsh` → `session/prompt` | 从 NAS 那一跳发一次 `queue`，回 `{'accepted': True}`，CLI 退出码 0 |
+| 不带 token | **401** `token 不对` |
+| 带错 token | **401** `token 不对`（与不带同码同文案 —— 不告诉对方"你差一点点"） |
+| `session/create` | **400** `session/create 不在白名单里：经账本代转，只允许这三个方法：session/list、session/events、session/prompt（读会话、读历史、发一句话）` |
+| `session/cancel` | **400**，同一句话 |
+| 调用方多塞 `address` / `upstream` / `target` | **200**，仍然命中本机 3082（184 条）——**目标不可由调用方指定** |
+| 请求体不是合法 JSON | **400** `请求体不是合法 JSON` |
+
+**从 NAS 这一侧真验的**（`warden:6186`，即鱼真正走的那一跳）：
+
+| 项 | 结果 |
+|---|---|
+| 不带 token 打 `/dsh` | **401** |
+| `session/create` | **400**，中文理由同上 |
+| `session/list` | `ok=True`，**184** 个会话 |
+| `session/events` | `ok=True`，`records=14`、`hasMore=true` |
+| `molt dsh sessions / history / send --dry-run` | 三条命令都在真机上跑通（`send` 空转时打印目标、模式、内容，不发出） |
+
+**还只是单测的**（这条链上「已验」与「大概对」必须分开写）：
+
+- `peer_call` 的**超时**分支（`READ_TIMEOUT=30` / `SEND_TIMEOUT=60`）——真机没制造过超时。
+- Windows agent 被杀掉再被拉起之后，peer 小口**会不会**跟着恢复 —— 只验过"起来之后它在听"。
+- `resolve_base()` 在「壳没登记 address」时的报错文案 —— 单测覆盖，真机没走到。
+- `session/prompt` 的**落地**：`accepted: True` 是排队被接受，真正的用户消息要等那一轮结束才出现。这是 queue 语义，不是链路问题 —— 但"到了它会真的开始跑"这一句，等下一次真机观察再标已验。
+
 ---
 
 ## D19 · "300 秒没人碰键鼠才关"要不要放宽（等主人拍板，2026-11-18）
