@@ -859,3 +859,49 @@ molt dsh call     --shell desktop-h2kgiao --method session/list --args '{"_reque
 
 选 B 的话我会在文档里明确写清：**这条策略的语义是"到点就关，不看你正在干什么"**，
 并且把 `/molt keep` 这条出口的存在写进播报之外的地方（否则你只有 120 秒窗口能救）。
+
+## D20 · 把 DSH 的 3082 从局域网上收回去（**需要管理员权限，未执行** · 2026-11-18）
+
+**现状（刚核过）**：`Get-NetTCPConnection -State Listen` 里
+
+```
+0.0.0.0:3082  pid=21640   ← DSH 的 host 服务，局域网任何人都能直连
+0.0.0.0:6191  pid=21912   ← molt 的代转小口，有 token 但没有 IP 限制
+127.0.0.1:6199 pid=10088  ← AstrBot dashboard（这个本来就是对的）
+```
+
+**为什么必须收**：3082 上的 RPC 没有鉴权（我这一整条代转链就是靠"它只认回环"来兜底）。
+代转只是**绕开**它，没有**关掉**它 —— 同一个局域网里的人不需要任何 token 就能
+`session/list`、`session/prompt`。这跟「鱼常驻 NAS」没有关系，是这台 Windows 的暴露面。
+
+**收口方案（三选一，都需要管理员）**
+
+| 方案 | 做法 | 效果 | 代价 |
+|---|---|---|---|
+| **A（推荐）** | 防火墙**阻止** 3082 的入站（所有 profile），只保留回环可用 | DSH 只有本机能连；代转小口仍打 `127.0.0.1:3082`，**链路不受影响** | Windows 防火墙通常不过滤回环流量，所以要实测一次"本机还能连、NAS 直连被拒" |
+| B | 防火墙**只允许** NAS 的 `192.168.50.50` 访问 3082 | 比现在窄，但 NAS 仍能直连（少一层中转） | 需要给 NAS 固定 IP（已有 DHCP 保留）；将来换机器要改规则 |
+| C | 改 DSH 的监听地址为 `127.0.0.1` | 最干净 | **目前找不到开关**：`app.asar`、`Preferences`、`cordis.yml`、命令行里都没有 bind 配置（2026-11-15 查过），所以 C 现在做不到 |
+
+**A 的具体命令**（有管理员权限时执行一次；两条我一律不代跑）：
+
+```powershell
+New-NetFirewallRule -DisplayName "molt: block DSH 3082 from LAN" `
+  -Direction Inbound -Protocol TCP -LocalPort 3082 -Action Block -Profile Any
+# 回滚：Remove-NetFirewallRule -DisplayName "molt: block DSH 3082 from LAN"
+```
+
+**验完怎么算成功**：从 NAS 上 `curl --max-time 4 http://192.168.50.63:3082/api/session/list -d '{}'`
+应该**失败**；同时本机 `curl http://127.0.0.1:3082/api/session/list` 仍 200，
+并且 `molt dsh sessions --shell desktop-h2kgiao` 仍然正常（走 6191 → 回环）。
+
+**顺带（同一个动作里可做）**：把 6191 也收窄到只允许 NAS 的 IP：
+
+```powershell
+New-NetFirewallRule -DisplayName "molt: allow peer 6191 from NAS only" `
+  -Direction Inbound -Protocol TCP -LocalPort 6191 -RemoteAddress 192.168.50.50 -Action Allow -Profile Any
+New-NetFirewallRule -DisplayName "molt: block peer 6191 from others" `
+  -Direction Inbound -Protocol TCP -LocalPort 6191 -Action Block -Profile Any
+```
+
+**当前账户不是管理员**（`is_admin=False`，`Register-ScheduledTask` 也报 0x80070005），
+所以这一条只写方案、没执行。要不要做、做 A 还是 B，等你拍。
