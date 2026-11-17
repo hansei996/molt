@@ -3417,6 +3417,19 @@ def _probe_warden(base: str, token: str, *, timeout: float = 5.0) -> Optional[in
 
 
 def build_parser() -> argparse.ArgumentParser:
+    def _warden_opts(parser: argparse.ArgumentParser, *, parent: bool = False) -> None:
+        """每个 `policy` 子命令都要能指向远端账本。
+
+        `--root` 写本地、`--warden-url/--warden-token` 写远端 —— 只给前者，
+        这条命令就只能在账本那台机器上敲，而那台通常是 NAS 的容器外。
+        `parent=True` 时只补 `--root`：父解析器从 `parents=[common]` 已经带了
+        那两个远端开关，再加一次会 `conflicting option string`。
+        """
+        parser.add_argument("--root", help="Warden 根目录（本地模式）")
+        if not parent:
+            parser.add_argument("--warden-url", help="Warden 地址（远端模式）")
+            parser.add_argument("--warden-token", help="Warden token")
+
     p = argparse.ArgumentParser(
         prog="molt",
         description="让一个 AI 存在在多台机器之间迁徙，而不失去连续性。",
@@ -3811,23 +3824,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     # declare
     s = add("machine", "看 / 叫醒 / 关掉账本里的任意一台机器（鱼不用搬过去）")
-    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    _warden_opts(s, parent=True)
     s.add_argument("--json", action="store_true", help="机器可读输出（暂只用于 list）")
     ms = s.add_subparsers(dest="machine_action", required=True)
     ml = ms.add_parser("list", help="列出所有机器：心跳、地址、能不能叫醒")
-    ml.add_argument("--root", help="Warden 根目录（本地模式）")
+    _warden_opts(ml)
     ml.add_argument("--json", action="store_true")
     mo = ms.add_parser("on", help="发魔术封包叫醒一台机器")
     mo.add_argument("shell")
-    mo.add_argument("--root")
+    _warden_opts(mo)
     mf = ms.add_parser("off", help="给一台机器投一张关机票（会过期）")
     mf.add_argument("shell")
-    mf.add_argument("--root")
+    _warden_opts(mf)
 
     s.set_defaults(func=cmd_machine)
 
     s = add("declare", "登记「这台机器是什么」：role / gpu / 能不能被叫醒 / 每小时多少钱")
-    s.add_argument("--root", help="Warden 根目录（本地模式）")
+    _warden_opts(s, parent=True)
     s.add_argument("--shell", required=True, help="哪台壳（与账本里的 target_shell 一致）")
     s.add_argument("--role", choices=("nas", "desktop", "cloud", "unknown"), help="这台机器的角色")
     s.add_argument(
@@ -3869,19 +3882,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_declare)
 
     s = add("policy", "自动搬家策略（M2）：看、设、撤")
-
-    def _warden_opts(parser: argparse.ArgumentParser, *, parent: bool = False) -> None:
-        """每个 `policy` 子命令都要能指向远端账本。
-
-        `--root` 写本地、`--warden-url/--warden-token` 写远端 —— 只给前者，
-        这条命令就只能在账本那台机器上敲，而那台通常是 NAS 的容器外。
-        `parent=True` 时只补 `--root`：父解析器从 `parents=[common]` 已经带了
-        那两个远端开关，再加一次会 `conflicting option string`。
-        """
-        parser.add_argument("--root", help="Warden 根目录（本地模式）")
-        if not parent:
-            parser.add_argument("--warden-url", help="Warden 地址（远端模式）")
-            parser.add_argument("--warden-token", help="Warden token")
 
     _warden_opts(s, parent=True)
     psub = s.add_subparsers(dest="policy_action", required=True)

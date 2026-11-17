@@ -1168,6 +1168,7 @@ class Warden:
                 "cost_per_hour": attrs.get("cost_per_hour") if "cost_per_hour" in attrs else None,
                 "label": str(attrs.get("label") or ""),
                 "wake_mac": str(attrs.get("wake_mac") or ""),
+                "address": str(attrs.get("address") or ""),
                 "updated_at": attrs.get("updated_at", 0),
                 "updated_at_readable": attrs.get("updated_at_readable", ""),
                 "updated_by": attrs.get("updated_by", ""),

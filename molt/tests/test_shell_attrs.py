@@ -158,6 +158,8 @@ def test_the_view_does_not_leak_internal_keys(root: Path) -> None:
         # 1.2 补的：哪些字段真的被声明过。少了它，"没填"和"填了 false"
         # 在视图里长得一模一样 —— 而按后者判断会得出相反的结论。
         "declared_fields",
+        # 1.3.1：局域网地址。`molt machine list` 拿它探 DSH 的 3082。
+        "address",
     }
 
 
