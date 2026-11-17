@@ -121,7 +121,7 @@ class MoltControlApi:
         state = notify.NotifyState(Path(cfg.data_dir) / notify.STATE_FILENAME)
         status = self.plugin._mover.ledger_status() or {}
         latest = status.get("latest_generation") or {}
-        number = int(latest.get("number") or 0)
+        number = notify.generation_of(latest)
         from .main import _prettify
 
         text = notify.compose_arrival_push(label=_prettify(cfg.shell), generation=number)

@@ -149,3 +149,31 @@ def test_the_notify_route_imports_the_request_proxy():
     spec.loader.exec_module(module)
 
     assert hasattr(module, "request"), "api.py 必须从 astrbot.api.web 导入 request"
+
+
+def test_the_generation_comes_from_the_generation_field() -> None:
+    """账本里字段叫 `generation` —— 读错名字会让自动通知永远不发。"""
+    assert notify.generation_of({"generation": 39, "consumed_by": "x"}) == 39
+
+
+def test_a_legacy_number_field_still_works() -> None:
+    assert notify.generation_of({"number": 7}) == 7
+    assert notify.generation_of({}) == 0
+    assert notify.generation_of(None) == 0
+    assert notify.generation_of({"generation": "not-a-number", "number": 3}) == 3
+
+
+def test_no_plugin_file_reads_the_wrong_field_directly() -> None:
+    """所有读代次的地方都必须过 `generation_of()`。
+
+    2026-11-17：`_arrival_push_loop` 与 `notify_arrival` 都写的是
+    `latest.get("number")`，而账本给的是 `generation` —— 自动通知因此从上线起
+    就没发出去过，只留一条"等超时了"。这条测试扫源码，防止第三次写错。
+    """
+    plugin_dir = Path(__file__).resolve().parents[2] / "plugin"
+    offenders = []
+    for src in sorted(plugin_dir.glob("*.py")):
+        text = src.read_text(encoding="utf-8")
+        if 'get("number")' in text:
+            offenders.append(src.name)
+    assert offenders == []

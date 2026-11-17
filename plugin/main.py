@@ -117,6 +117,24 @@ ARRIVAL_STATE_FILENAME = "arrival_state.json"
 ARRIVAL_MAX_ATTEMPTS = 3
 
 
+def _shell_label(status: Any, shell_id: Any) -> str:
+    """从账本的壳属性里取人读的名字（拿不到就返回空串）。
+
+    为什么需要它：`_prettify` 只能读本机的 `host_label.txt`，
+    而搬家注脚要写的是**对面那台**的名字 —— 本机没有它的 label 文件。
+    """
+    try:
+        shells = (status or {}).get("shells") or {}
+        entry = shells.get(str(shell_id or "")) or {}
+        for key in ("label", "host_label"):
+            value = str(entry.get(key) or "").strip()
+            if value:
+                return value
+    except Exception:  # noqa: BLE001 - 只是美化，取不到就算了
+        return ""
+    return ""
+
+
 def _prettify(shell: str) -> str:
     """把壳名说成人话（desktop-h2kgiao -> DESKTOP-H2KGIAO）。"""
     try:
@@ -152,6 +170,8 @@ class MoltControlPlugin(Star):
         #: 落地之后"我自己看一眼我在哪"的那条后台任务（见 `observed.py`）。
         self._obs_task: asyncio.Task | None = None
         self._push_task: asyncio.Task | None = None
+        #: 「我刚搬过家」这条注脚的状态（见 `plugin/awareness.py`）。
+        self._awareness_state = None
         self._obs_state = None
         #: 落地播报（"我刚从 X 搬过来"）说过没有。
         self._arrival_state = None
@@ -206,8 +226,10 @@ class MoltControlPlugin(Star):
             try:
                 status = await asyncio.to_thread(self._mover.ledger_status)
                 latest = (status or {}).get("latest_generation") or {}
-                number = int(latest.get("number") or 0)
+                number = notify.generation_of(latest)
                 mine = str(latest.get("consumed_by") or "") == str(cfg.shell)
+                if mine:
+                    self._note_awareness(status)
                 if mine and notify.should_push(state, number):
                     text = notify.compose_arrival_push(
                         label=_prettify(cfg.shell), generation=number
@@ -380,6 +402,9 @@ class MoltControlPlugin(Star):
                             self._arrival_attempts)
             return ""
         self._arrival_checked = True
+        # 不管这次要不要播报，先把"我刚搬过家"这条事实记下来 ——
+        # 播报可能因为平台限制发不出去，而 `on_llm_request` 那条注脚不需要平台。
+        self._note_awareness(status)
         shell = (settings.shell or self.host_label() or "").strip()
         arrival = pick_arrival(
             status,
@@ -910,6 +935,77 @@ class MoltControlPlugin(Star):
         """
         self._start_observe_task()
         self._start_push_task()
+
+    def _awareness_state_obj(self):
+        """懒加载「我刚搬过家」的状态文件（放在插件目录里，属于壳）。"""
+        if self._awareness_state is None:
+            from . import awareness
+
+            self._awareness_state = awareness.AwarenessState(
+                Path(__file__).resolve().parent / awareness.STATE_FILENAME
+            )
+        return self._awareness_state
+
+    def _note_awareness(self, status: Any) -> None:
+        """账本说"这一代是我接的"时，记下"我刚从哪搬过来"。
+
+        只在**代次变化**时重置（`AwarenessState.record` 自己判重）：同一个进程
+        反复调用不会把"还能说三次"重置成"又说三次"。
+        """
+        try:
+            from . import awareness, notify
+
+            latest = (status or {}).get("latest_generation") or {}
+            number = notify.generation_of(latest)
+            if number <= 0:
+                return
+            cfg = self._mover.settings()
+            if str(latest.get("consumed_by") or "") != str(cfg.shell):
+                return
+            state = self._awareness_state_obj()
+            if state.record(
+                number,
+                shell=_prettify(cfg.shell),
+                from_shell=_prettify(latest.get("pushed_by") or "")
+                or _shell_label(status, latest.get("pushed_by")),
+                requests=awareness.DEFAULT_REQUESTS,
+            ):
+                logger.info(
+                    "[Molt] 记下这次搬家：从 %s 到 %s（%s）—— 接下来 %d 次回复会带上这条事实",
+                    latest.get("pushed_by") or "?",
+                    cfg.shell,
+                    number,
+                    awareness.DEFAULT_REQUESTS,
+                )
+        except Exception as exc:  # noqa: BLE001 - 记账失败不该影响回复
+            logger.warning("[Molt] 搬家事实没记下来：%s", exc)
+
+    @filter.on_llm_request()
+    async def inject_move_awareness(self, event: AstrMessageEvent, request: Any) -> None:
+        """在请求里加一句「你刚搬过家」——只对这次请求可见。
+
+        为什么是 `on_llm_request` 而不是记忆：搬家是壳的事实，不是人格的流水账
+        （主人在 2026-11-17 点了这个单，见 `docs/DECISIONS.md` 的 E5）。
+
+        为什么失败只记日志：少一句注脚，它顶多又答错一次"我在哪"；
+        抛异常会连正常回复一起弄没 —— 那更糟。
+        """
+        try:
+            from . import awareness
+
+            state = self._awareness_state_obj()
+            text = state.note()
+            if not text:
+                return
+            if awareness.append_note(request, text):
+                state.consume()
+                logger.info(
+                    "[Molt] 已注入搬家事实（第 %s 份快照，还剩 %d 次）",
+                    state.generation,
+                    state.remaining,
+                )
+        except Exception as exc:  # noqa: BLE001 - 防御性
+            logger.warning("[Molt] 搬家事实没注入进去：%s", exc)
 
     @filter.on_waiting_llm_request()
     async def announce_arrival(self, event: AstrMessageEvent) -> None:

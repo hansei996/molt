@@ -141,5 +141,27 @@ class NotifyState:
         self.save()
 
 
+def generation_of(latest: Any) -> int:
+    """从账本的 `latest_generation` 里读出代次。
+
+    **2026-11-17 的现场**：账本里的字段叫 `generation`，而自动通知与手动补发
+    这两处都读的是 `number` —— 于是 `number` 永远是 0：
+    手动那条因为文案里不用数字，看起来"能用"；自动那条被 `should_push(0)` 判成
+    "没有新一代"，**从来没主动说过一句话**，只留下一条"等超时了"的日志。
+
+    所以读法收在一处，并且两种键名都认（账本视图以后要改名时不会再踩一次）。
+    """
+    if not isinstance(latest, dict):
+        return 0
+    for key in ("generation", "number"):
+        try:
+            value = int(latest.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value:
+            return value
+    return 0
+
+
 def should_push(state: NotifyState, generation: int) -> bool:
     return bool(generation) and int(generation) > int(state.pushed_generation or 0)
