@@ -870,12 +870,33 @@ Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in 3082,6191,6
 ```
 
 ```
-0.0.0.0:3082  pid=21640   ← DSH host 服务：无鉴权，局域网谁都能连
+0.0.0.0:3082  pid=21640   ← DSH host 服务：端口对局域网可达，但要求登录（见下面的实测）
 0.0.0.0:6191  pid=21912   ← molt 代转小口：有 token，但没有 IP 限制
 127.0.0.1:6199 pid=10088  ← AstrBot dashboard（这个本来就是对的）
 ```
 
+**2026-11-18 04:50 从 NAS 实测（这是纠错，不是补充）**：
+
+| 打法 | 结果 |
+|---|---|
+| `POST http://192.168.50.63:3082/api/session/list`（不带任何凭据） | **401** `{"error":"unauthorized","message":"需要访问认证，请先登录"}` |
+| `GET http://192.168.50.63:6191/health`（不带 token） | **200**（存活探针，故意不鉴权） |
+| `POST http://192.168.50.63:6191/dsh`（不带 token / 错 token） | **401** `token 不对` |
+| 同上，带正确 token | **200**，0.07 秒返回 184 个会话 |
+
+**我之前写过「3082 无鉴权」，那是 11-15 的观察，11-18 已经不是了。**
+现在的准确说法是：**端口对外可达，但仍要登录**。风险等级从"谁都能操作"降到
+"依赖鉴权不回退"，但"靠鉴权不回退"不是一条能长期依赖的性质 —— 所以仍然建议收。
+
+本机防火墙三个 profile 都开着（`Domain/Private/Public = True`，`DefaultInboundAction=NotConfigured`），
+且**没有任何 `molt:` 开头的规则**（`Get-NetFirewallRule -DisplayName "molt: *"` 为空）。
+
 `is_admin=False`（`Register-ScheduledTask` 也报 `0x80070005`），所以下面三条**一条都没执行**。
+
+### 照着敲的版本
+
+这一节是判定与回滚的依据；**给主人的一页纸**（含"怎么确认自己是管理员 / 怎么开管理员终端"）
+在 `docs/ADMIN-D20.md`。
 
 ### A · 防火墙阻止 3082 的入站（推荐）
 
