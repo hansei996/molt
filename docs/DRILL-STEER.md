@@ -28,13 +28,14 @@
 python tools/drill-steer.py --peers --warden-url http://192.168.50.50:6186 --warden-token <token>
 ```
 
-**你会看到：**
+**你会看到**（2026-11-18 07:00 真机输出）：
 
 ```
 账本里 desktop-h2kgiao 上共 184 个会话，其中正在跑 1 个。
-  · session-b0639458-…  空着  C:\Users\13553\Downloads\DSH_workspace
+  · session-b0639458-…  在跑  C:\Users\13553\Downloads\DSH_workspace
   · session-51fef645-…  空着  C:\Users\13553\Downloads\DSH_workspace
-  · …
+  · session-0e9151d7-…  空着  C:\Users\13553\Downloads\DSH_workspace
+  · session-c637773e-…  空着  C:\Users\13553\Downloads\DSH_workspace
 ```
 
 （`<token>` 在 `C:\Users\13553\Downloads\DSH_workspace\molt\tools\molt-agent.json` 的
@@ -48,15 +49,21 @@ python tools/drill-steer.py --peers --warden-url http://192.168.50.50:6186 --war
 python tools/drill-steer.py --plan --warden-url http://192.168.50.50:6186 --warden-token <token>
 ```
 
-**你会看到**（不会发出任何东西）：
+**你会看到**（2026-11-18 07:00 真机输出，不会发出任何东西）：
 
 ```
 （空转，不会发出任何东西）
   目标壳  desktop-h2kgiao
-  会话    session-51fef645-…   空着
+  会话    session-51fef645-e4d2-438d-9956-6f3492b3fae2   空着
   模式    steer
-  内容    【molt steer 演练】这条只用来确认 steer 能插进这条链路，不用做任何事，也不用回复。(05:02:40)
+  内容    【molt steer 演练】这条只用来确认 steer 能插进这条链路，不用做任何事，也不用回复。(07:00:26)
+
+真跑（空会话上）：把 --plan 去掉
+真跑（正在跑的回合，需要人工 YES）：再加 --allow-running
 ```
+
+> 这两步（`--peers` 与 `--plan`）**已经按真机走通并把输出贴在这里了**；
+> 第三段「真跑」没有执行 —— 因为它会往一个真实会话里塞一条消息，留给主人按。
 
 ---
 

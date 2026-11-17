@@ -8,6 +8,59 @@
 
 ---
 
+## -1. 手边只有这一页时，先把三件事对上（2 分钟）
+
+**① 这台 Windows 是哪台？** 在【Windows】PowerShell：
+
+```powershell
+hostname; (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -like "192.168.*" }).IPAddress
+```
+
+期望：`DESKTOP-H2KGIAO` 和 `192.168.50.63`。**如果 IP 不是 `.63`，下面所有命令里的
+`192.168.50.63` 都要换成你实际那个**（DHCP 保留可能会变）。
+
+**② NAS 怎么进？** 任意终端：
+
+```bash
+ssh -p 922 root@192.168.50.50
+```
+
+- `-p 922` 是必须的，不是 22
+- 密码就是你的 NAS root 密码（**这页里没有它，也不该有**）；忘了的话在我这边只能重置，不在这一页的范围内
+- 进去后提示符会变成类似 `UGREEN-776B:~#`
+
+**③ `molt` 命令在哪？** 它**不在 PATH 上**。在【NAS】上用完整形式（这是自查第 3 条要用的）：
+
+```bash
+cd /mnt/dm-0/astrbot/_molt/pkg && PYTHONPATH=/mnt/dm-0/astrbot/_molt/pkg \
+  python3 -m molt.cli --no-color dsh sessions --shell desktop-h2kgiao \
+  --warden-url http://127.0.0.1:6186 \
+  --warden-token "$(cat /mnt/dm-0/astrbot/_molt/warden.token)"
+```
+
+**2026-11-18 07:00 我实测的输出**（对照基线）：
+
+```
+desktop-h2kgiao 上的会话
+  session-b0639458-cbc   11-18 07:00 · 在跑 · C:\Users\13553\Downloads\DSH_workspace
+  session-51fef645-e4d   11-18 04:33 · 闲着 · C:\Users\13553\Downloads\DSH_workspace
+  session-0e9151d7-9e8   11-15 22:21 · 闲着 · C:\Users\13553\Downloads\DSH_workspace
+```
+
+**④ 端口还是 3082 吗？** 在【Windows】先确认（只读）：
+
+```powershell
+Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in 3082,6191 } |
+  ForEach-Object { "$($_.LocalAddress):$($_.LocalPort) pid=$($_.OwningProcess)" }
+```
+
+期望看到 `0.0.0.0:3082` 和 `0.0.0.0:6191`。**如果 3082 不在了**，说明 DSH 换了端口或没起来，
+先别做防火墙（规则会建在错的端口上），把这条输出发我。
+
+> **这一页需要管理员权限的只有第 3 节（建规则）和第 5 节（删规则）**；第 0、-1、4 节的命令都不需要。
+
+---
+
 ## 0. 先看清楚现在是什么状态（全部只读）
 
 ### 0.1 在【NAS】上跑
@@ -126,7 +179,7 @@ New-NetFirewallRule -DisplayName "molt: block peer 6191 from others" -Direction 
 |---|---|---|---|
 | 1 | **【NAS】** | `curl -s -m 4 -o /dev/null -w "%{http_code}\n" -X POST http://192.168.50.63:3082/api/session/list -d '{}'` | **`000`**（超时/拒绝）—— 关键：**从 401 变成 000** 才算挡上了 |
 | 2 | **【Windows】** | `curl.exe -s -m 5 -o NUL -w "%{http_code}`n" -X POST http://127.0.0.1:3082/api/session/list -d "{}"` | **`200`**（回环没被误伤） |
-| 3 | **【NAS】** | `molt dsh sessions --shell desktop-h2kgiao` | 正常列出会话（代转这条路还通） |
+| 3 | **【NAS】** | 第 -1 节 ③ 那条完整命令（`cd /mnt/dm-0/astrbot/_molt/pkg && PYTHONPATH=… python3 -m molt.cli … dsh sessions …`） | 正常列出会话（说明 6191 → 回环 3082 这条路还通）；报 `连不上 Warden` 就是代转断了 |
 
 **最容易搞错的两点：**
 
