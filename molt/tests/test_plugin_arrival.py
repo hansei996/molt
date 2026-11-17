@@ -419,14 +419,21 @@ def test_do_not_ask_when_the_age_is_unreadable():
     )
 
 
-def test_plugin_appends_the_power_question_after_the_arrival_note(tmp_path):
+def test_the_arrival_note_never_asks_about_the_power(tmp_path):
+    """播报只说「我从哪儿来」。
+
+    2026-11-18 主人定：旧壳还开着时也不在播报里追问关不关 —— 那是
+    `/molt shutdown` / `/molt keep` 的事。这条测试钉的是"不要顺手加回去"：
+    旧壳明明还活着（心跳 3 秒），播报里却不许出现"还开着"或者两条指令。
+    """
     mover = _FakeMover(_power_status())
     plugin = _plugin(tmp_path, mover)
     event = _run(plugin)
     assert len(event.sent) == 1
     assert "我刚从 UGREEN-776B 那边过来" in event.sent[0]
-    assert "还开着" in event.sent[0]
-    assert "/molt shutdown" in event.sent[0]
+    assert "还开着" not in event.sent[0]
+    assert "/molt shutdown" not in event.sent[0]
+    assert "/molt keep" not in event.sent[0]
 
 # ------------------------------------------------- 落地播报回执（旧壳关自己的凭据）
 

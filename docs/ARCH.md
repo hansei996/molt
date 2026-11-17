@@ -4432,3 +4432,35 @@ AstrBot 有这个接缝：
 - `machine off` 拒绝关掉**鱼自己站着的那台**（关掉它等于把鱼一起关掉）；
 - 票过期后变成"没票"，而没票的语义是**不关**；
 - `machine on` 只发封包、不承诺能起来 —— 封包是"按下电源键"，不是"开机成功"。
+
+### 14.32 鱼待在 NAS 上也能操作另一台的 DSH（2026-11-18）
+
+**问题**：DSH 的 host 服务按回环地址做 Host 校验，从 NAS 直接连
+`http://192.168.50.63:3082` 在协议层就不成立 —— 不是防火墙，也不是端口没开。
+而"鱼常驻 NAS"的前提是：它得能在不搬过去的情况下发 prompt、读 history。
+
+**做法**：账本代转。
+
+```
+鱼在 NAS ──> warden 6186 /dsh ──> Windows:3082/api/<method>   （Host: 127.0.0.1:3082）
+```
+
+**三条约束**（都在 `molt/dshrelay.py` 里，各有一条测试钉着）：
+
+| 约束 | 判据 |
+|---|---|
+| 只允许 `session/list`、`session/events`、`session/prompt` | 白名单在**发请求之前**判，不在回执里判 |
+| 目标壳必须在账本里登记过 `address` | 取不到就报错，**绝不退回 `127.0.0.1`** |
+| 不重试、不缓存、不解释语义 | `call()` 只发一次；失败把对端的 code/message 原样带回来 |
+
+**两个发现**（都是"参数形状不对，于是它安静地说不行"）：
+
+- `session/list` 的 args 是 `{"_request": {}}`（下划线开头），而 `session/events` 与
+  `session/prompt` 的 args 是 `{"request": {...}}` —— 同一个网关里两种前缀。
+- `session/prompt` 的 request 必须带 `requestId`、`sessionId`、`mode`、`content`；
+  `mode` 只有 `queue` / `steer` 两个值。默认 `queue`（排在后面），
+  **打断人家的回答不该是默认行为**。
+
+**没做的**：`session/create` / `session/cancel` / `session/fork` 一个都没放进来；
+`3082` 仍然绑在 `0.0.0.0`（要不要收敛是 D17 末尾那个待拍板项）。
+

@@ -387,6 +387,11 @@ class RemoteBackend:
     def wake(self, mac: str, *, host: str = "", prefix_len: int = 24) -> Dict[str, Any]:
         """远端后端：让账本那台机器发。容器里的广播出不了 docker0。"""
         return self.client.wake(mac, host=host, prefix_len=prefix_len)
+
+    def dsh(self, shell: str, method: str, args: Any = None) -> Dict[str, Any]:
+        """远端后端：请账本代转（账本那台机器同时看得见两台）。"""
+        return self.client.dsh(shell, method, args or {})
+
     def set_shell(self, shell_id: str, **attrs: Any) -> Dict[str, Any]:
         return self.client.set_shell(shell_id, **attrs)
 

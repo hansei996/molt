@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from . import dshrelay
 from .errors import Fatal, MoltError, NeedsHuman
 from .render import render_timeline
 from .wake import magic_packet, wake_targets
@@ -401,6 +402,7 @@ class WardenServer:
                     label=body.get("label"),
                     wake_mac=body.get("wake_mac"),
                     address=body.get("address"),
+                    dsh_relay=body.get("dsh_relay"),
                     by=str(body.get("by") or ""),
                 )
                 return _ok(shell=attrs)
@@ -531,6 +533,48 @@ class WardenServer:
                     detail=str(body.get("detail") or ""),
                 )
                 return _ok(arrival=arrival)
+
+            # ---- POST /dsh ----（代转给另一台机器上的 DSH，只放三个方法）
+            #
+            # 为什么要有这一层：DSH 的 host 服务按回环地址做 Host 校验，
+            # 从 NAS 直接连 `http://192.168.50.63:3082` 在协议层就不成立。
+            # 代转时把 Host 改写成 127.0.0.1:<port>，对端以为自己在跟本机说话。
+            #
+            # 这里是**唯一**一处"账本能主动向外发请求"的地方，所以：
+            # 方法白名单（在 dshrelay 里）、目标必须是账本登记过地址的壳、
+            # 失败只回原文，不重试 —— 重试会让调用方分不清一次还是两次。
+            if head == "dsh" and parts[1:2] == [] and method == "POST":
+                shell_id = str(body.get("shell") or "").strip()
+                rpc_method = str(body.get("method") or "").strip()
+                args = body.get("args")
+                if not shell_id:
+                    return _err(400, "缺少 shell", "bad_request")
+                if not dshrelay.is_allowed(rpc_method):
+                    return _err(
+                        400,
+                        f"{rpc_method or '（空）'} 不在代转白名单里：{dshrelay.describe_scope()}",
+                        "bad_request",
+                    )
+                if not isinstance(args, dict):
+                    args = {}
+                try:
+                    status = self.warden.status()
+                    base = dshrelay.resolve_base(status, shell_id)
+                    attrs = (status.get("shells") or {}).get(shell_id) or {}
+                    relay_port = str(attrs.get("dsh_relay") or "").strip()
+                    address = str(attrs.get("address") or "").strip()
+                    if relay_port:
+                        # 有 DSH 的那台机器上开了小口：那一跳必须在本机发生
+                        # （DSH 按对端地址判回环，从 NAS 直接连会被 401）。
+                        value = dshrelay.peer_call(
+                            address, int(relay_port), rpc_method, args, token=self.token
+                        )
+                    else:
+                        value = dshrelay.call(base, rpc_method, args)
+                except dshrelay.DshRelayError as e:
+                    # 502：账本活着，但它够不着对面 / 对面回了一个"不行"。
+                    return _err(502, str(e), "dsh_unreachable")
+                return _ok(dsh=value)
 
             # ---- POST /power ----（「走」和「关」是两件事，这是第二件）
             if head == "power" and parts[1:2] == [] and method == "POST":

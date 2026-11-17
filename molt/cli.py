@@ -2692,6 +2692,115 @@ def _policy_status(be, args) -> int:
     return 0
 
 
+def cmd_dsh(args: argparse.Namespace) -> int:
+    """跨机跟另一台机器上的 DSH 说话 —— 由账本代转，只放三个方法。
+
+    为什么不让调用方直接连：DSH 的 host 服务按回环地址做 Host 校验，
+    从 NAS 连 `http://<win>:3082` 在协议层就不成立（见 `molt/dshrelay.py`）。
+    """
+    from . import dshrelay
+
+    be = _backend(args)
+    action = getattr(args, "dsh_action", "") or "sessions"
+    shell = str(getattr(args, "shell", "") or "").strip()
+    if not shell:
+        bad("要指定是哪台机器：--shell <壳名>（先跑的 molt machine list 看看）")
+        return 2
+
+    def call(method: str, payload: Any) -> Any:
+        return (be.dsh(shell, method, payload) or {}).get("dsh") or {}
+
+    if action == "sessions":
+        value = call("session/list", {"_request": {}})
+        items = value.get("items") or []
+        head(f"{shell} 上的会话")
+        if not items:
+            dim("  一个都没有。")
+            return 0
+        import time as _t
+
+        for item in items[: int(getattr(args, "limit", 10) or 10)]:
+            sid = str(item.get("sessionId") or "")
+            stamp = float(item.get("updatedAt") or 0) / 1000.0
+            when = _t.strftime("%m-%d %H:%M", _t.localtime(stamp)) if stamp else "?"
+            running = "在跑" if item.get("running") else "闲着"
+            kv(sid[:20], f"{when} · {running} · {item.get('cwd') or ''}")
+        dim("  读历史：molt dsh history --shell <壳> --session <id>")
+        dim("  发一句：molt dsh send --shell <壳> --session <id> \"你在吗\"")
+        return 0
+
+    if action == "history":
+        sid = str(getattr(args, "session", "") or "").strip()
+        if not sid:
+            bad("要指定会话：--session <id>（用 molt dsh sessions 列）")
+            return 2
+        payload = {
+            "request": {
+                "address": {"kind": "session", "sessionId": sid},
+                "maxMessages": int(getattr(args, "limit", 20) or 20),
+            }
+        }
+        value = call("session/events", payload)
+        if getattr(args, "json", False):
+            print(json.dumps(value, ensure_ascii=False, indent=2))
+            return 0
+        lines = dshrelay.summarize_events(value, limit=int(getattr(args, "limit", 20) or 20))
+        head(f"{sid[:20]} 的最近 {len(lines)} 条")
+        for line in lines:
+            print(f"  {line}")
+        if not lines:
+            dim("  （这一页里没有文字消息）")
+        return 0
+
+    if action == "send":
+        sid = str(getattr(args, "session", "") or "").strip()
+        text = " ".join(getattr(args, "text", []) or []).strip()
+        if not sid:
+            bad("要指定会话：--session <id>")
+            return 2
+        if not text:
+            bad("要发点什么：molt dsh send --shell <壳> --session <id> \"…\"")
+            return 2
+        mode = "steer" if getattr(args, "steer", False) else "queue"
+        if getattr(args, "dry_run", False):
+            dim("空转：这一句不会发出去。")
+            kv("目标", f"{shell} / {sid[:20]}")
+            kv("模式", mode)
+            kv("内容", text)
+            return 0
+        value = call(
+            "session/prompt",
+            {
+                "request": {
+                    "requestId": __import__("uuid").uuid4().hex,
+                    "sessionId": sid,
+                    "mode": mode,
+                    "content": [{"type": "text", "text": text}],
+                }
+            },
+        )
+        ok(f"发出去了（{mode}）：{str(value)[:120]}")
+        return 0
+
+    # call：通用逃生口，但方法仍受白名单限制
+    method = str(getattr(args, "method", "") or "").strip()
+    raw = str(getattr(args, "args", "") or "").strip() or "{}"
+    if not method:
+        bad("要指定方法：--method session/list")
+        return 2
+    if not dshrelay.is_allowed(method):
+        bad(f"{method} 不在代转白名单里：{dshrelay.describe_scope()}")
+        return 2
+    try:
+        payload = json.loads(raw)
+    except ValueError as e:
+        bad(f"--args 不是合法 JSON：{e}")
+        return 2
+    value = call(method, payload)
+    print(json.dumps(value, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_policy(args: argparse.Namespace) -> int:
     """自动搬家策略（M2）：看、设、撤。
 
@@ -2822,6 +2931,8 @@ def cmd_declare(args: argparse.Namespace) -> int:
         attrs["wake_mac"] = args.wake_mac
     if getattr(args, "address", None) is not None:
         attrs["address"] = args.address
+    if getattr(args, "dsh_relay", None) is not None:
+        attrs["dsh_relay"] = args.dsh_relay
     if not attrs:
         bad("什么都没给 —— 至少要 --role / --gpu / --wakeable / --cost-per-hour / --wake-mac 之一")
         return 2
@@ -3886,6 +3997,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="醒着一小时多少钱（云主机/电费；用来排序「哪台更该醒着」）",
     )
+    s.add_argument("--dsh-relay", help="这台机器上的代转小口端口（有 DSH 的机器才需要，比如 6191）")
     s.add_argument("--label", help="给人看的名字（不填就用壳名）")
     s.add_argument("--by", help="署名（写进账本的日志，方便事后追）")
     s.set_defaults(func=cmd_declare)
@@ -3937,6 +4049,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="等新壳确认落地播报送达最多等多久（秒，默认 120）",
     )
     p_set.set_defaults(func=cmd_policy)
+
+    s = add("dsh", "跟另一台机器上的 DSH 说话（由账本代转，只放三个方法）")
+    _warden_opts(s, parent=True)
+    dsub = s.add_subparsers(dest="dsh_action", required=True)
+    d_sessions = dsub.add_parser("sessions", help="那台机器上有哪些会话")
+    _warden_opts(d_sessions)
+    d_sessions.add_argument("--shell", required=True, help="哪台机器（molt machine list 里看）")
+    d_sessions.add_argument("--limit", type=int, default=10, help="最多列几个（默认 10）")
+    d_sessions.set_defaults(func=cmd_dsh)
+    d_history = dsub.add_parser("history", help="读某个会话的最近消息")
+    _warden_opts(d_history)
+    d_history.add_argument("--shell", required=True)
+    d_history.add_argument("--session", required=True, help="会话 id（molt dsh sessions 里看）")
+    d_history.add_argument("--limit", type=int, default=20, help="最多几条消息（默认 20）")
+    d_history.add_argument("--json", action="store_true", help="直接打原始 JSON")
+    d_history.set_defaults(func=cmd_dsh)
+    d_send = dsub.add_parser("send", help="往那个会话发一句话（会在那台机器上消耗模型）")
+    _warden_opts(d_send)
+    d_send.add_argument("--shell", required=True)
+    d_send.add_argument("--session", required=True)
+    d_send.add_argument("--steer", action="store_true", help="插进去改方向（默认排队，不打断）")
+    d_send.add_argument("--dry-run", action="store_true", help="只打印要发什么，不发")
+    d_send.add_argument("text", nargs="+", help="要说的话")
+    d_send.set_defaults(func=cmd_dsh)
+    d_call = dsub.add_parser("call", help="通用逃生口（方法仍在白名单内）")
+    _warden_opts(d_call)
+    d_call.add_argument("--shell", required=True)
+    d_call.add_argument("--method", required=True, help="session/list、session/events、session/prompt")
+    d_call.add_argument("--args", default="{}", help="JSON 参数（默认 {}）")
+    d_call.set_defaults(func=cmd_dsh)
 
     # timeline
     s = add(

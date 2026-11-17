@@ -160,6 +160,8 @@ def test_the_view_does_not_leak_internal_keys(root: Path) -> None:
         "declared_fields",
         # 1.3.1：局域网地址。`molt machine list` 拿它探 DSH 的 3082。
         "address",
+        # 1.3.1：有 DSH 的机器上那个代转小口的端口（空 = 没开）。
+        "dsh_relay",
     }
 
 

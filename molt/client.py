@@ -212,6 +212,7 @@ class WardenClient:
         label: Optional[str] = None,
         wake_mac: Optional[str] = None,
         address: Optional[str] = None,
+        dsh_relay: Optional[str] = None,
         by: str = "",
     ) -> Dict[str, Any]:
         """登记"这台机器是什么"。**只传你想声明的字段** —— 没传的保持原样。
@@ -229,6 +230,7 @@ class WardenClient:
             ("label", label),
             ("wake_mac", wake_mac),
             ("address", address),
+            ("dsh_relay", dsh_relay),
         ):
             if value is not None:
                 body[key] = value
@@ -327,6 +329,14 @@ class WardenClient:
                 "delivered": bool(delivered),
                 "detail": detail,
             },
+        )
+
+    def dsh(self, shell: str, method: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        """请账本代转一次 DSH 调用（只有三个方法，见 molt.dshrelay）。"""
+        return self._request(
+            "POST",
+            "/dsh",
+            {"shell": shell, "method": method, "args": args or {}},
         )
 
     def alert(

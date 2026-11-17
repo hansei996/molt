@@ -68,6 +68,7 @@ SHELL_ATTR_FIELDS = (
     "label",
     "wake_mac",
     "address",
+    "dsh_relay",
 )
 
 
@@ -1062,7 +1063,7 @@ class Warden:
             return round(cost, 4)
         if key == "address":
             # 局域网地址。空字符串合法（= 没登记），和"登记了一个错的"要分开：
-            # 前者只是查不到，后者会让 monkey 去连一台不存在的机器。
+            # 前者只是查不到，后者会让 molt 去连一台不存在的机器。
             text = str(value or "").strip()
             if not text:
                 return ""
@@ -1073,6 +1074,20 @@ class Warden:
             except (ValueError, ImportError):
                 raise NeedsHuman(f"address 要一个 IPv4 地址，收到 {value!r}")
             return text
+        if key == "dsh_relay":
+            # 那台机器上"代转小口"的端口（有 DSH 的机器才需要）。
+            # 空字符串合法 = 没开。存在的理由：DSH 的网关只认回环对端，
+            # 从 NAS 直接连会被 401，那一跳必须在 Windows 本机发生。
+            text = str(value if value is not None else "").strip()
+            if not text:
+                return ""
+            try:
+                port = int(text)
+            except (TypeError, ValueError):
+                raise NeedsHuman(f"{shell} 的 dsh_relay 必须是端口号，收到的是 {value!r}")
+            if port < 1 or port > 65535:
+                raise NeedsHuman(f"{shell} 的 dsh_relay 端口越界：{port}")
+            return str(port)
         if key == "wake_mac":
             # MAC 存在账本里，理由只有一条：**叫醒别人的那台机器需要它**。
             # 它不属于"那台机器是什么"（所以放在属性里有点别扭），但它必须
@@ -1104,6 +1119,7 @@ class Warden:
         label: Any = None,
         wake_mac: Any = None,
         address: Any = None,
+        dsh_relay: Any = None,
         by: str = "",
     ) -> Dict[str, Any]:
         """登记/更新一个壳的属性。**局部更新**：只改传进来的字段。
@@ -1125,6 +1141,7 @@ class Warden:
             ("label", label),
             ("wake_mac", wake_mac),
             ("address", address),
+            ("dsh_relay", dsh_relay),
         ):
             if value is None:
                 continue
@@ -1179,6 +1196,7 @@ class Warden:
                 "label": str(attrs.get("label") or ""),
                 "wake_mac": str(attrs.get("wake_mac") or ""),
                 "address": str(attrs.get("address") or ""),
+                "dsh_relay": str(attrs.get("dsh_relay") or ""),
                 "updated_at": attrs.get("updated_at", 0),
                 "updated_at_readable": attrs.get("updated_at_readable", ""),
                 "updated_by": attrs.get("updated_by", ""),

@@ -318,3 +318,13 @@ python tools\reload-plugin.py --config G:\molt-fish\data\cmd_config.json `
 
 首个可发布版本：账本（Warden）+ 租约/epoch fencing + `migrate`/`land` 双向迁徙 +
 中途备份 + `/where` 心跳页 + `molt timeline` 迁徙时间轴 + Docker 镜像 + CI。
+
+### 鱼待在 NAS 上也能操作另一台的 DSH（2026-11-18）
+
+- 新增 `molt dsh sessions|history|send|call`：经账本代转，跟另一台机器上的 DSH 说话。
+  只放三个方法（读会话、读历史、发一句），白名单在发请求之前就生效。
+- 修：落地播报不再追问"旧壳还开着，要不要关" —— 播报只说「我从哪儿来」，
+  那句追问属于 `/molt shutdown` / `/molt keep`。
+- 起因：DSH 的 host 服务按回环地址做 Host 校验，NAS 直连 `192.168.50.63:3082`
+  在协议层就不成立；代转时把 `Host` 改写成 `127.0.0.1:3082`。
+

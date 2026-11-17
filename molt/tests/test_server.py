@@ -525,3 +525,56 @@ def test_posting_a_policy_with_a_signature_does_not_look_like_a_bad_key(tmp_path
     assert resp.status == 200, resp.payload
     assert resp.payload["policy"]["id"] == "morning-home"
     assert "by" not in resp.payload["policy"]
+
+
+# ---------------------------------------------------------------------------
+# /dsh：代转给另一台机器（只放三个方法）
+# ---------------------------------------------------------------------------
+
+
+def test_dsh_refuses_a_method_outside_the_whitelist(srv: WardenServer) -> None:
+    r = srv.dispatch("POST", "/dsh", {"shell": "win", "method": "shell/exec", "args": {}})
+    assert r.status == 400
+    assert "白名单" in r.payload["message"]
+
+
+def test_dsh_without_a_ledger_address_is_a_502(srv: WardenServer) -> None:
+    r = srv.dispatch("POST", "/dsh", {"shell": "win", "method": "session/list", "args": {}})
+    assert r.status == 502
+    assert "molt declare" in r.payload["message"]
+
+
+def test_dsh_forwards_through_the_relay(srv: WardenServer, monkeypatch) -> None:
+    from molt import dshrelay as relay_mod
+
+    seen = {}
+
+    def fake_call(base, method, args, **kwargs):
+        seen.update({"base": base, "method": method, "args": args})
+        return {"items": [{"sessionId": "s-1"}]}
+
+    srv.warden.set_shell("win", address="192.168.50.63")
+    monkeypatch.setattr(relay_mod, "call", fake_call)
+    r = srv.dispatch("POST", "/dsh", {"shell": "win", "method": "session/list", "args": {"_request": {}}})
+    assert r.status == 200
+    assert r.payload["dsh"]["items"][0]["sessionId"] == "s-1"
+    assert seen["base"] == "http://192.168.50.63:3082"
+    assert seen["method"] == "session/list"
+
+
+def test_dsh_uses_the_peer_port_when_the_shell_has_one(srv: WardenServer, monkeypatch) -> None:
+    from molt import dshrelay as relay_mod
+
+    seen = {}
+
+    def fake_peer(address, port, method, args, *, token, **kwargs):
+        seen.update({"address": address, "port": port, "method": method, "token": token})
+        return {"items": []}
+
+    srv.warden.set_shell("win", address="192.168.50.63", dsh_relay="6191")
+    monkeypatch.setattr(relay_mod, "peer_call", fake_peer)
+    r = srv.dispatch("POST", "/dsh", {"shell": "win", "method": "session/list", "args": {"_request": {}}})
+    assert r.status == 200
+    assert seen["address"] == "192.168.50.63"
+    assert seen["port"] == 6191
+    assert seen["token"], "小口也要 token，否则它就是一个开放的转发口"

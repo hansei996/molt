@@ -107,6 +107,7 @@ class Settings:
     warden_url: str = ""            # http://192.168.1.10:6186
     warden_token: str = ""
     port: int = DEFAULT_PORT        # AstrBot dashboard 端口，用来判断"在不在跑"
+    dsh_relay_port: int = 0         # 有 DSH 的机器上开的代转小口（0 = 不开）
     interval: float = DEFAULT_INTERVAL
     #: 每隔多少秒把当前状态热备一份推给 Warden（0 = 关掉）。
     #: 十分钟：**备份不是交接**，它不进 generations、不占租约、没人会来取，
@@ -2100,6 +2101,33 @@ def _notice_sender(settings):
     return send
 
 
+def _start_dsh_peer(settings: Settings) -> Any:
+    """在有 DSH 的机器上开一个代转小口（只在配置里给了端口和 token 时）。
+
+    为什么必须在本机：DSH 的网关按**对端地址**判回环，从 NAS 直接连 3082
+    会被 401。这一跳挪到本机之后，NAS 只需要会说一种话（`POST /dsh`）。
+    """
+    port = int(getattr(settings, "dsh_relay_port", 0) or 0)
+    token = str(getattr(settings, "warden_token", "") or "")
+    if port <= 0 or not token:
+        return None
+    try:
+        from .. import dshpeer
+
+        peer = dshpeer.serve(token=token, port=port)
+    except Exception as exc:  # 小口起不来不该拦着搬家
+        try:
+            print(f"· 代转小口没起来（{port}）：{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+        return None
+    try:
+        print(f"· 代转小口在听：0.0.0.0:{peer.port}（只转发 session/list、session/events、session/prompt）")
+    except Exception:
+        pass
+    return peer
+
+
 def main(argv: Optional[list] = None) -> int:
     _setup_console()
     parser = argparse.ArgumentParser(
@@ -2143,6 +2171,7 @@ def main(argv: Optional[list] = None) -> int:
         stopper=lambda pid: _send_ctrl_c(pid, timeout=settings.timeout * 2),
         force_killer=_force_kill,
     )
+    _start_dsh_peer(settings)
     return agent.run_forever(once=args.once)
 
 
