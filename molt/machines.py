@@ -89,3 +89,20 @@ def resolve(text: str, shells: Dict[str, Dict]) -> Tuple[str, str]:
         return "", f"「{raw}」能对上 {len(inside)} 台：{'、'.join(inside)} —— 说得再具体一点。"
 
     return "", f"账本里没有「{raw}」这台机器。发 `/molt machine` 看一遍（带编号）。"
+
+
+def power_text(*, alive: bool, wakeable, has_mac: bool) -> str:
+    """这台机器现在该说"已开机"还是"关着 · 可唤醒"。
+
+    2026-11-18 01:11 主人看着列表说：「desktop 是已经开机的状态吧，不需要唤醒」——
+    他说得对。`可唤醒` 是**关着的时候**的属性；一台正在报心跳的机器被标成
+    "可唤醒"，会让人以为它没开。所以这里按"现在开没开"分两句话，而不是
+    把账本里的静态属性直接念出来。
+    """
+    if alive:
+        return "已开机"
+    if wakeable is True:
+        return "关着 · 可唤醒（没登记 MAC）" if not has_mac else "关着 · 可唤醒"
+    if wakeable is False:
+        return "关着 · 叫不醒"
+    return "没在跑（账本没登记能不能叫醒）"

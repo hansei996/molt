@@ -626,8 +626,14 @@ class MoltMover:
                 if name == here:
                     bits.append("鱼在这里")
                 bits.append(alive_of(name))
-                if shells[name].get("wakeable") is True:
-                    bits.append("可唤醒" if shells[name].get("wake_mac") else "可唤醒（没登记 MAC）")
+                alive = "在跑" in alive_of(name)
+                bits.append(
+                    machines.power_text(
+                        alive=alive,
+                        wakeable=shells[name].get("wakeable"),
+                        has_mac=bool(str(shells[name].get("wake_mac") or "").strip()),
+                    )
+                )
                 if shells[name].get("address"):
                     bits.append(f"地址 {shells[name]['address']}")
                 lines.append(f"{index}. " + " · ".join(bits))

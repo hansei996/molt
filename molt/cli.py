@@ -2488,19 +2488,23 @@ def cmd_machine(args: argparse.Namespace) -> int:
             bits = [f"{C.CYA}{shell_id}{C.R}", str(attrs.get("role") or "（没登记）")]
             if shell_id == here:
                 bits.append(f"{C.GRN}鱼在这里{C.R}")
+            alive = age is not None and age <= 25
             if age is None:
                 bits.append(f"{C.YEL}没上报心跳{C.R}")
-            elif age <= 25:
+            elif alive:
                 bits.append(f"{C.GRN}在跑（{age:.0f} 秒前）{C.R}")
             else:
                 bits.append(f"{C.YEL}{age / 60:.0f} 分钟没心跳{C.R}")
             if attrs.get("address"):
                 status_text = dsh_of(attrs)
                 bits.append(f"地址 {attrs['address']}" + (f"（DSH {status_text}）" if status_text else ""))
-            if attrs.get("wakeable") is True:
-                bits.append("可唤醒" + (f"（{attrs['wake_mac']}）" if attrs.get("wake_mac") else "（没登记 MAC）"))
-            elif attrs.get("wakeable") is False:
-                bits.append("叫不醒")
+            bits.append(
+                machines.power_text(
+                    alive=alive,
+                    wakeable=attrs.get("wakeable"),
+                    has_mac=bool(str(attrs.get("wake_mac") or "").strip()),
+                )
+            )
             if shell_id in tickets:
                 bits.append(f"{C.YEL}有一张关机票{C.R}")
             print(f"  {index}. " + " · ".join(bits))
@@ -2738,6 +2742,8 @@ def _run_policy(be, args: argparse.Namespace, action: str) -> int:
             )
         else:
             kv("搬完关旧壳", "不关")
+        if policy.get("release_when_away"):
+            kv("鱼已经在家时", f'也把源壳关掉（{policy.get("power_action")}）')
         if attempts:
             head("最近几次自动尝试")
             for item in attempts[-5:]:
@@ -2771,6 +2777,7 @@ def _run_policy(be, args: argparse.Namespace, action: str) -> int:
         "created_by": args.by or "",
         "power_off_source": bool(getattr(args, "power_off", False)),
         "power_action": str(getattr(args, "power_action", "") or "shutdown"),
+        "release_when_away": bool(getattr(args, "release_when_away", False)),
         "arrival_timeout_seconds": float(getattr(args, "arrival_timeout", 0) or 120.0),
     }
     problems = policy_problems(policy)
@@ -3917,6 +3924,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="shutdown",
         choices=("shutdown", "sleep", "keep"),
         help="关旧壳时用什么动作（默认 shutdown）",
+    )
+    p_set.add_argument(
+        "--release-when-away",
+        action="store_true",
+        help="鱼已经在目标壳上时，也把这台源壳关掉（早上 9 点只关 Windows 用这条）",
     )
     p_set.add_argument(
         "--arrival-timeout",

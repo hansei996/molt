@@ -75,3 +75,12 @@ def test_heartbeat_age_reads_like_a_person_wrote_it() -> None:
     assert "分钟" in machines.alive_text(600)
     assert "小时" in machines.alive_text(7200)
     assert machines.alive_text(None) == "没上报心跳"
+
+
+def test_a_machine_that_is_on_is_not_described_as_wakeable() -> None:
+    # 2026-11-18 01:11 主人：「desktop 是已经开机的状态吧，不需要唤醒」
+    assert machines.power_text(alive=True, wakeable=True, has_mac=True) == "已开机"
+    assert machines.power_text(alive=False, wakeable=True, has_mac=True) == "关着 · 可唤醒"
+    assert "没登记 MAC" in machines.power_text(alive=False, wakeable=True, has_mac=False)
+    assert machines.power_text(alive=False, wakeable=False, has_mac=False) == "关着 · 叫不醒"
+    assert "没在跑" in machines.power_text(alive=False, wakeable=None, has_mac=False)

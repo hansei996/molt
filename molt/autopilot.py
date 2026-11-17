@@ -49,6 +49,7 @@ POLICY_FIELDS = (
     "power_off_source",
     # 关的时候用什么动作（走账本里那张关机票，不新开旁路）。
     "power_action",
+    "release_when_away",
     # 等新壳确认「落地播报已送达」最多等多久。等不到就不关旧壳。
     "arrival_timeout_seconds",
 )
@@ -91,6 +92,10 @@ def normalize_policy(raw: Any) -> Dict[str, Any]:
         "created_by": str(data.get("created_by") or "").strip(),
         "power_off_source": bool(data.get("power_off_source", False)),
         "power_action": str(data.get("power_action") or "shutdown").strip().lower(),
+        # 鱼已经在目标壳上了，还要不要把这台源壳关掉。
+        # 2026-11-18 主人点单：早上 9 点，鱼在 Windows 就搬回来再关；
+        # 鱼已经在 NAS 就只关 Windows —— 后半句靠这个开关。
+        "release_when_away": bool(data.get("release_when_away", False)),
         "arrival_timeout_seconds": _as_float(
             data.get("arrival_timeout_seconds"), DEFAULT_ARRIVAL_TIMEOUT
         ),
@@ -136,6 +141,10 @@ def policy_problems(raw: Any) -> List[str]:
         )
     if policy["arrival_timeout_seconds"] < 10.0 or policy["arrival_timeout_seconds"] > 1800.0:
         problems.append("arrival_timeout_seconds 要在 10–1800 之间（秒）")
+    if policy["release_when_away"] and not policy["power_off_source"]:
+        problems.append(
+            "release_when_away 需要 power_off_source 同时为真 —— 否则它只是空口说关"
+        )
     if policy["power_off_source"] and policy["power_action"] == "keep":
         problems.append("power_off_source 为真时 power_action 不能是 keep —— 那是自相矛盾")
 

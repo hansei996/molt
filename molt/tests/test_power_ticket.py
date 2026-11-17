@@ -137,3 +137,21 @@ def test_old_behaviour_is_still_reachable_but_not_the_default() -> None:
     mod = _agent_module()
     assert mod.power_verdict(requires_permission=False, tickets={}, shell="desktop-a") == "auto"
     assert mod.Settings().power_requires_permission is True
+
+
+def test_the_ledger_machine_can_never_be_shut_down(tmp_path):
+    """NAS（role=nas）永远不能被关机 —— 关掉账本就等于整个 molt 停摆。"""
+    import pytest
+
+    from molt.errors import NeedsHuman
+
+    w = Warden(root=tmp_path)
+    w.set_shell("nas-box", role="nas")
+    w.set_shell("win-box", role="desktop")
+    with pytest.raises(NeedsHuman):
+        w.request_power("nas-box", "shutdown", by="test")
+    with pytest.raises(NeedsHuman):
+        w.request_power("nas-box", "sleep", by="test")
+    assert w.power_view() == {}
+    # 别的机器照旧可以
+    assert w.request_power("win-box", "shutdown", by="test")["action"] == "shutdown"

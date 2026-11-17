@@ -462,3 +462,93 @@ def test_an_unreadable_idle_probe_means_do_not_shut_down(monkeypatch):
     a._maybe_power_off_source(_power_policy(), reason="搬迁完成")
 
     assert tickets == [], "读不到键鼠状态时默认为不关"
+
+
+# ------------------------------------------------------- 鱼在家时只关源壳
+
+
+def _away_status(policy_over: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    policy = {
+        "id": "morning-home",
+        "enabled": True,
+        "source": ME,
+        "target": TARGET,
+        "schedule": "09:00",
+        "window_minutes": 30,
+        "daily_limit": 1,
+        "power_off_source": True,
+        "power_action": "shutdown",
+        "release_when_away": True,
+        "arrival_timeout_seconds": 120.0,
+    }
+    policy.update(policy_over or {})
+    return {
+        "latest_generation": {
+            "generation": 41,
+            "pushed_by": ME,
+            "target_shell": TARGET,
+            "consumed_by": TARGET,
+        },
+        "lease": {"holder": None, "state": "no-lease"},
+        "policy": policy,
+        "attempts": [],
+        "power": {},
+        "heartbeats": {ME: {"age_seconds": 3}, TARGET: {"age_seconds": 5}},
+        "shells": {ME: {"role": "desktop"}, TARGET: {"role": "nas"}},
+    }
+
+
+def test_when_the_fish_is_home_it_only_leaves_a_ticket_for_this_machine(monkeypatch) -> None:
+    monkeypatch.setattr(time, "time", lambda: _at(9, 5))
+    a = _agent()
+    a.notice_seconds = 0.0
+    a.journey_update_seconds = 0.0
+    calls: List[tuple] = []
+    a.power_requester = lambda shell, action, generation=0, by="": calls.append(
+        (shell, action, generation, by)
+    ) or True
+    a.idle_probe = lambda: 9000.0
+    st = _away_status()
+    got = a.maybe_auto_migrate({}, st, None)
+    assert got is not None and got.ok is True
+    assert calls == [(ME, "shutdown", 41, "autopilot")]
+
+
+def test_when_the_fish_is_home_but_someone_is_using_the_pc_it_does_not_shut_down(monkeypatch) -> None:
+    monkeypatch.setattr(time, "time", lambda: _at(9, 5))
+    a = _agent()
+    a.notice_seconds = 0.0
+    a.journey_update_seconds = 0.0
+    calls: List[tuple] = []
+    a.power_requester = lambda *args, **kwargs: calls.append(args) or True
+    a.idle_probe = lambda: 30.0
+    got = a.maybe_auto_migrate({}, _away_status(), None)
+    assert calls == []
+    assert got is not None and got.ok is False
+
+
+def test_release_when_away_is_off_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(time, "time", lambda: _at(9, 5))
+    a = _agent()
+    a.notice_seconds = 0.0
+    a.journey_update_seconds = 0.0
+    calls: List[tuple] = []
+    a.power_requester = lambda *args, **kwargs: calls.append(args) or True
+    a.idle_probe = lambda: 9000.0
+    st = _away_status({"release_when_away": False})
+    assert a.maybe_auto_migrate({}, st, None) is None
+    assert calls == []
+
+
+def test_it_does_not_guess_when_the_fish_is_somewhere_else_entirely(monkeypatch) -> None:
+    monkeypatch.setattr(time, "time", lambda: _at(9, 5))
+    a = _agent()
+    a.notice_seconds = 0.0
+    a.journey_update_seconds = 0.0
+    calls: List[tuple] = []
+    a.power_requester = lambda *args, **kwargs: calls.append(args) or True
+    a.idle_probe = lambda: 9000.0
+    st = _away_status()
+    st["latest_generation"]["consumed_by"] = "third-box"
+    assert a.maybe_auto_migrate({}, st, None) is None
+    assert calls == []

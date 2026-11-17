@@ -657,6 +657,16 @@ class Warden:
         action = str(action or "").strip().lower()
         if not shell:
             raise NeedsHuman("缺少 shell：要关的是哪台机器？")
+        # 账本所在的机器永远不能被关 —— 硬不变量，不是策略。
+        # 关掉它之后，另一台壳再也读不到「鱼现在在哪」，只会一直等；
+        # 账本里的关机票也再没人执行。一句话：关账本 = molt 停摆。
+        _attrs = (self.shells_view().get(shell) or {})
+        if str(_attrs.get("role") or "") == "nas" and action in ("shutdown", "sleep"):
+            raise NeedsHuman(
+                f"{shell} 的 role 是 nas —— 账本所在的那台机器不能关。"
+                "关掉它之后，别的壳再也读不到鱼在哪，整条链会停在「谁也不知道」上。"
+            )
+
         if action not in POWER_ACTIONS:
             raise NeedsHuman(f"power 只认 {'/'.join(POWER_ACTIONS)}，收到 {action!r}")
         current = self.power_view()

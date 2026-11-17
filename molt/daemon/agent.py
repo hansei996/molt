@@ -688,14 +688,17 @@ class Agent:
         if state.get("auto_migrate_running"):
             return None
         gen = status.get("latest_generation") or {}
-        if str(gen.get("consumed_by") or "") != self.settings.shell:
-            return None
+        policy = status.get("policy") or {}
+        attempts = status.get("attempts") or []
         lease = status.get("lease") or {}
         if (lease or {}).get("holder"):
             return None
 
-        policy = status.get("policy") or {}
-        attempts = status.get("attempts") or []
+        here = str(gen.get("consumed_by") or "")
+        if here != self.settings.shell:
+            # 鱼不在这台机器上。2026-11-18 主人点单：
+            # 「鱼在 NAS 上，就让 Windows 关机就行」—— 那是这条分支。
+            return self._maybe_release_when_away(state, policy, attempts, gen)
         ok, why = autopilot.due(
             policy, now=time.time(), shell=self.settings.shell, attempts=attempts
         )
@@ -779,6 +782,92 @@ class Agent:
             self._maybe_power_off_source(policy, reason=reason)
 
         return StepResult("auto_migrate", result == "ok", reason)
+
+    def _maybe_release_when_away(self, state: dict, policy: dict, attempts: list,
+                                 gen: dict):
+        """鱼已经在对面了 —— 还要不要把这台关掉。
+
+        为什么需要它：`morning-home` 原本只在「鱼在我这儿」时才有事可做。
+        可最常见的那天恰恰是「鱼昨晚就回 NAS 了，Windows 开着没人用」——
+        那天它应该做的事只剩一件：**把自己关掉**。
+
+        四条边界，一条都不省：
+        1. 策略明确说了 `release_when_away`（默认关，方向不对称）
+        2. 现在真的到点了（`autopilot.due()`，含每日次数与冷却）
+        3. 这个人最近没在动键鼠（E3 的 300 秒闸，读不到也不关）
+        4. 账本里没有租约在飞
+
+        它不直接关，只放一张**会过期**的票 —— 真正的动作在 `run_once` 的
+        leave 分支里，那里还会再看一次票与执行权限。
+        """
+        if not policy.get("release_when_away"):
+            return None
+        target = str(policy.get("target") or "").strip()
+        if not target or target == self.settings.shell:
+            return None
+        # 鱼既不在我这儿、也不在策略目标上 —— 那是第三种状态（在飞的路上，
+        # 或者有人手动搬去了别处）。不动，也不猜。
+        if str(gen.get("consumed_by") or "") != target:
+            return None
+
+        ok, why = autopilot.due(
+            policy, now=time.time(), shell=self.settings.shell, attempts=attempts
+        )
+        if not ok:
+            return None
+
+        gen_number = int(gen.get("generation") or 0)
+        action = str(policy.get("power_action") or "shutdown")
+        idle = self._idle_seconds()
+        # 这个闸挂在 Agent 上（和 `_maybe_power_off_source` 同一处），不在 settings 上。
+        floor = float(getattr(self, "power_min_idle_seconds", POWER_MIN_IDLE_SECONDS) or 0.0)
+        if idle is not None and idle < floor:
+            self._record_attempt(
+                "skipped",
+                reason=f"鱼已经在 {target} 上；但这台机器 {int(idle)} 秒前还有人动过键鼠",
+                policy_id=str(policy.get("id") or ""),
+            )
+            self.log(f"· 鱼已经在 {target} 上；{int(idle)} 秒前还有人动键鼠 —— 这次不关")
+            return StepResult("auto-release", False, "有人在用这台机器")
+        if idle is None:
+            self._record_attempt(
+                "skipped",
+                reason=f"鱼已经在 {target} 上；但读不到这台机器的键鼠状态",
+                policy_id=str(policy.get("id") or ""),
+            )
+            self.log("· 读不到键鼠状态 —— 宁可多烧一晚电，也不关一台可能正在被用的机器")
+            return StepResult("auto-release", False, "读不到键鼠状态")
+
+        requester = self.power_requester
+        if requester is None:
+            self.log("! 没有关机票的投递通道 —— 这一轮不关")
+            return StepResult("auto-release", False, "没有关机票通道")
+
+        self._send_notice(
+            f"鱼已经在 **{target}** 上了。我按约定把 **{self.settings.shell}** 关掉。\n"
+            "不想关就回 `/molt keep` —— 这张票会过期，不会在几天后突然生效。"
+        )
+        try:
+            got = requester(
+                self.settings.shell, action, gen_number, by="autopilot"
+            )
+        except TypeError:
+            got = requester(self.settings.shell, action, gen_number)
+        ok_post = bool(got)
+        self._record_attempt(
+            "ok" if ok_post else "failed",
+            reason=(
+                f"鱼已经在 {target} 上；给 {self.settings.shell} 留了一张 {action} 票"
+                if ok_post
+                else f"鱼已经在 {target} 上；但关机票没送进账本"
+            ),
+            policy_id=str(policy.get("id") or ""),
+        )
+        self.log(
+            f"  {'✓' if ok_post else '✗'} 鱼已经在 {target} 上，"
+            f"{'放了一张关机票' if ok_post else '关机票没送出去'}"
+        )
+        return StepResult("auto-release", ok_post, why)
 
     def _maybe_power_off_source(self, policy: dict, *, reason: str) -> None:
         """搬完之后才轮到"关旧壳" —— 顺序写死在这里。
