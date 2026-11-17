@@ -44,6 +44,24 @@ from molt import dshrelay  # noqa: E402  （只借它的 summarize_events，避�
 MARK = "【molt steer 演练】"
 
 
+def _force_utf8() -> None:
+    """把这个进程的输出钉成 UTF-8。
+
+    Windows CI（GitHub Actions）控制台的默认代码页是 cp1252，`--help` 里那几个
+    中文字符会直接抛 `UnicodeEncodeError: 'charmap' codec can't encode` ——
+    2026-11-18 的 CI 就是这么红的。explorer/计划任务里也可能碰到别的代码页，
+    所以不依赖"当前控制台恰好支持中文"。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+_force_utf8()
+
+
 def _run(argv: List[str], *, timeout: float = 60.0) -> Dict[str, Any]:
     """跑一条 `molt dsh ... --json`，把 stdout 当 JSON 读。
 
