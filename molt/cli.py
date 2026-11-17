@@ -38,7 +38,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import __version__, initcfg, landcfg, pluginsync
+from . import __version__, initcfg, landcfg, machines, pluginsync
 from .backend import LocalBackend, RemoteBackend, open_backend
 from .language import move_count, move_count_after, snapshot_tag
 from .epoch import DEFAULT_LEASE_TTL_SECONDS
@@ -2482,7 +2482,8 @@ def cmd_machine(args: argparse.Namespace) -> int:
             dim("  先让守护进程声明自己：molt declare --shell <壳名> --role nas")
             return 0
         head("账本里的机器")
-        for shell_id, attrs in sorted(shells.items()):
+        for index, shell_id in enumerate(machines.ordered_shells(shells), 1):
+            attrs = shells.get(shell_id) or {}
             age = age_of(shell_id)
             bits = [f"{C.CYA}{shell_id}{C.R}", str(attrs.get("role") or "（没登记）")]
             if shell_id == here:
@@ -2502,18 +2503,19 @@ def cmd_machine(args: argparse.Namespace) -> int:
                 bits.append("叫不醒")
             if shell_id in tickets:
                 bits.append(f"{C.YEL}有一张关机票{C.R}")
-            print("  " + " · ".join(bits))
+            print(f"  {index}. " + " · ".join(bits))
         if here:
             print()
             kv("鱼现在在", here)
+        dim("  叫醒一台：molt machine on <序号或名字>　关掉：molt machine off <序号或名字>")
         return 0
 
     if not shell:
-        bad("要指明哪台机器：molt machine on <壳名> / molt machine off <壳名>")
+        bad("要指明哪台机器：molt machine on <序号或名字> / molt machine off <序号或名字>")
         return 2
-    if shell not in shells:
-        bad(f"账本里没有这台壳：{shell}")
-        dim("  先 molt shells 看一遍（壳名和 target_shell 是同一个东西）")
+    shell, problem = machines.resolve(shell, shells)
+    if problem:
+        bad(problem)
         return 4
 
     attrs = shells.get(shell) or {}

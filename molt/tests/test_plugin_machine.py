@@ -140,7 +140,47 @@ def test_machine_off_leaves_an_expiring_ticket_for_another_machine(plugin_dir: P
 
 
 def test_machine_is_one_of_the_recognised_verbs() -> None:
-    assert cmd.normalize_args("machine on win-box") == "machine"
+    assert cmd.normalize_args("machine") == "machine"
+    assert cmd.normalize_args("machine on win-box") == "machine on win-box"
+
+
+def test_the_list_is_numbered_so_people_only_have_to_type_one_digit(plugin_dir: Path) -> None:
+    rec = Recorder(STATUS)
+    reply = _mover(plugin_dir, rec).machine(rec_payload_cfg(plugin_dir), "machine")
+    assert "1. " in reply.text and "3. " in reply.text
+    assert "/molt on 2" in reply.text
+
+
+def test_a_number_means_the_same_row_the_list_printed(plugin_dir: Path) -> None:
+    # 排序是 nas-box / nomac-box / win-box，所以 3 号是 win-box。
+    rec = Recorder(STATUS)
+    reply = _mover(plugin_dir, rec).machine(rec_payload_cfg(plugin_dir), "machine on 3")
+    assert rec.posts and rec.posts[0][0].endswith("/wake")
+    assert rec.posts[0][1] == {"shell": "win-box"}
+    assert "魔术封包" in reply.text
+
+
+def test_off_by_number_leaves_a_ticket_for_that_machine(plugin_dir: Path) -> None:
+    rec = Recorder(STATUS)
+    reply = _mover(plugin_dir, rec).machine(rec_payload_cfg(plugin_dir), "machine off 3")
+    assert rec.posts and rec.posts[0][0].endswith("/power")
+    assert rec.posts[0][1]["shell"] == "win-box"
+    assert "15 分钟" in reply.text
+
+
+def test_a_bad_number_is_refused_without_touching_anything(plugin_dir: Path) -> None:
+    rec = Recorder(STATUS)
+    reply = _mover(plugin_dir, rec).machine(rec_payload_cfg(plugin_dir), "machine on 9")
+    assert "9" in reply.text
+    assert rec.posts == []
+
+
+def test_the_short_forms_map_onto_the_same_machine_verb() -> None:
+    assert cmd.normalize_args("on 2") == "machine on 2"
+    assert cmd.normalize_args("wake desk") == "machine on desk"
+    assert cmd.normalize_args("off 3") == "machine off 3"
+    # 不带参数的 off 仍然是「我刚离开的那台关不关」那张票
+    assert cmd.normalize_args("off") == ""
 
 
 def rec_payload_cfg(plugin_dir: Path):

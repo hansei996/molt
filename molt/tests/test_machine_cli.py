@@ -165,3 +165,31 @@ def test_machine_off_leaves_a_ticket_for_someone_else(monkeypatch: pytest.Monkey
     _fake(monkeypatch, be)
     assert cli.cmd_machine(_args(Path("."), "off", "win-box")) == 0
     assert be.tickets == [{"shell": "win-box", "action": "shutdown"}]
+
+
+def _plain(text: str) -> str:
+    """去掉 ANSI 颜色再断言 —— 否则「1. nas-box」会变成「1. \\x1b[36mnas-box」。"""
+    import re
+
+    return re.sub("\x1b\\[[0-9;]*m", "", text)
+
+
+def test_the_list_is_numbered(root: Path, capsys) -> None:
+    assert cli.cmd_machine(_args(root, "list")) == 0
+    out = _plain(capsys.readouterr().out)
+    assert "1. nas-box" in out or "1. " in out
+    assert "2. " in out
+
+
+def test_a_number_out_of_range_is_refused(root: Path, capsys) -> None:
+    rc = cli.cmd_machine(_args(root, "on", "9"))
+    assert rc == 4
+    assert "9" in _plain(capsys.readouterr().out)
+
+
+def test_a_number_wakes_the_row_the_list_printed(root: Path, capsys) -> None:
+    # 2 号是 win-box（有 MAC），所以 on 2 应该真的走到 wake 分支
+    rc = cli.cmd_machine(_args(root, "on", "2"))
+    assert rc == 0
+    out = _plain(capsys.readouterr().out)
+    assert "win-box" in out

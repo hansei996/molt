@@ -9,6 +9,9 @@
 
 
 ## [1.3.1]
+- **少打点字：`/molt on 2` / `/molt off 2`**。壳名是账本主键，不是给人敲的东西；
+  现在 `molt machine` / `/molt machine` 会打编号，指人可以说数字、前缀或名字片段，
+  **有歧义就不猜**（报出候选让人选）。新增 `molt/machines.py`，CLI 与插件共用一份解析。
 - **它知道自己刚搬过家（E5）**：落位后写 `awareness_state.json`，接下来 3 次请求
   在 `on_llm_request` 里追加一段环境事实（不写记忆、不进 `memories`，说三次就停）。
   真机验过：问「你现在在哪台机器上」它答得出「现在在 desktop-h2kgiao，之前那台是

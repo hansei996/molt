@@ -122,6 +122,7 @@ MOVE_SOURCES: Dict[str, str] = {
 }
 
 
+from molt import machines  # noqa: E402  （编号/前缀解析也放在包里，只有一份）
 from molt.schedule import (  # noqa: E402  （定时规则只有一份，在 molt/schedule.py）
     SCHEDULE_DEFAULT_WINDOW_MINUTES,
     _parse_hhmm,
@@ -214,7 +215,8 @@ def normalize_args(raw: str) -> str:
     if not token:
         return ""
     # 允许 `/molt 回家 吧` 这种，但只取第一个词判意图，剩下的忽略。
-    first = token.split()[0]
+    words = token.split()
+    first = words[0]
     if first in GO_WORDS:
         return "go"
     if first in CONFIRM_WORDS:
@@ -232,7 +234,13 @@ def normalize_args(raw: str) -> str:
     if first in STOP_AUTO_WORDS:
         return "stop-auto"
     if first in MACHINE_WORDS:
-        return "machine"
+        return token if len(words) > 1 else "machine"
+    # 短写法：带参数时 /molt on 2 / /molt off 2 直接是「那台机器」的动作；
+    # 不带参数的 /molt off 仍然是「我刚离开的那台关不关」那张票。
+    if first in ("on", "wake") and len(words) > 1:
+        return "machine on " + " ".join(words[1:])
+    if first == "off" and len(words) > 1:
+        return "machine off " + " ".join(words[1:])
     return ""
 
 
@@ -565,8 +573,8 @@ class MoltMover:
             return self.request_power(cfg, POWER_WORDS[want])
         if want == "stop-auto":
             return self.stop_auto()
-        if want == "machine":
-            return self.machine(cfg, text)
+        if want == "machine" or want.startswith("machine "):
+            return self.machine(cfg, want)
         return Reply(self._help_text(cfg))
 
     def stop_auto(self) -> Reply:
@@ -613,7 +621,7 @@ class MoltMover:
             if not shells:
                 return Reply("账本里还没有任何机器。先让守护进程声明自己（molt declare）。")
             lines = ["账本里的机器："]
-            for name in sorted(shells):
+            for index, name in enumerate(machines.ordered_shells(shells), 1):
                 bits = [name, str(shells[name].get("role") or "（没登记）")]
                 if name == here:
                     bits.append("鱼在这里")
@@ -622,15 +630,16 @@ class MoltMover:
                     bits.append("可唤醒" if shells[name].get("wake_mac") else "可唤醒（没登记 MAC）")
                 if shells[name].get("address"):
                     bits.append(f"地址 {shells[name]['address']}")
-                lines.append("· " + " · ".join(bits))
+                lines.append(f"{index}. " + " · ".join(bits))
             lines.append("")
-            lines.append("叫醒：`/molt machine on <名字>`　关掉：`/molt machine off <名字>`")
+            lines.append("叫醒：`/molt on 2`　关掉：`/molt off 2`（也可以写名字）")
             return Reply("\n".join(lines))
 
         if not shell:
-            return Reply("要指明哪台机器：`/molt machine on <名字>` 或 `/molt machine off <名字>`。")
-        if shell not in shells:
-            return Reply(f"账本里没有「{shell}」这台机器。发 `/molt machine` 看一遍。")
+            return Reply("要指明哪台机器：`/molt on 2` 或 `/molt off 2`（先发 `/molt machine` 看编号）。")
+        shell, problem = machines.resolve(shell, shells)
+        if problem:
+            return Reply(problem)
 
         if action == "on":
             mac = str(shells[shell].get("wake_mac") or "").strip()
