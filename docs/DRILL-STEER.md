@@ -6,7 +6,36 @@
 
 ---
 
-## 0. 前置条件（两件，都可当场确认）
+## 0. 先站对地方（三条，30 秒）
+
+**① 在哪个目录跑？** 我这边是：
+
+```
+cd C:\Users\13553\Downloads\DSH_workspace\molt
+```
+
+不在这个目录跑会报 `can't open file 'tools/drill-steer.py'`。
+
+**② 用哪个 python？** 随便一个 3.10+ 都行；我这台机器上这条最稳：
+
+```
+py tools/drill-steer.py --plan ...
+```
+
+（`py` 是 Windows 的启动器；如果报 `不是内部或外部命令`，就写全路径
+`C:\Users\13553\AppData\Local\Programs\Python\Python313\python.exe`。）
+
+**③ token 在哪？** 在 `tools/molt-agent.json` 的 `warden_token` 字段里：
+
+```powershell
+(Get-Content tools\molt-agent.json -Raw | ConvertFrom-Json).warden_token
+```
+
+> 这是**密钥**：只在本机用，别贴到群里/截图里。下文都用 `<token>` 代替。
+
+---
+
+## 0.5 前置条件（两件，都可当场确认）
 
 1. **鱼在哪台机器上，那台机器上 DSH 活着**
    ```bash
@@ -21,6 +50,26 @@
    期望 `401`（说明服务在，只是要 token）；`000` 说明账本没起。
 
 ---
+
+## 0.9 照抄块（两条命令，按你手边的终端选一条）
+
+**A. Git Bash / MSYS 终端**
+
+```bash
+cd /c/Users/13553/Downloads/DSH_workspace/molt && py tools/drill-steer.py --plan --warden-url http://192.168.50.50:6186 --warden-token "<token>"
+```
+
+**B. PowerShell**
+
+```powershell
+cd C:\Users\13553\Downloads\DSH_workspace\molt
+py tools/drill-steer.py --plan --warden-url http://192.168.50.50:6186 --warden-token "<token>"
+```
+
+（两个终端的路径写法不一样：Git Bash 用 `/c/...`，PowerShell 用 `C:\...`。这是最容易copy错的一处。）
+
+跑完应该看到 §2 那段输出（含 `（空转，不会发出任何东西）`），**退出码 0**、耗时约 1–2 秒。
+如果报 `usage:` 或 `请求体不是合法 JSON`，说明参数被拆开了 —— 整行一起复制，别手动换行。
 
 ## 1. 先看（只看，不发任何东西）
 
@@ -67,7 +116,15 @@ python tools/drill-steer.py --plan --warden-url http://192.168.50.50:6186 --ward
 
 ---
 
-## 3. 真跑一次（默认只在**空着的**会话上）
+## 3. 真跑一次（**当前阶段不执行**，只留命令形状）
+
+> 主人 2026-11-18 07:30 的指令：这一轮只走 `--plan`，不再真打断、也不再往真实会话里塞消息。
+> 所以下面这段**是留档**，不是要你现在跑。真跑必须等主人点名。
+
+```bash
+python tools/drill-steer.py --warden-url http://192.168.50.50:6186 --warden-token <token>
+```
+
 
 ```bash
 python tools/drill-steer.py --warden-url http://192.168.50.50:6186 --warden-token <token>
@@ -95,7 +152,7 @@ python tools/drill-steer.py --warden-url http://192.168.50.50:6186 --warden-toke
 
 ---
 
-## 4. 真验"打断正在跑的回合"（需要你本人）
+## 4. 验"打断正在跑的回合"（**需要主人本人，当前不做**）
 
 **这一步会打断那个会话正在做的事**，所以只能人来按：
 

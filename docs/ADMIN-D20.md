@@ -59,6 +59,17 @@ Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in 3082,6191 }
 
 > **这一页需要管理员权限的只有第 3 节（建规则）和第 5 节（删规则）**；第 0、-1、4 节的命令都不需要。
 
+### 还差的三件小事（先看，免得白跑）
+
+- **这页只改 Windows 防火墙**，不动 DSH 配置、不动 AstrBot、不重启任何东西。回滚就是删规则。
+- **命令请整行复制**。从 QQ 里复制多行命令时容易在换行处断开，症状是 `usage:` 或
+  `不是内部或外部命令`——那就重新整行复制一次。
+- **`000` 是什么意思**：`curl` 连不上时 `%{http_code}` 就是 `000`。
+  所以"从 401 变 000"= 端口被挡住/不可达，这是我们要的结果。
+- 如果 `ssh` 命令不存在（老系统没装 OpenSSH 客户端），先跑 `where.exe ssh`：
+  有路径就说明能用；没有的话告诉我，这页得换一条路（不在这一页范围内）。
+- **NAS 的 root 密码忘了**：这页不覆盖重置流程，跟我说一声，我给一条单独的路子。
+
 ---
 
 ## 0. 先看清楚现在是什么状态（全部只读）
@@ -153,6 +164,14 @@ New-NetFirewallRule -DisplayName "molt: block DSH 3082 from LAN" -Direction Inbo
 
 成功的样子：打印一张表，`DisplayName` = `molt: block DSH 3082 from LAN`、`Enabled` = `True`、`Action` = `Block`。
 失败常见原因：`Access is denied` / `需要提升权限` → 第 2 节没做对。
+
+**建完立刻确认规则真的在**（同窗口，一条）：
+
+```powershell
+Get-NetFirewallRule -DisplayName "molt: *" | Select-Object DisplayName, Enabled, Action, Direction
+```
+
+期望看到一行 `molt: block DSH 3082 from LAN  True  Block  Inbound`。看不到 = 规则没落地，别去做第 4 节。
 
 **如果你更想让 NAS 仍能直连（方案 B）：**
 
