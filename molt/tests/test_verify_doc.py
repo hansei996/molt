@@ -70,3 +70,17 @@ def test_every_live_row_says_what_was_seen() -> None:
             cells = [cell.strip() for cell in line.strip("|").split("|")]
             assert len(cells) >= 3, f"真机行太短：{line}"
             assert any(len(cell) > 8 for cell in cells[1:]), f"这一行没写结果：{line}"
+
+def test_the_baseline_line_carries_a_number_and_a_date() -> None:
+    """基线那一行必须能被读成人话：数量 + 耗时 + 日期。
+
+    为什么值得一条测试：这一行的作用是让后来的人知道"上次跑是什么时候、多少条"。
+    少了日期，两年前的 `1319 passed` 与今天的看起来一模一样；少了耗时，
+    就看不出测试是不是从 90 秒长到了 155 秒。
+    """
+    text = VERIFY.read_text(encoding="utf-8")
+    match = re.search(r"\*\*最近一次全量回归\*\*：(.+)", text)
+    assert match, "VERIFY.md 里应该有一行「**最近一次全量回归**：…」"
+    line = match.group(1)
+    assert re.search(r"\d+ passed in [\d.]+s", line), f"这一行没写数量与耗时：{line}"
+    assert re.search(r"20\d\d-\d\d-\d\d", line), f"这一行没写日期：{line}"
