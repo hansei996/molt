@@ -22,14 +22,19 @@ cd C:\Users\13553\Downloads\DSH_workspace\molt
 py tools/drill-steer.py --plan ...
 ```
 
+> `...` 是占位，别原样复制 —— 完整可跑的那一行在下面 §0.9。
+
 （`py` 是 Windows 的启动器；如果报 `不是内部或外部命令`，就写全路径
 `C:\Users\13553\AppData\Local\Programs\Python\Python313\python.exe`。）
 
 **③ token 在哪？** 在 `tools/molt-agent.json` 的 `warden_token` 字段里：
 
 ```powershell
-(Get-Content tools\molt-agent.json -Raw | ConvertFrom-Json).warden_token
+(Get-Content tools\molt-agent.json -Raw -Encoding UTF8 | ConvertFrom-Json).warden_token
 ```
+
+> `-Encoding UTF8` **不能省**。这个文件是 UTF-8、里面还有中文注释；PowerShell 5.1 默认按 ANSI 读，
+> 会把 JSON 读坏，报 `传入的对象无效，应为“:”或“}”`（2026-11-18 实测踩过）。
 
 > 这是**密钥**：只在本机用，别贴到群里/截图里。下文都用 `<token>` 代替。
 

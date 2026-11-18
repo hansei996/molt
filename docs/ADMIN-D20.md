@@ -66,6 +66,13 @@ Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in 3082,6191 }
   `不是内部或外部命令`——那就重新整行复制一次。
 - **`000` 是什么意思**：`curl` 连不上时 `%{http_code}` 就是 `000`。
   所以"从 401 变 000"= 端口被挡住/不可达，这是我们要的结果。
+- **先确认 6191 还在听**（它跟着 `molt-agent` 走，agent 死了它就不在）：
+  2026-11-18 我做审计时就遇到 agent 已死、`Get-NetTCPConnection` 看不到 6191、
+  于是这一页第 -1 节那条 `dsh sessions` 直接**超时 32 秒**。真遇到就先拉起来：
+  ```powershell
+  Start-Process wscript.exe -ArgumentList "\"$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\molt-agent.vbs\""
+  ```
+  等 3 秒再跑 `curl http://127.0.0.1:6191/health`，应回 `200`。
 - 如果 `ssh` 命令不存在（老系统没装 OpenSSH 客户端），先跑 `where.exe ssh`：
   有路径就说明能用；没有的话告诉我，这页得换一条路（不在这一页范围内）。
 - **NAS 的 root 密码忘了**：这页不覆盖重置流程，跟我说一声，我给一条单独的路子。
@@ -101,16 +108,20 @@ curl -s -m 5 -o /dev/null -w "6191/dsh(无token): %{http_code}\n" -X POST http:/
 ### 0.2 在【Windows】上跑（注意：必须写 `curl.exe`）
 
 ```powershell
-curl.exe -s -m 5 -o NUL -w "127.0.0.1:3082 → %{http_code}`n" -X POST http://127.0.0.1:3082/api/session/list -d "{}"
-curl.exe -s -m 5 -o NUL -w "192.168.50.63:3082 → %{http_code}`n" -X POST http://192.168.50.63:3082/api/session/list -d "{}"
+curl.exe -s -m 5 -o NUL -w "127.0.0.1:3082 → %{http_code}`n" -X POST http://127.0.0.1:3082/api/session/list -H "Content-Type: application/json" -d '{\"type\":\"client-request\",\"rpcId\":\"probe\"}'
+curl.exe -s -m 5 -o NUL -w "192.168.50.63:3082 → %{http_code}`n" -X POST http://192.168.50.63:3082/api/session/list -H "Content-Type: application/json" -d '{\"type\":\"client-request\",\"rpcId\":\"probe\"}'
 ```
 
-**基线（我实测）**：
+**基线（2026-11-18 复核后，别拿它当"200 才算对"）**：
 
 ```
-127.0.0.1:3082      → 200   ← 本机回环：不需要登录
+127.0.0.1:3082      → 400   ← 已经进到网关（这个探针请求本身不完整，所以 400）
 192.168.50.63:3082  → 401   ← 同一台机器，走局域网地址：要登录
 ```
+
+> **判据是"局域网 401、本机不是 401"**，不是"本机 200"。
+> 我上一版写"本机 200"是错的：那是 11-15 的旧观察，现在不带 `Content-Type` 会回 **415**，
+> 带上之后也是 **400**（探针的 body 不完整）。两种都说明"已经进到网关了"。
 
 > ⚠️ **两个坑，先看这里**
 >
@@ -197,15 +208,15 @@ New-NetFirewallRule -DisplayName "molt: block peer 6191 from others" -Direction 
 | # | 在哪 | 命令 | 期望 |
 |---|---|---|---|
 | 1 | **【NAS】** | `curl -s -m 4 -o /dev/null -w "%{http_code}\n" -X POST http://192.168.50.63:3082/api/session/list -d '{}'` | **`000`**（超时/拒绝）—— 关键：**从 401 变成 000** 才算挡上了 |
-| 2 | **【Windows】** | `curl.exe -s -m 5 -o NUL -w "%{http_code}`n" -X POST http://127.0.0.1:3082/api/session/list -d "{}"` | **`200`**（回环没被误伤） |
+| 2 | **【Windows】** | `curl.exe -s -m 5 -o NUL -w "%{http_code}`n" -X POST http://127.0.0.1:3082/api/session/list -H "Content-Type: application/json" -d '{\"type\":\"client-request\",\"rpcId\":\"probe\"}'` | **不是 `401`**（实测是 `400`；不带 Content-Type 会得到 `415`）—— 只要不是 401 就说明回环没被误伤 |
 | 3 | **【NAS】** | 第 -1 节 ③ 那条完整命令（`cd /mnt/dm-0/astrbot/_molt/pkg && PYTHONPATH=… python3 -m molt.cli … dsh sessions …`） | 正常列出会话（说明 6191 → 回环 3082 这条路还通）；报 `连不上 Warden` 就是代转断了 |
 
 **最容易搞错的两点：**
 
 - 第 1 条**原本就是 401**，别把 401 当成"已经挡住了"。挡住的标志是 **000/超时**。
 - 第 2 条必须用 `127.0.0.1`。用 `192.168.50.63` 测会得到 401，那是正常的。
-
-如果第 2 条变成 `000` → 拦到回环了（少见），**立刻回滚**。
+  另外**判据不是"200"**：带 `Content-Type` 时实测是 `400`，不带是 `415` —— 两者都说明"进到网关了"。
+  只有 `000` 或 `401` 才是不对（000 = 拦到回环了；401 = 你测的是局域网地址）。
 
 ---
 
@@ -225,6 +236,10 @@ Remove-NetFirewallRule -DisplayName "molt: block DSH 3082 from others"
 ```
 
 回滚后回【NAS】重跑第 4 节第 1 条，应又回到 **401**（说明回到原状，而不是更坏）。
+
+> 回滚同样要在**管理员**窗口里跑：`Remove-NetFirewallRule` 连 `-WhatIf` 都会报 `Access is denied`（2026-11-18 实测）。
+> 顺带说一句：上面四条 `New-NetFirewallRule` 我都在本机用 `-WhatIf` 预演过（参数名与取值都合法），
+> 但**一条都没真建** —— 建/删都要管理员，而且这是改环境，得你点头。
 
 ---
 
