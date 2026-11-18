@@ -10,9 +10,9 @@
 | **单测** | 只有 pytest 覆盖，跑的是假对象或临时目录 | "这段逻辑按预期分支" |
 | **未验** | 既没真机也没单测，或者只验了一半 | 什么都不能说 |
 
-**当前计数（数出来的，不是估的）**：真机 **22** 条 = 13 + 4（A–D）+ 2（E–F）+ 2（H–I）+ 1（K）；未验 **2** 条（G、J）。
+**当前计数（数出来的，不是估的）**：真机 **24** 条 = 13 + 4（A–D）+ 2（E–F）+ 2（H–I）+ 1（K）+ 2（L–M）；未验 **2** 条（G、J）。
 
-**最近一次全量回归**：`1315 passed in 154.67s`（2026-11-18 08:12，本地 Windows / Python 3.13）。
+**最近一次全量回归**：`1319 passed in 154.93s`（2026-11-18 08:40，本地 Windows / Python 3.13）。
 这个数字由 `molt/tests/test_verify_doc.py` 钉住 —— 加行不改数字，测试会红。
 
 最后有「怎么复跑」一节，照着敲就能重放。
@@ -68,6 +68,13 @@
 | I | **6191 的鉴权边界** | NAS 上分别打 `/health`（无 token）、`/dsh`（无 token / 错 token / 正确 token） | `/health` **200**；`/dsh` 无 token 与错 token 都 **401 `token 不对`**；正确 token **200**（0.07 秒、184 个会话）→ 鉴权有效，但**端口确实对局域网可达** |
 | K | **同一个端口、两个地址的差别** | 在 **Windows 本机**分别打 `127.0.0.1` 与 `192.168.50.63`：3082 的 `session/list`、6191 的 `/health` 与 `/dsh`（无 token）各一次 | `127.0.0.1:3082` → **200**（回环免登录）；`192.168.50.63:3082` → **401**（走局域网地址就要登录）→ **同一个服务按"目标地址"判，不看来源**；6191：两个地址的 `/health` 都是 **200**，`/dsh` 无 token 都是 **401**（鉴权与地址无关） |
 
+### 真机验过（两条可以重跑的演练，2026-11-18 08:35）
+
+| # | 项 | 怎么造的 | 结果 |
+|---|---|---|---|
+| L | **agent 静默死亡 → 6191 消失 → 跨机路径全断 → 守卫报警 → 拉回来** | `py tools/drill-agent-death.py --yes`（杀本机 agent，不碰电源/防火墙/NAS） | **8/8 通过**：peer `/health` 从 200 → `None`；CLI 断链时 `rc=1` 且报「连不上 Warden…timed out」、无 Traceback；账本出现 `agent-dead`（08:35:05）→ `wscript …molt-agent.vbs` 拉起 → **0.5 秒** `/health` 回 200 → 账本出现 `agent-back`（08:35:06） |
+| M | **D18 那条链的一条命令回归（14 项）** | `py tools/drill-dsh-chain.py --warden-url http://192.168.50.50:6186 --warden-token <token>` | **14/14 通过**：peer `/health`、无 token 401、`session/list` 184、`session/events` 14 条、`session/prompt` 打不存在的会话得 `session/not-found`（说明在白名单里且**一个字没发出去**）、`session/create`/`cancel` 都 400 且带白名单全文、调用方塞 `address` 被忽略、NAS 那一跳同矩阵全通、CLI `dsh sessions` rc=0 |
+
 ### 仍未验
 
 | # | 项 | 为什么现在验不了 | 需要什么条件才能验 |
@@ -108,23 +115,30 @@
 
 ```bash
 # 1) 单元与集成（不需要两台机器）
-python -m pytest -q                       # 当前基线：1309 passed
+python -m pytest -q                       # 当前基线：1315 passed
 
 # 2) 本机 peer（Windows 侧）
 curl -s http://127.0.0.1:6191/health
 
-# 3) 从 NAS 代转（在 NAS 上）
+# 3) 一条命令跑完 D18 那条链（14 项：三个白名单方法 + 拒绝项 + 两跳）
+py tools/drill-dsh-chain.py --warden-url http://192.168.50.50:6186 --warden-token <token>
+
+# 4) 演练「agent 死了会怎样」（先看步骤，再加 --yes 真跑；只动本机 agent）
+py tools/drill-agent-death.py --plan
+py tools/drill-agent-death.py --yes
+
+# 5) 从 NAS 代转（在 NAS 上；与第 3 步等价，只是换了个位置跑）
 export PYTHONPATH=/mnt/dm-0/astrbot/_molt/pkg
 T="$(cat /mnt/dm-0/astrbot/_molt/warden.token)"
 python3 -m molt.cli --no-color dsh sessions --shell desktop-h2kgiao \
   --warden-url http://127.0.0.1:6186 --warden-token "$T"
 
-# 4) 白名单外必须被拒（两跳都该是 400）
+# 6) 白名单外必须被拒（两跳都该是 400）
 python3 -m molt.cli --no-color dsh call --shell desktop-h2kgiao \
   --method session/create --args '{}' \
   --warden-url http://127.0.0.1:6186 --warden-token "$T"
 
-# 5) 缺地址文案（本地模式，随便一个临时账本）
+# 7) 缺地址文案（本地模式，随便一个临时账本）
 python -m molt.cli --no-color declare --shell box --role desktop --root /tmp/molt-box
 python -m molt.cli --no-color dsh sessions --shell box --root /tmp/molt-box   # 期望 rc=2
 ```

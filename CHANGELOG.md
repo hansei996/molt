@@ -36,6 +36,16 @@
 只发给最近一次私聊的那个人、读不到路由就不发、发不出去如实报错，一代只发一次。
 真机 `POST /notify-arrival` 返回 `state=delivered`。
 
+### 两份可以重跑的演练（2026-11-18）
+
+- `tools/drill-dsh-chain.py`：一条命令跑完 D18 那条链的 14 项（三个白名单方法、四种拒绝、
+  两跳、CLI）。其中 `session/prompt` 只打一个**不存在的会话** —— 能进网关就说明在白名单里，
+  同时一个字都不会发出去。
+- `tools/drill-agent-death.py`：演练 agent 静默死亡 → 6191 消失 → 跨机路径全断 → 守卫报警 → 拉回来。
+  默认只打印步骤，必须 `--yes` 才真杀；只动本机 agent，不碰电源/防火墙/NAS。
+- 两次真机结果写进 `docs/VERIFY.md`（L、M 两行，真机计数 22 → 24）；
+  `molt/tests/test_drills.py` 4 条钉住"默认不动手、不许出现电源/防火墙字样"。
+
 ### agent 死掉终于会有人喊（2026-11-17）
 
 Windows 上的 `molt-agent` 一晚上静默死了两次，而它是早上 9 点那条自动搬家策略能不能
